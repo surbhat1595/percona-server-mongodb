@@ -98,26 +98,22 @@ public:
         repl::ReplicationCoordinator::set(
             svcCtx, std::make_unique<repl::ReplicationCoordinatorMock>(svcCtx, replSettings));
         _svcCtx->setStorageEngine(makeEngine());
-        auto client = _svcCtx->getService()->makeClient("opCtx");
-        auto opCtx = client->makeOperationContext();
-        getWiredTigerKVEngine()->notifyStartupComplete(opCtx.get());
+        getWiredTigerKVEngine()->notifyStorageStartupRecoveryComplete();
     }
 
-    ~WiredTigerKVHarnessHelper() {
+    ~WiredTigerKVHarnessHelper() override {
         getWiredTigerKVEngine()->cleanShutdown();
     }
 
-    virtual KVEngine* restartEngine() override {
+    KVEngine* restartEngine() override {
         getEngine()->cleanShutdown();
         _svcCtx->clearStorageEngine();
         _svcCtx->setStorageEngine(makeEngine());
-        auto client = _svcCtx->getService()->makeClient("opCtx");
-        auto opCtx = client->makeOperationContext();
-        getEngine()->notifyStartupComplete(opCtx.get());
+        getEngine()->notifyStorageStartupRecoveryComplete();
         return getEngine();
     }
 
-    virtual KVEngine* getEngine() override {
+    KVEngine* getEngine() override {
         return _svcCtx->getStorageEngine()->getEngine();
     }
 
@@ -130,7 +126,7 @@ private:
         // Use a small journal for testing to account for the unlikely event that the underlying
         // filesystem does not support fast allocation of a file of zeros.
         std::string extraStrings = "log=(file_max=1m,prealloc=false)";
-        auto kv = std::make_unique<WiredTigerKVEngine>(kWiredTigerEngineName,
+        auto kv = std::make_unique<WiredTigerKVEngine>(std::string{kWiredTigerEngineName},
                                                        _dbpath.path(),
                                                        _cs.get(),
                                                        extraStrings,
@@ -560,6 +556,57 @@ TEST_F(WiredTigerKVEngineTest, TestPinOldestTimestampErrors) {
     ASSERT_EQ(initTs, _helper.getWiredTigerKVEngine()->getOldestTimestamp());
 }
 
+/**
+ * Test the various cases for the relationship between oldestTimestamp and stableTimestamp at the
+ * end of startup recovery.
+ */
+TEST_F(WiredTigerKVEngineTest, TestOldestStableTimestampEndOfStartupRecovery) {
+    auto opCtxRaii = _makeOperationContext();
+
+    // oldest and stable are both null.
+    ASSERT_DOES_NOT_THROW(
+        _helper.getWiredTigerKVEngine()->notifyReplStartupRecoveryComplete(opCtxRaii.get()));
+
+    // oldest is null, stable is not null.
+    const Timestamp initTs = Timestamp(10, 0);
+    _helper.getWiredTigerKVEngine()->setStableTimestamp(initTs, true);
+    ASSERT_DOES_NOT_THROW(
+        _helper.getWiredTigerKVEngine()->notifyReplStartupRecoveryComplete(opCtxRaii.get()));
+
+    // oldest and stable equal.
+    _helper.getWiredTigerKVEngine()->setOldestTimestamp(initTs, true);
+    ASSERT_DOES_NOT_THROW(
+        _helper.getWiredTigerKVEngine()->notifyReplStartupRecoveryComplete(opCtxRaii.get()));
+
+    // stable > oldest.
+    Timestamp laterTs = Timestamp(15, 0);
+    _helper.getWiredTigerKVEngine()->setStableTimestamp(laterTs, true);
+    ASSERT_DOES_NOT_THROW(
+        _helper.getWiredTigerKVEngine()->notifyReplStartupRecoveryComplete(opCtxRaii.get()));
+
+    // oldest > stable.
+    laterTs = Timestamp(20, 0);
+    _helper.getWiredTigerKVEngine()->setOldestTimestamp(laterTs, true);
+    ASSERT_THROWS_CODE(
+        _helper.getWiredTigerKVEngine()->notifyReplStartupRecoveryComplete(opCtxRaii.get()),
+        AssertionException,
+        8470600);
+}
+
+/**
+ * Test that oldestTimestamp is allowed to advance past stableTimestamp when we notify that
+ * startup recovery is complete. This case happens when we complete logical initial sync.
+ */
+TEST_F(WiredTigerKVEngineTest, TestOldestStableTimestampEndOfStartupRecoveryStableNull) {
+    auto opCtxRaii = _makeOperationContext();
+
+    // oldest is not null, stable is null.
+    const Timestamp initTs = Timestamp(10, 0);
+    _helper.getWiredTigerKVEngine()->setOldestTimestamp(initTs, true);
+    ASSERT_DOES_NOT_THROW(
+        _helper.getWiredTigerKVEngine()->notifyReplStartupRecoveryComplete(opCtxRaii.get()));
+}
+
 TEST_F(WiredTigerKVEngineTest, WiredTigerDowngrade) {
     // Initializing this value to silence Coverity warning. Doesn't matter what value
     // _startupVersion is set to since shouldDowngrade() & getDowngradeString() only look at
@@ -681,5 +728,114 @@ MONGO_INITIALIZER(RegisterKVHarnessFactory)(InitializerContext*) {
     KVHarnessHelper::registerFactory(makeHelper);
 }
 
+TEST_F(WiredTigerKVEngineTest, TestHandlerCleanShutdown) {
+    auto* engine = _helper.getWiredTigerKVEngine();
+    ASSERT(engine->getWtConnReadyStatus_UNSAFE());
+    engine->cleanShutdown();
+    ASSERT(!engine->getWtConnReadyStatus_UNSAFE());
+}
+
+TEST_F(WiredTigerKVEngineTest, TestHandlerSingleActivityBeforeShutdown) {
+    auto* engine = _helper.getWiredTigerKVEngine();
+    ASSERT(engine->getWtConnReadyStatus_UNSAFE());
+    ASSERT(engine->getSectionActivityPermit_UNSAFE());
+    ASSERT(engine->getWtConnReadyStatus_UNSAFE());
+    ASSERT_EQ(engine->getActiveSections(), 1);
+    engine->releaseSectionActivityPermit_UNSAFE();
+    ASSERT_EQ(engine->getActiveSections(), 0);
+    ASSERT(engine->getWtConnReadyStatus_UNSAFE());
+    engine->cleanShutdown();
+    ASSERT(!engine->getWtConnReadyStatus_UNSAFE());
+}
+
+TEST_F(WiredTigerKVEngineTest, TestHandlerSingleActivityBeforeShutdownRAII) {
+    auto* engine = _helper.getWiredTigerKVEngine();
+    ASSERT(engine->getWtConnReadyStatus_UNSAFE());
+    {
+        auto permit = engine->tryGetSectionActivityPermit();
+        ASSERT(permit);
+        ASSERT(engine->getWtConnReadyStatus_UNSAFE());
+        ASSERT_EQ(engine->getActiveSections(), 1);
+    }
+    ASSERT_EQ(engine->getActiveSections(), 0);
+    ASSERT(engine->getWtConnReadyStatus_UNSAFE());
+    engine->cleanShutdown();
+    ASSERT(!engine->getWtConnReadyStatus_UNSAFE());
+}
+
+TEST_F(WiredTigerKVEngineTest, TestHandlerMultipleActivitiesBeforeShutdownRAII) {
+    auto* engine = _helper.getWiredTigerKVEngine();
+    ASSERT(engine->getWtConnReadyStatus_UNSAFE());
+    {
+        auto permit1 = engine->tryGetSectionActivityPermit();
+        ASSERT(permit1);
+        ASSERT(engine->getWtConnReadyStatus_UNSAFE());
+        ASSERT_EQ(engine->getActiveSections(), 1);
+        {
+            auto permit2 = engine->tryGetSectionActivityPermit();
+            ASSERT(permit2);
+            ASSERT(engine->getWtConnReadyStatus_UNSAFE());
+            ASSERT_EQ(engine->getActiveSections(), 2);
+        }
+        ASSERT_EQ(engine->getActiveSections(), 1);
+    }
+    ASSERT_EQ(engine->getActiveSections(), 0);
+    ASSERT(engine->getWtConnReadyStatus_UNSAFE());
+    engine->cleanShutdown();
+    ASSERT(!engine->getWtConnReadyStatus_UNSAFE());
+}
+
+TEST_F(WiredTigerKVEngineTest, TestHandlerCleanShutdownBeforeActivity) {
+    auto* engine = _helper.getWiredTigerKVEngine();
+    ASSERT(engine->getWtConnReadyStatus_UNSAFE());
+    engine->cleanShutdown();
+    ASSERT(!engine->tryGetSectionActivityPermit());
+    ASSERT_EQ(engine->getActiveSections(), 0);
+    ASSERT(!engine->getWtConnReadyStatus_UNSAFE());
+}
+
+TEST_F(WiredTigerKVEngineTest, TestHandlerCleanShutdownBeforeActivityRAII) {
+    auto* engine = _helper.getWiredTigerKVEngine();
+    ASSERT(engine->getWtConnReadyStatus_UNSAFE());
+    engine->cleanShutdown();
+    ASSERT(!engine->getSectionActivityPermit_UNSAFE());
+    ASSERT_EQ(engine->getActiveSections(), 0);
+    ASSERT(!engine->getWtConnReadyStatus_UNSAFE());
+}
+
+TEST_F(WiredTigerKVEngineTest, TestHandlerCleanShutdownBeforeActivityRelease) {
+    auto* engine = _helper.getWiredTigerKVEngine();
+    ASSERT(engine->getWtConnReadyStatus_UNSAFE());
+    ASSERT(engine->getSectionActivityPermit_UNSAFE());
+    ASSERT(engine->getWtConnReadyStatus_UNSAFE());
+    ASSERT_EQ(engine->getActiveSections(), 1);
+    stdx::thread shudownThread([&]() { engine->cleanShutdown(); });
+    ASSERT_EQ(engine->getActiveSections(), 1);
+    while (engine->getWtConnReadyStatus_UNSAFE()) {
+        stdx::this_thread::yield();
+    }
+    engine->releaseSectionActivityPermit_UNSAFE();
+    shudownThread.join();
+    ASSERT_EQ(engine->getActiveSections(), 0);
+    ASSERT(!engine->getWtConnReadyStatus_UNSAFE());
+}
+
+TEST_F(WiredTigerKVEngineTest, TestHandlerCleanShutdownBeforeActivityReleaseRAII) {
+    auto* engine = _helper.getWiredTigerKVEngine();
+    ASSERT(engine->getWtConnReadyStatus_UNSAFE());
+    {
+        auto permit = engine->tryGetSectionActivityPermit();
+        ASSERT(engine->getWtConnReadyStatus_UNSAFE());
+        ASSERT_EQ(engine->getActiveSections(), 1);
+        stdx::thread shudownThread([&]() { engine->cleanShutdown(); });
+        ASSERT_EQ(engine->getActiveSections(), 1);
+        while (engine->getWtConnReadyStatus_UNSAFE()) {
+            stdx::this_thread::yield();
+        }
+        shudownThread.join();
+    }
+    ASSERT_EQ(engine->getActiveSections(), 0);
+    ASSERT(!engine->getWtConnReadyStatus_UNSAFE());
+}
 }  // namespace
 }  // namespace mongo

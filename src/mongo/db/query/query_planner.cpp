@@ -84,12 +84,13 @@
 #include "mongo/db/query/find_command.h"
 #include "mongo/db/query/index_entry.h"
 #include "mongo/db/query/index_tag.h"
-#include "mongo/db/query/plan_enumerator.h"
-#include "mongo/db/query/plan_enumerator_explain_info.h"
+#include "mongo/db/query/plan_enumerator/plan_enumerator.h"
+#include "mongo/db/query/plan_enumerator/plan_enumerator_explain_info.h"
 #include "mongo/db/query/planner_access.h"
 #include "mongo/db/query/planner_analysis.h"
 #include "mongo/db/query/planner_ixselect.h"
 #include "mongo/db/query/projection.h"
+#include "mongo/db/query/query_knob_configuration.h"
 #include "mongo/db/query/query_knobs_gen.h"
 #include "mongo/db/query/query_planner.h"
 #include "mongo/db/query/query_planner_common.h"
@@ -238,7 +239,7 @@ std::pair<DepsTracker /* filter */, DepsTracker /* other */> computeDeps(
         outputDeps.needWholeDocument = true;
         return {std::move(filterDeps), std::move(outputDeps)};
     }
-    if (params.options & QueryPlannerParams::INCLUDE_SHARD_FILTER) {
+    if (params.mainCollectionInfo.options & QueryPlannerParams::INCLUDE_SHARD_FILTER) {
         for (auto&& field : params.shardKey) {
             outputDeps.fields.emplace(field.fieldNameStringData());
         }
@@ -299,8 +300,9 @@ Status querySatisfiesCsiPlanningHeuristics(size_t nReferencedFields,
         return Status::OK();
     }
 
-    const auto numDocs = plannerParams.collectionStats.noOfRecords;
-    const auto uncompressedDataSizeBytes = plannerParams.collectionStats.approximateDataSizeBytes;
+    const auto numDocs = plannerParams.mainCollectionInfo.stats.noOfRecords;
+    const auto uncompressedDataSizeBytes =
+        plannerParams.mainCollectionInfo.stats.approximateDataSizeBytes;
 
     // Check if the entire uncompressed collection is greater than our min collection size
     // threshold, or if it can fit in memory if the min size is unspecified.
@@ -335,18 +337,24 @@ Status querySatisfiesCsiPlanningHeuristics(size_t nReferencedFields,
 
 Status computeColumnScanIsPossibleStatus(const CanonicalQuery& query,
                                          const QueryPlannerParams& params) {
-    if (params.columnStoreIndexes.empty()) {
-        return {ErrorCodes::InvalidOptions, "No columnstore indexes available"};
+    if (params.mainCollectionInfo.columnIndexes.empty()) {
+        static const auto status =
+            Status{ErrorCodes::InvalidOptions, "No columnstore indexes available"_sd};
+        return status;
     }
     if (!query.isSbeCompatible()) {
-        return {ErrorCodes::NotImplemented,
-                "A columnstore index can only be used with queries in the SBE engine. The given "
-                "query is not eligible for this engine (yet)"};
+        static const auto status = Status{
+            ErrorCodes::NotImplemented,
+            "A columnstore index can only be used with queries in the SBE engine. The given "_sd
+            "query is not eligible for this engine (yet)"_sd};
+        return status;
     }
-    if (query.getForceClassicEngine()) {
-        return {ErrorCodes::InvalidOptions,
-                "A columnstore index can only be used with queries in the SBE engine, but the "
-                "query specified to force the classic engine"};
+    if (query.getExpCtx()->getQueryKnobConfiguration().isForceClassicEngineEnabled()) {
+        static const auto status = Status{
+            ErrorCodes::InvalidOptions,
+            "A columnstore index can only be used with queries in the SBE engine, but the "_sd
+            "query specified to force the classic engine"_sd};
+        return status;
     }
     return Status::OK();
 }
@@ -414,16 +422,18 @@ StatusWith<std::unique_ptr<QuerySolution>> tryToBuildColumnScan(
         return status;
     }
 
-    invariant(params.columnStoreIndexes.size() >= 1);
+    invariant(params.mainCollectionInfo.columnIndexes.size() >= 1);
 
     auto [filterDeps, outputDeps] = computeDeps(params, query);
     auto allFieldsReferenced = set_util::setUnion(filterDeps.fields, outputDeps.fields);
     if (filterDeps.needWholeDocument || outputDeps.needWholeDocument) {
         // TODO SERVER-66284 Would like to enable a plan when hinted, even if we need the whole
         // document. Something like COLUMN_SCAN -> FETCH.
-        return {ErrorCodes::Error{6298501},
-                "cannot use column store index because the query requires seeing the entire "
-                "document"};
+        static const auto status =
+            Status{ErrorCodes::Error{6298501},
+                   "cannot use column store index because the query requires seeing the entire "_sd
+                   "document"_sd};
+        return status;
     } else if (!hintedIndex && expression::containsOverlappingPaths(allFieldsReferenced)) {
         // The query needs a path and a parent or ancestor path. For example, the query needs to
         // access both "a" and "a.b". This is a heuristic, but generally we would not expect this to
@@ -443,20 +453,24 @@ StatusWith<std::unique_ptr<QuerySolution>> tryToBuildColumnScan(
 
     // Ensures that hinted index is eligible for the column scan.
     if (hintedIndex && !checkProjectionCoversQuery(allFieldsReferenced, *hintedIndex)) {
-        return {ErrorCodes::Error{6714002},
-                "the hinted column store index cannot be used because it does not cover the query"};
+        static const auto status = Status{
+            ErrorCodes::Error{6714002},
+            "the hinted column store index cannot be used because it does not cover the query"_sd};
+        return status;
     }
 
     // Check that union of the dependency fields can be successfully projected by at least one
     // column store index.
     auto [numValid, selectedColumnStoreIndex] =
-        getValidColumnIndex(allFieldsReferenced, params.columnStoreIndexes);
+        getValidColumnIndex(allFieldsReferenced, params.mainCollectionInfo.columnIndexes);
 
     // If not columnar index can support the projection, we will not use column scan.
     if (numValid == 0) {
-        return {ErrorCodes::Error{6714001},
-                "cannot use column store index because there exists no column store index for this "
-                "collection that covers the query"};
+        static const auto status = Status{
+            ErrorCodes::Error{6714001},
+            "cannot use column store index because there exists no column store index for this "_sd
+            "collection that covers the query"_sd};
+        return status;
     }
     invariant(selectedColumnStoreIndex);
 
@@ -542,17 +556,19 @@ bool canUseClusteredCollScan(QuerySolutionNode* node,
 StatusWith<std::unique_ptr<QuerySolution>> tryToBuildSearchQuerySolution(
     const QueryPlannerParams& params, const CanonicalQuery& query) {
     if (query.cqPipeline().empty()) {
-        return {ErrorCodes::InvalidOptions,
-                "not building $search node because the query pipeline is empty"};
+        static const auto status =
+            Status{ErrorCodes::InvalidOptions,
+                   "not building $search node because the query pipeline is empty"_sd};
+        return status;
     }
 
     if (query.isSearchQuery()) {
         tassert(7816300,
-                "Pushing down $search into SBE but forceClassicEngine is true.",
-                !query.getForceClassicEngine());
+                "Pushing down $search into SBE but forceClassicEngine is on"_sd,
+                !query.getExpCtx()->getQueryKnobConfiguration().isForceClassicEngineEnabled());
 
         tassert(7816301,
-                "Pushing down $search into SBE but featureFlagSearchInSbe is disabled.",
+                "Pushing down $search into SBE but featureFlagSearchInSbe is disabled."_sd,
                 feature_flags::gFeatureFlagSearchInSbe.isEnabled(
                     serverGlobalParams.featureCompatibility.acquireFCVSnapshot()));
 
@@ -569,7 +585,11 @@ StatusWith<std::unique_ptr<QuerySolution>> tryToBuildSearchQuerySolution(
         return QueryPlannerAnalysis::analyzeDataAccess(query, params, std::move(searchNode));
     }
 
-    return {ErrorCodes::InvalidOptions, "no search stage found at front of pipeline"};
+    {
+        static const auto status =
+            Status{ErrorCodes::InvalidOptions, "no search stage found at front of pipeline"_sd};
+        return status;
+    }
 }
 }  // namespace
 
@@ -651,6 +671,9 @@ string optionString(size_t options) {
                 break;
             case QueryPlannerParams::STRICT_NO_TABLE_SCAN:
                 ss << "STRICT_NO_TABLE_SCAN ";
+                break;
+            case QueryPlannerParams::IGNORE_QUERY_SETTINGS:
+                ss << "IGNORE_QUERY_SETTINGS ";
                 break;
             case QueryPlannerParams::DEFAULT:
                 MONGO_UNREACHABLE;
@@ -833,7 +856,7 @@ std::unique_ptr<QuerySolution> buildWholeIXSoln(
             "Cannot pass both an explicit direction and a traversal preference",
             !(direction.has_value() && params.traversalPreference));
     std::unique_ptr<QuerySolutionNode> solnRoot(
-        QueryPlannerAccess::scanWholeIndex(index, query, params, direction.value_or(1)));
+        QueryPlannerAccess::scanWholeIndex(index, query, direction.value_or(1)));
     return QueryPlannerAnalysis::analyzeDataAccess(query, params, std::move(solnRoot));
 }
 
@@ -1022,8 +1045,8 @@ StatusWith<std::unique_ptr<QuerySolution>> QueryPlanner::planFromCache(
     RelevantFieldIndexMap fields;
     QueryPlannerIXSelect::getFields(query.getPrimaryMatchExpression(), &fields);
     // We will not cache queries with 'hint'.
-    std::vector<IndexEntry> expandedIndexes =
-        QueryPlannerIXSelect::expandIndexes(fields, params.indices, false /* indexHinted */);
+    std::vector<IndexEntry> expandedIndexes = QueryPlannerIXSelect::expandIndexes(
+        fields, params.mainCollectionInfo.indexes, false /* indexHinted */);
 
     // Map from index name to index number.
     std::map<IndexEntry::Identifier, size_t> indexMap;
@@ -1089,12 +1112,12 @@ StatusWith<std::vector<std::unique_ptr<QuerySolution>>> singleSolution(
 // Yet clusteredIdxScans are still allowed as they are not a full collection scan but a bounded
 // collection scan.
 bool noTableScan(const QueryPlannerParams& params) {
-    return (params.options & QueryPlannerParams::NO_TABLE_SCAN);
+    return (params.mainCollectionInfo.options & QueryPlannerParams::NO_TABLE_SCAN);
 }
 
 // Used internally if the planner should also avoid retruning a plan containing a clusteredIDX scan.
 bool noTableAndClusteredIDXScan(const QueryPlannerParams& params) {
-    return (params.options & QueryPlannerParams::STRICT_NO_TABLE_SCAN);
+    return (params.mainCollectionInfo.options & QueryPlannerParams::STRICT_NO_TABLE_SCAN);
 }
 
 bool isClusteredScan(QuerySolutionNode* node) {
@@ -1196,15 +1219,15 @@ StatusWith<std::vector<std::unique_ptr<QuerySolution>>> QueryPlanner::plan(
     LOGV2_DEBUG(20967,
                 5,
                 "Beginning planning",
-                "options"_attr = optionString(params.options),
+                "options"_attr = optionString(params.mainCollectionInfo.options),
                 "query"_attr = redact(query.toString()));
 
-    for (size_t i = 0; i < params.indices.size(); ++i) {
+    for (size_t i = 0; i < params.mainCollectionInfo.indexes.size(); ++i) {
         LOGV2_DEBUG(20968,
                     5,
                     "Index number and details",
                     "indexNumber"_attr = i,
-                    "index"_attr = params.indices[i].toString());
+                    "index"_attr = params.mainCollectionInfo.indexes[i].toString());
     }
 
     const bool isTailable = query.getFindCommandRequest().getTailable();
@@ -1230,6 +1253,13 @@ StatusWith<std::vector<std::unique_ptr<QuerySolution>>> QueryPlanner::plan(
         }
     }
 
+    // geoNear and text queries *require* an index.
+    // Also, if a hint is specified it indicates that we MUST use it.
+    bool mustUseIndexedPlan =
+        QueryPlannerCommon::hasNode(query.getPrimaryMatchExpression(), MatchExpression::GEO_NEAR) ||
+        QueryPlannerCommon::hasNode(query.getPrimaryMatchExpression(), MatchExpression::TEXT) ||
+        hintedIndexBson;
+
     if (hintedIndexBson) {
         // If we have a hint, check if it matches any "special" index before proceeding.
         const auto& hintObj = *hintedIndexBson;
@@ -1238,7 +1268,7 @@ StatusWith<std::vector<std::unique_ptr<QuerySolution>>> QueryPlanner::plan(
         } else if (hintMatchesClusterKey(params.clusteredInfo, hintObj)) {
             return handleClusteredScanHint(query, params, isTailable);
         } else {
-            for (auto&& columnIndex : params.columnStoreIndexes) {
+            for (auto&& columnIndex : params.mainCollectionInfo.columnIndexes) {
                 if (hintMatchesColumnStoreIndex(hintObj, columnIndex)) {
                     // Hint matches - either build the plan or fail.
                     auto statusWithSoln = tryToBuildColumnScan(params, query, columnIndex);
@@ -1259,9 +1289,10 @@ StatusWith<std::vector<std::unique_ptr<QuerySolution>>> QueryPlanner::plan(
     // Will hold a copy of the index entry chosen by the hint.
     boost::optional<IndexEntry> hintedIndexEntry;
     if (!hintedIndexBson) {
-        fullIndexList = params.indices;
+        fullIndexList = params.mainCollectionInfo.indexes;
     } else {
-        fullIndexList = QueryPlannerIXSelect::findIndexesByHint(*hintedIndexBson, params.indices);
+        fullIndexList = QueryPlannerIXSelect::findIndexesByHint(*hintedIndexBson,
+                                                                params.mainCollectionInfo.indexes);
 
         if (fullIndexList.empty()) {
             return Status(ErrorCodes::BadValue,
@@ -1364,8 +1395,12 @@ StatusWith<std::vector<std::unique_ptr<QuerySolution>>> QueryPlanner::plan(
     }
 
     // Figure out how useful each index is to each predicate.
+    QueryPlannerIXSelect::QueryContext queryContext;
+    queryContext.collator = query.getCollator();
+    queryContext.elemMatchContext = QueryPlannerIXSelect::ElemMatchContext{};
+    queryContext.mustUseIndexedPlan = mustUseIndexedPlan;
     QueryPlannerIXSelect::rateIndices(
-        query.getPrimaryMatchExpression(), "", relevantIndices, query.getCollator());
+        query.getPrimaryMatchExpression(), "", relevantIndices, queryContext);
     QueryPlannerIXSelect::stripInvalidAssignments(query.getPrimaryMatchExpression(),
                                                   relevantIndices);
 
@@ -1457,14 +1492,18 @@ StatusWith<std::vector<std::unique_ptr<QuerySolution>>> QueryPlanner::plan(
     // If we have any relevant indices, we try to create indexed plans.
     if (!relevantIndices.empty()) {
         // The enumerator spits out trees tagged with IndexTag(s).
-        PlanEnumeratorParams enumParams;
-        enumParams.intersect = params.options & QueryPlannerParams::INDEX_INTERSECTION;
+        plan_enumerator::PlanEnumeratorParams enumParams;
+        enumParams.intersect =
+            params.mainCollectionInfo.options & QueryPlannerParams::INDEX_INTERSECTION;
         enumParams.root = query.getPrimaryMatchExpression();
         enumParams.indices = &relevantIndices;
         enumParams.enumerateOrChildrenLockstep =
-            params.options & QueryPlannerParams::ENUMERATE_OR_CHILDREN_LOCKSTEP;
+            params.mainCollectionInfo.options & QueryPlannerParams::ENUMERATE_OR_CHILDREN_LOCKSTEP;
+        enumParams.projection = query.getProj();
+        enumParams.sort = &query.getSortPattern();
+        enumParams.shardKey = params.shardKey;
 
-        PlanEnumerator planEnumerator(enumParams);
+        plan_enumerator::PlanEnumerator planEnumerator(enumParams);
         uassertStatusOKWithContext(planEnumerator.init(), "failed to initialize plan enumerator");
 
         unique_ptr<MatchExpression> nextTaggedTree;
@@ -1661,8 +1700,9 @@ StatusWith<std::vector<std::unique_ptr<QuerySolution>>> QueryPlanner::plan(
     // If a projection exists, there may be an index that allows for a covered plan, even if
     // none were considered earlier.
     const auto projection = query.getProj();
-    if (params.options & QueryPlannerParams::GENERATE_COVERED_IXSCANS && out.size() == 0 &&
-        query.getQueryObj().isEmpty() && projection && !projection->requiresDocument()) {
+    if (params.mainCollectionInfo.options & QueryPlannerParams::GENERATE_COVERED_IXSCANS &&
+        out.size() == 0 && query.getQueryObj().isEmpty() && projection &&
+        !projection->requiresDocument()) {
 
         const auto* indicesToConsider = hintedIndexBson ? &relevantIndices : &fullIndexList;
         for (auto&& index : *indicesToConsider) {
@@ -1671,8 +1711,13 @@ StatusWith<std::vector<std::unique_ptr<QuerySolution>>> QueryPlanner::plan(
                 continue;
             }
 
-            QueryPlannerParams paramsForCoveredIxScan;
-            auto soln = buildWholeIXSoln(index, query, paramsForCoveredIxScan);
+            auto soln = buildWholeIXSoln(
+                index,
+                query,
+                // TODO SERVER-87683 Investigate why empty parameters are used instead of 'params'.
+                QueryPlannerParams{
+                    QueryPlannerParams::ArgsForTest{},
+                });
             if (soln && !soln->root()->fetched()) {
                 LOGV2_DEBUG(
                     20983, 5, "Planner: outputting soln that uses index to provide projection");
@@ -1717,29 +1762,25 @@ StatusWith<std::vector<std::unique_ptr<QuerySolution>>> QueryPlanner::plan(
     }
 
     // The caller can explicitly ask for a collscan.
-    bool collscanRequested = (params.options & QueryPlannerParams::INCLUDE_COLLSCAN);
+    bool collscanRequested =
+        (params.mainCollectionInfo.options & QueryPlannerParams::INCLUDE_COLLSCAN);
 
     // No indexed plans?  We must provide a collscan if possible or else we can't run the query.
     bool collScanRequired = 0 == out.size();
     if (collScanRequired && noTableAndClusteredIDXScan(params)) {
         return Status(ErrorCodes::NoQueryExecutionPlans,
-                      "No indexed plans available, and running with 'notablescan' 1");
+                      "No indexed plans available, and running with 'notablescan'");
     }
 
     bool clusteredCollection = params.clusteredInfo.has_value();
 
-    // geoNear and text queries *require* an index.
-    // Also, if a hint is specified it indicates that we MUST use it.
-    bool possibleToCollscan = !QueryPlannerCommon::hasNode(query.getPrimaryMatchExpression(),
-                                                           MatchExpression::GEO_NEAR) &&
-        !QueryPlannerCommon::hasNode(query.getPrimaryMatchExpression(), MatchExpression::TEXT) &&
-        !hintedIndexBson;
-    if (collScanRequired && !possibleToCollscan) {
+
+    if (collScanRequired && mustUseIndexedPlan) {
         return Status(ErrorCodes::NoQueryExecutionPlans, "No query solutions");
     }
 
     bool isClusteredIDXScan = false;
-    if (possibleToCollscan && (collscanRequested || collScanRequired || clusteredCollection)) {
+    if (!mustUseIndexedPlan && (collscanRequested || collScanRequired || clusteredCollection)) {
         boost::optional<int> clusteredScanDirection =
             QueryPlannerCommon::determineClusteredScanDirection(query, params);
         int direction = clusteredScanDirection.value_or(1);
@@ -1789,7 +1830,7 @@ StatusWith<std::vector<std::unique_ptr<QuerySolution>>> QueryPlanner::plan(
 std::unique_ptr<QuerySolution> QueryPlanner::extendWithAggPipeline(
     CanonicalQuery& query,
     std::unique_ptr<QuerySolution>&& solution,
-    const std::map<NamespaceString, SecondaryCollectionInfo>& secondaryCollInfos) {
+    const std::map<NamespaceString, CollectionInfo>& secondaryCollInfos) {
     if (query.cqPipeline().empty()) {
         return nullptr;
     }
@@ -1823,16 +1864,35 @@ std::unique_ptr<QuerySolution> QueryPlanner::extendWithAggPipeline(
                 secondaryCollInfos,
                 query.getExpCtx()->allowDiskUse,
                 query.getCollator());
-            auto eqLookupNode =
-                std::make_unique<EqLookupNode>(std::move(solnForAgg),
-                                               lookupStage->getFromNs(),
-                                               lookupStage->getLocalField()->fullPath(),
-                                               lookupStage->getForeignField()->fullPath(),
-                                               lookupStage->getAsField().fullPath(),
-                                               strategy,
-                                               std::move(idxEntry),
-                                               isLastSource /* shouldProduceBson */);
-            solnForAgg = std::move(eqLookupNode);
+
+            if (!lookupStage->hasUnwindSrc()) {
+                solnForAgg =
+                    std::make_unique<EqLookupNode>(std::move(solnForAgg),
+                                                   lookupStage->getFromNs(),
+                                                   lookupStage->getLocalField()->fullPath(),
+                                                   lookupStage->getForeignField()->fullPath(),
+                                                   lookupStage->getAsField().fullPath(),
+                                                   strategy,
+                                                   std::move(idxEntry),
+                                                   isLastSource /* shouldProduceBson */);
+            } else {
+                const boost::intrusive_ptr<DocumentSourceUnwind>& unwindSrc =
+                    lookupStage->getUnwindSource();
+                solnForAgg =
+                    std::make_unique<EqLookupUnwindNode>(std::move(solnForAgg),
+                                                         // Shared data members.
+                                                         lookupStage->getAsField().fullPath(),
+                                                         // $lookup-specific data members.
+                                                         lookupStage->getFromNs(),
+                                                         lookupStage->getLocalField()->fullPath(),
+                                                         lookupStage->getForeignField()->fullPath(),
+                                                         strategy,
+                                                         std::move(idxEntry),
+                                                         isLastSource /* shouldProduceBson */,
+                                                         // $unwind-specific data members.
+                                                         unwindSrc->preserveNullAndEmptyArrays(),
+                                                         unwindSrc->indexPath());
+            }
             continue;
         }
 
@@ -2050,7 +2110,7 @@ StatusWith<std::unique_ptr<QuerySolution>> QueryPlanner::choosePlanForSubqueries
 
     // Use the cached index assignments to build solnRoot. Takes ownership of '_orExpression'.
     std::unique_ptr<QuerySolutionNode> solnRoot(QueryPlannerAccess::buildIndexedDataAccess(
-        query, std::move(planningResult.orExpression), params.indices, params));
+        query, std::move(planningResult.orExpression), params.mainCollectionInfo.indexes, params));
 
     if (!solnRoot) {
         str::stream ss;
@@ -2090,8 +2150,8 @@ StatusWith<QueryPlanner::SubqueriesPlanningResult> QueryPlanner::planSubqueries(
               "Cannot plan subqueries for an $or with no children");
 
     SubqueriesPlanningResult planningResult{query.getPrimaryMatchExpression()->clone()};
-    for (size_t i = 0; i < params.indices.size(); ++i) {
-        const IndexEntry& ie = params.indices[i];
+    for (size_t i = 0; i < params.mainCollectionInfo.indexes.size(); ++i) {
+        const IndexEntry& ie = params.mainCollectionInfo.indexes[i];
         const auto insertionRes = planningResult.indexMap.insert(std::make_pair(ie.identifier, i));
         // Be sure the key was not already in the map.
         invariant(insertionRes.second);

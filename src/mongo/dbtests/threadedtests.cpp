@@ -100,12 +100,12 @@ class IsAtomicWordAtomic : public ThreadedTest<> {
     typedef typename _AtomicUInt::WordType WordType;
     _AtomicUInt target;
 
-    void subthread(int) {
+    void subthread(int) override {
         for (int i = 0; i < iterations; i++) {
             target.fetchAndAdd(WordType(1));
         }
     }
-    void validate() {
+    void validate() override {
         ASSERT_EQUALS(target.load(), unsigned(nthreads * iterations));
 
         _AtomicUInt u;
@@ -191,7 +191,7 @@ private:
     char pad3[128];
     AtomicWord<int> k;
 
-    virtual void validate() {
+    void validate() override {
         if (once++ == 0) {
             // <= 1.35 we use a different rwmutex impl so worth noting
             std::cout << "Boost version : " << BOOST_VERSION << std::endl;
@@ -212,7 +212,7 @@ private:
         }
     }
     AtomicWord<bool> done;
-    virtual void subthread(int x) {
+    void subthread(int x) override {
         if (x == 1) {
             watch();
             return;
@@ -296,19 +296,20 @@ private:
 
     Hotel _hotel;
 
-    virtual void subthread(int x) {
+    void subthread(int x) override {
         std::string threadName = (str::stream() << "ticketHolder" << x);
         Client::initThread(threadName.c_str(), getGlobalServiceContext()->getService());
         auto opCtx = Client::getCurrent()->makeOperationContext();
+        MockAdmissionContext admCtx;
 
         for (int i = 0; i < checkIns; i++) {
-            AdmissionContext admCtx;
+            boost::optional<ScopedAdmissionPriorityBase> admissionPriority;
             if ((i % 3) == 0) {
                 // One of every three admissions is low priority.
-                admCtx.setPriority(AdmissionContext::Priority::kLow);
+                admissionPriority.emplace(opCtx.get(), admCtx, AdmissionContext::Priority::kLow);
             }
 
-            auto ticket = _tickets->waitForTicket(nullptr, &admCtx);
+            auto ticket = _tickets->waitForTicket(*Interruptible::notInterruptible(), &admCtx);
 
             _hotel.checkIn();
 
@@ -323,7 +324,7 @@ private:
         }
     }
 
-    virtual void validate() {
+    void validate() override {
         // This should always be true, assuming that it takes < 1 sec for the hardware to process a
         // check-out/check-in Time for test is then ~ #threads / _nRooms * 2 seconds
         MONGO_verify(_hotel._maxRooms == _hotel._nRooms);
@@ -337,7 +338,7 @@ class All : public unittest::OldStyleSuiteSpecification {
 public:
     All() : OldStyleSuiteSpecification("threading") {}
 
-    void setupTests() {
+    void setupTests() override {
         // Slack is a test to see how long it takes for another thread to pick up
         // and begin work after another relinquishes the lock.  e.g. a spin lock
         // would have very little slack.

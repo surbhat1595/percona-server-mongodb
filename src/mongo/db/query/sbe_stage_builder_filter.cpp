@@ -151,7 +151,7 @@ struct MatchExpressionVisitorContext {
     };
 
     MatchExpressionVisitorContext(StageBuilderState& state,
-                                  boost::optional<TypedSlot> rootSlot,
+                                  boost::optional<SbSlot> rootSlot,
                                   const MatchExpression* root,
                                   const PlanStageSlots* slots,
                                   bool isFilterOverIxscan)
@@ -160,7 +160,7 @@ struct MatchExpressionVisitorContext {
             7097201, "Expected 'rootSlot' or 'slots' to be defined", rootSlot || slots != nullptr);
 
         // Set up the top-level MatchFrame.
-        emplaceFrame(state, rootSlot ? rootSlot->slotId : boost::optional<sbe::value::SlotId>());
+        emplaceFrame(state, SbExpr{rootSlot});
     }
 
     SbExpr done() {
@@ -204,7 +204,7 @@ struct MatchExpressionVisitorContext {
 
     // The current context must be initialized either with a slot that contains the root
     // document ('rootSlot') or with the set of kField slots ('slots').
-    boost::optional<TypedSlot> rootSlot;
+    boost::optional<SbSlot> rootSlot;
     const PlanStageSlots* slots = nullptr;
     bool isFilterOverIxscan = false;
 };
@@ -221,7 +221,7 @@ enum class LeafTraversalMode {
 };
 
 SbExpr generateTraverseF(SbExpr inputExpr,
-                         boost::optional<TypedSlot> topLevelFieldSlot,
+                         boost::optional<SbSlot> topLevelFieldSlot,
                          const sbe::MatchPath& fp,
                          FieldIndex level,
                          sbe::value::FrameIdGenerator* frameIdGenerator,
@@ -240,10 +240,14 @@ SbExpr generateTraverseF(SbExpr inputExpr,
     // will be false.
     const bool childIsLeafWithEmptyName =
         (level == fp.numParts() - 2u) && fp.isPathComponentEmpty(level + 1);
-    const bool isNumericField =
-        (level < fp.FieldRef::numParts()) && fp.isNumericPathComponentStrict(level);
-    const bool isNumericFieldNext =
-        (level + 1 < fp.FieldRef::numParts()) && fp.isNumericPathComponentStrict(level + 1);
+    int arrayIndex = 0;
+    const bool isNumericField = (level < fp.FieldRef::numParts()) &&
+        fp.isNumericPathComponentStrict(level) &&
+        NumberParser{}(fp.getPart(level), &arrayIndex).isOK();
+    int arrayIndexNext = 0;
+    const bool isNumericFieldNext = (level + 1 < fp.FieldRef::numParts()) &&
+        fp.isNumericPathComponentStrict(level + 1) &&
+        NumberParser{}(fp.getPart(level + 1), &arrayIndexNext).isOK();
     const bool isLeafField = (level == fp.numParts() - 1u) || childIsLeafWithEmptyName;
     const bool needsArrayCheck = (isLeafField && mode == LeafTraversalMode::kArrayAndItsElements);
     const bool needsNothingCheck = !isLeafField && matchesNothing;
@@ -254,7 +258,7 @@ SbExpr generateTraverseF(SbExpr inputExpr,
     auto lambdaParam = SbExpr{SbVar{lambdaFrameId, 0}};
     auto getFieldName = isNumericField ? "getFieldOrElement"_sd : "getField"_sd;
     SbExpr fieldExpr = topLevelFieldSlot
-        ? b.makeVariable(topLevelFieldSlot->slotId)
+        ? SbExpr{*topLevelFieldSlot}
         : b.makeFunction(getFieldName, inputExpr.clone(), b.makeStrConstant(fp.getPart(level)));
 
     if (childIsLeafWithEmptyName) {
@@ -307,11 +311,6 @@ SbExpr generateTraverseF(SbExpr inputExpr,
         fieldExpr = SbVar(*frameId, 0);
     }
 
-    int arrayIndex = 0;
-    if (isNumericField) {
-        auto status = NumberParser{}(fp.getPart(level), &arrayIndex);
-        tassert(7097203, "Cannot parse array index", status.isOK());
-    }
     // traverseF() can return Nothing only when the lambda returns Nothing. All expressions that we
     // generate return Boolean, so there is no need for explicit fillEmpty here.
     auto traverseFExpr = isNumericField
@@ -381,16 +380,16 @@ void generatePredicate(MatchExpressionVisitorContext* context,
     const bool isFieldPathOnRootDoc = context->framesCount() == 1;
     auto* slots = context->slots;
 
-    boost::optional<TypedSlot> topLevelFieldSlot;
+    boost::optional<SbSlot> topLevelFieldSlot;
     if (isFieldPathOnRootDoc && slots) {
         // If we are generating a filter over an index scan, search for a kField slot that
         // corresponds to the full path 'path'.
         if (context->isFilterOverIxscan && !path.empty()) {
             auto name = std::make_pair(PlanStageSlots::kField, path.dottedField());
-            if (auto slot = slots->getIfExists(name); slot) {
+            if (auto slot = slots->getIfExists(name)) {
                 // We found a kField slot that matches. We don't need to perform any traversal;
                 // we can just evaluate the predicate on the slot directly and return.
-                frame.pushExpr(makePredicate(slot->slotId));
+                frame.pushExpr(makePredicate(*slot));
                 return;
             }
         }
@@ -399,14 +398,16 @@ void generatePredicate(MatchExpressionVisitorContext* context,
         // navigation of the full path has been made available via the dedicated slot type; in this
         // case generate a special version of traverseF that doesn't have a runtime counterpart and
         // can only be processed by the block vectorizer.
+
+        // TODO : Remove "&& !matchesNothing" when SERVER-87238 and SERVER-87243 have been resolved.
         if (auto slot = slots->getIfExists(
                 std::make_pair(PlanStageSlots::kFilterCellField, path.dottedField()));
-            slot && mode == LeafTraversalMode::kArrayElementsOnly) {
+            slot && mode == LeafTraversalMode::kArrayElementsOnly && !matchesNothing) {
             SbExprBuilder b(context->state);
             auto lambdaFrameId = context->state.frameIdGenerator->generate();
             auto traverseFExpr = b.makeFunction(
                 "blockTraverseFPlaceholder"_sd,
-                b.makeVariable(slot->slotId),
+                SbExpr{*slot},
                 b.makeLocalLambda(lambdaFrameId, makePredicate(SbExpr{SbVar{lambdaFrameId, 0}})));
             frame.pushExpr(std::move(traverseFExpr));
             return;
@@ -888,8 +889,10 @@ public:
         auto& frame = _context->topFrame();
 
         // The $expr expression is always applied to the current $$ROOT document.
-        auto expr = generateExpression(
-            _context->state, matchExpr->getExpression().get(), _context->rootSlot, _context->slots);
+        auto expr = generateExpression(_context->state,
+                                       matchExpr->getExpression().get(),
+                                       _context->rootSlot,
+                                       *_context->slots);
 
         // Convert the result of the '{$expr: ..}' expression to a boolean value.
         frame.pushExpr(b.makeFillEmptyFalse(b.makeFunction("coerceToBool"_sd, std::move(expr))));
@@ -920,8 +923,7 @@ public:
 
         if (exprIsParameterized || expr->getRegexes().size() == 0) {
             auto makePredicate = [&, hasNull = hasNull](SbExpr inputExpr) {
-                // We have to match nulls and undefined if a 'null' is present in
-                // equalities.
+                // We have to match nulls and missing if a 'null' is present in equalities.
                 auto valueExpr = !hasNull ? std::move(inputExpr)
                                           : b.makeIf(b.generateNullOrMissing(inputExpr.clone()),
                                                      b.makeNullConstant(),
@@ -978,7 +980,7 @@ public:
                     "regexMatch", std::move(pcreRegexesConstant), inputExpr.clone())));
 
             if (expr->getEqualities().size() > 0) {
-                // We have to match nulls and undefined if a 'null' is present in equalities.
+                // We have to match nulls and missing if a 'null' is present in equalities.
                 if (hasNull) {
                     inputExpr = b.makeIf(b.generateNullOrMissing(inputExpr.clone()),
                                          b.makeNullConstant(),
@@ -1066,7 +1068,7 @@ public:
 
         // Translate the agg expression to SBE.
         auto translatedCmpExpr = generateExpression(
-            _context->state, cmpAggExpr.get(), _context->rootSlot, _context->slots);
+            _context->state, cmpAggExpr.get(), _context->rootSlot, *_context->slots);
 
         auto isArrayExpr = b.makeIf(b.makeFillEmptyTrue(b.makeFunction("isArray", lhsVar.clone())),
                                     b.makeBoolConstant(true),
@@ -1076,7 +1078,7 @@ public:
         auto fieldPathExpr = ExpressionFieldPath::createPathFromString(
             expCtx.get(), expr->fieldRef()->dottedField().toString(), expCtx->variablesParseState);
         auto translatedFieldPathExpr = generateExpression(
-            _context->state, fieldPathExpr.get(), _context->rootSlot, _context->slots);
+            _context->state, fieldPathExpr.get(), _context->rootSlot, *_context->slots);
 
         // Put the LHS into the slot we generated in a let statement.
         auto cmpWArrayCheckExpr = b.makeLet(
@@ -1309,8 +1311,8 @@ private:
 
 SbExpr generateFilter(StageBuilderState& state,
                       const MatchExpression* root,
-                      boost::optional<TypedSlot> rootSlot,
-                      const PlanStageSlots* slots,
+                      boost::optional<SbSlot> rootSlot,
+                      const PlanStageSlots& slots,
                       const std::vector<std::string>& keyFields,
                       bool isFilterOverIxscan) {
     // The planner adds an $and expression without the operands if the query was empty. We can bail
@@ -1319,7 +1321,7 @@ SbExpr generateFilter(StageBuilderState& state,
         return SbExpr{};
     }
 
-    MatchExpressionVisitorContext context{state, rootSlot, root, slots, isFilterOverIxscan};
+    MatchExpressionVisitorContext context{state, rootSlot, root, &slots, isFilterOverIxscan};
 
     MatchExpressionPreVisitor preVisitor{&context};
     MatchExpressionInVisitor inVisitor{&context};
@@ -1432,17 +1434,6 @@ SbExpr generateBitTestExpr(StageBuilderState& state,
         MONGO_UNREACHABLE_TASSERT(5610200);
     }();
 
-    // We round NumberDecimal values to the nearest integer to match the classic execution engine's
-    // behavior for now. Note that this behavior is _not_ consistent with MongoDB's documentation.
-    // At some point, we should consider removing this call to round() to make SBE's behavior
-    // consistent with MongoDB's documentation.
-    auto numericBitTestInputExpr = b.makeIf(
-        b.makeFunction("typeMatch",
-                       inputExpr.clone(),
-                       b.makeInt32Constant(getBSONTypeMask(sbe::value::TypeTags::NumberDecimal))),
-        b.makeFunction("round"_sd, inputExpr.clone()),
-        inputExpr.clone());
-
     SbExpr bitMaskExpr = [&]() -> SbExpr {
         if (auto bitMaskParamId = expr->getBitMaskParamId()) {
             auto bitMaskSlotId = state.registerInputParamSlot(*bitMaskParamId);
@@ -1457,8 +1448,7 @@ SbExpr generateBitTestExpr(StageBuilderState& state,
     auto numericBitTestExpr =
         b.makeFunction(numericBitTestFnName,
                        std::move(bitMaskExpr),
-                       b.makeNumericConvert(std::move(numericBitTestInputExpr),
-                                            sbe::value::TypeTags::NumberInt64));
+                       b.makeNumericConvert(inputExpr.clone(), sbe::value::TypeTags::NumberInt64));
 
     // For the AnyClear and AnySet cases, negate the output of the bit-test function.
     if (bitOp == sbe::BitTestBehavior::AnyClear || bitOp == sbe::BitTestBehavior::AnySet) {

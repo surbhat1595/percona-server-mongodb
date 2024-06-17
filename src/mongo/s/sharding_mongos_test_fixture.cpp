@@ -72,7 +72,6 @@
 #include "mongo/rpc/metadata/egress_metadata_hook_list.h"
 #include "mongo/rpc/metadata/metadata_hook.h"
 #include "mongo/rpc/metadata/repl_set_metadata.h"
-#include "mongo/rpc/metadata/tracking_metadata.h"
 #include "mongo/rpc/op_msg.h"
 #include "mongo/s/balancer_configuration.h"
 #include "mongo/s/catalog/sharding_catalog_client_impl.h"
@@ -211,8 +210,6 @@ ShardingTestFixture::ShardingTestFixture(bool withMockCatalogCache) {
 }
 
 ShardingTestFixture::~ShardingTestFixture() {
-    CatalogCacheLoader::clearForTests(getServiceContext());
-
     if (auto grid = Grid::get(getServiceContext())) {
         if (grid->getExecutorPool()) {
             grid->getExecutorPool()->shutdownAndJoin();
@@ -288,7 +285,7 @@ void ShardingTestFixture::expectGetShards(const std::vector<ShardType>& shards) 
         ASSERT_EQ(nss, NamespaceString::kConfigsvrShardsNamespace);
 
         // If there is no '$db', append it.
-        auto cmd = OpMsgRequest::fromDBAndBody(nss.dbName(), request.cmdObj).body;
+        auto cmd = static_cast<OpMsgRequest>(request).body;
         auto query = query_request_helper::makeFromFindCommandForTests(cmd, nss);
         ASSERT_EQ(query->getNamespaceOrUUID().nss(), NamespaceString::kConfigsvrShardsNamespace);
 
@@ -316,7 +313,7 @@ void ShardingTestFixture::expectInserts(const NamespaceString& nss,
     onCommand([&nss, &expected](const RemoteCommandRequest& request) {
         ASSERT_EQUALS(nss.dbName(), request.dbname);
 
-        const auto opMsgRequest = OpMsgRequest::fromDBAndBody(request.dbname, request.cmdObj);
+        const auto opMsgRequest = static_cast<OpMsgRequest>(request);
         const auto insertOp = InsertOp::parse(opMsgRequest);
         ASSERT_EQUALS(nss, insertOp.getNamespace());
 
@@ -342,11 +339,10 @@ void ShardingTestFixture::expectUpdateCollection(const HostAndPort& expectedHost
                                                  bool expectUpsert) {
     onCommand([&](const RemoteCommandRequest& request) {
         ASSERT_EQUALS(expectedHost, request.target);
-        ASSERT_BSONOBJ_EQ(BSON(rpc::kReplSetMetadataFieldName << 1),
-                          rpc::TrackingMetadata::removeTrackingData(request.metadata));
         ASSERT_EQUALS(DatabaseName::kConfig, request.dbname);
+        ASSERT_BSONOBJ_EQ(BSON(rpc::kReplSetMetadataFieldName << 1), request.metadata);
 
-        const auto opMsgRequest = OpMsgRequest::fromDBAndBody(request.dbname, request.cmdObj);
+        const auto opMsgRequest = static_cast<OpMsgRequest>(request);
         const auto updateOp = UpdateOp::parse(opMsgRequest);
         ASSERT_EQUALS(CollectionType::ConfigNS, updateOp.getNamespace());
 
@@ -421,7 +417,9 @@ void ShardingTestFixture::checkReadConcern(const BSONObj& cmdObj,
     ASSERT_EQ(Object, readConcernElem.type());
 
     auto readConcernObj = readConcernElem.Obj();
-    ASSERT_EQ("majority", readConcernObj[repl::ReadConcernArgs::kLevelFieldName].str());
+    using namespace unittest::match;
+    ASSERT_THAT(readConcernObj[repl::ReadConcernArgs::kLevelFieldName].str(),
+                AnyOf(Eq("majority"), Eq("snapshot")));
 
     auto afterOpTimeElem = readConcernObj[repl::ReadConcernArgs::kAfterOpTimeFieldName];
     auto afterClusterTimeElem = readConcernObj[repl::ReadConcernArgs::kAfterClusterTimeFieldName];

@@ -41,6 +41,7 @@
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/timestamp.h"
 #include "mongo/db/exec/document_value/document.h"
+#include "mongo/db/exec/multi_plan.h"
 #include "mongo/db/exec/plan_stats.h"
 #include "mongo/db/exec/sbe/expressions/runtime_environment.h"
 #include "mongo/db/exec/sbe/stages/plan_stats.h"
@@ -92,9 +93,11 @@ public:
                     bool isOpen,
                     std::unique_ptr<PlanYieldPolicySBE> yieldPolicy,
                     bool generatedByBonsai,
-                    OptimizerCounterInfo optCounterInfo = {},
-                    std::unique_ptr<RemoteCursorMap> remoteCursors = nullptr,
-                    std::unique_ptr<RemoteExplainVector> remoteExplains = nullptr);
+                    boost::optional<size_t> cachedPlanHash,
+                    OptimizerCounterInfo optCounterInfo,
+                    std::unique_ptr<RemoteCursorMap> remoteCursors,
+                    std::unique_ptr<RemoteExplainVector> remoteExplains,
+                    std::unique_ptr<MultiPlanStage> classicRuntimePlannerStage);
 
     CanonicalQuery* getCanonicalQuery() const override {
         return _cq.get();
@@ -116,11 +119,11 @@ public:
         return _opCtx;
     }
 
-    void saveState();
-    void restoreState(const RestoreContext& context);
+    void saveState() override;
+    void restoreState(const RestoreContext& context) override;
 
-    void detachFromOperationContext();
-    void reattachToOperationContext(OperationContext* opCtx);
+    void detachFromOperationContext() override;
+    void reattachToOperationContext(OperationContext* opCtx) override;
 
     ExecState getNext(BSONObj* out, RecordId* dlOut) override;
     ExecState getNextDocument(Document* objOut, RecordId* dlOut) override;
@@ -158,11 +161,11 @@ public:
         MONGO_UNREACHABLE;
     }
 
-    void markAsKilled(Status killStatus);
+    void markAsKilled(Status killStatus) override;
 
-    void dispose(OperationContext* opCtx);
+    void dispose(OperationContext* opCtx) override;
 
-    void stashResult(const BSONObj& obj);
+    void stashResult(const BSONObj& obj) override;
 
     bool isMarkedAsKilled() const override {
         return !_killStatus.isOK();
@@ -200,21 +203,21 @@ public:
         return _isSaveRecoveryUnitAcrossCommandsEnabled;
     }
 
-    PlanExecutor::QueryFramework getQueryFramework() const override final {
+    PlanExecutor::QueryFramework getQueryFramework() const final {
         return _generatedByBonsai ? PlanExecutor::QueryFramework::kCQF
                                   : PlanExecutor::QueryFramework::kSBEOnly;
     }
 
-    void setReturnOwnedData(bool returnOwnedData) override final {
+    void setReturnOwnedData(bool returnOwnedData) final {
         _mustReturnOwnedBson = returnOwnedData;
     }
 
-    bool usesCollectionAcquisitions() const override final;
+    bool usesCollectionAcquisitions() const final;
 
     /**
      * For queries that have multiple executors, this can be used to differentiate between them.
      */
-    boost::optional<StringData> getExecutorType() const override final {
+    boost::optional<StringData> getExecutorType() const final {
         return CursorType_serializer(_cursorType);
     }
 

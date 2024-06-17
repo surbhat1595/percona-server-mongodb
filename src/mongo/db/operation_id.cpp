@@ -92,17 +92,6 @@ OperationIdManager::OperationIdManager() : _pool(std::make_unique<OperationIdMan
 #define VERIFY_LEASE_START(start, bitmask) invariant((start & ~bitmask) == 0)
 
 struct ClientState {
-    ~ClientState() {
-        if (svcCtx) {
-            auto& manager = getOperationIdManager(svcCtx);
-            std::lock_guard lk(manager._mutex);
-            VERIFY_LEASE_START(lease.start, manager._leaseStartBitMask);
-            manager._clientByOperationId.erase(lease.start);
-            manager._pool->releaseLease(lk, lease);
-        }
-    }
-
-    ServiceContext* svcCtx = nullptr;
     size_t unused = 0;
     Lease lease;
     OperationId nextId;
@@ -135,7 +124,6 @@ OperationId OperationIdManager::issueForClient(Client* client) noexcept {
 
     auto& state = getClientState(client);
     if (MONGO_unlikely(state.unused == 0)) {
-        state.svcCtx = client->getServiceContext();
         state.unused = _leaseSize;
         state.lease = getLease(state.isInitialized ? &(state.lease) : nullptr);
         state.nextId = state.lease.start;
@@ -146,14 +134,26 @@ OperationId OperationIdManager::issueForClient(Client* client) noexcept {
     return state.nextId++;
 }
 
-LockedClient OperationIdManager::findAndLockClient(OperationId id) const {
+void OperationIdManager::eraseClientFromMap(Client* client) {
+    auto& state = getClientState(client);
+    if (state.isInitialized) {
+        std::lock_guard lk(_mutex);
+        VERIFY_LEASE_START(state.lease.start, _leaseStartBitMask);
+        auto numErased = _clientByOperationId.erase(state.lease.start);
+        invariant(numErased == 1);
+        _pool->releaseLease(lk, state.lease);
+        state.isInitialized = false;
+    }
+}
+
+ClientLock OperationIdManager::findAndLockClient(OperationId id) const {
     stdx::lock_guard lk(_mutex);
     auto it = _clientByOperationId.find(id & _leaseStartBitMask);
     if (it == _clientByOperationId.end()) {
         return {};
     }
 
-    LockedClient lc(it->second);
+    ClientLock lc(it->second);
 
     // Confirm that the provided id matches that of the client's active opCtx.
     if (auto opCtx = lc->getOperationContext(); opCtx && opCtx->getOpID() == id) {

@@ -10,6 +10,10 @@ build --incompatible_strict_action_env=true
 # https://github.com/bazelbuild/bazel/issues/4327
 build --nobuild_runfile_links
 
+# cc_library transitively propagates link opts. The build uses cc_shared_library to avoid this when linking
+# dynamically.
+build --experimental_cc_shared_library
+
 # This supports the "crosstool" feature (aka building from our toolchain).
 # Currently the only platform with a custom toolchain config is linux, use the default
 # toolchain_suite elsewhere.
@@ -17,6 +21,19 @@ build:linux --crosstool_top=@mongo_toolchain//:toolchain_suite
 
 # Dynamic linking on Windows (DLL generation) is currently not supported.
 build:windows --//bazel/config:linkstatic=True
+
+# The only Windows compiler we support is MSVC.
+build:windows --//bazel/config:compiler_type=msvc
+
+# Windows and MacOS do not use the custom toolchain config, so the compiler flags need to be set here.
+build:macos --cxxopt=-std=c++20
+build:windows --cxxopt=/std:c++20
+
+# Set the windows version to win10 by default
+# TODO(SERVER-87654): We may want to add support for other Windows versions in the future.
+build:windows --cxxopt=-D_WIN32_WINNT=0x0A00
+build:windows --cxxopt=-DBOOST_USE_WINAPI_VERSION=0x0A00
+build:windows --cxxopt=-DNTDDI_VERSION=0x0A000000
 
 # remote execution is the default, but only mongodb employees will be able to access
 # the engflow cluster. External builders should use the local option below
@@ -28,13 +45,9 @@ build --bes_results_url=https://sodalite.cluster.engflow.com/invocation/
 build --experimental_remote_cache_compression=true 
 build --grpc_keepalive_time=30s
 build --nolegacy_important_outputs
-
-# Authenticate to the EngFlow cluster using mTLS certificate
-# For mongodb employees, certs can be generated at 
-# https://sodalite.cluster.engflow.com/gettingstarted
-# then place in the appropriate location as shown below
-build --tls_client_certificate=/engflow/creds/engflow.crt
-build --tls_client_key=/engflow/creds/engflow.key
+build --bes_keywords=repo:mongo
+build --jobs=200
+common --remote_upload_local_results=False
 
 # if you don't have access to the remote execution cluster above, use the local config
 # described below.
@@ -51,7 +64,26 @@ build:local --tls_client_key=
 build:local --experimental_remote_cache_compression=false
 build:local --grpc_keepalive_time=0s
 build:local --legacy_important_outputs
+build:local --//bazel/config:local_build=True
+build:local --jobs=auto
 
+# Disable remote execution and caching for public releases
+--config=public-release
+build:public-release --remote_executor=
+build:public-release --remote_cache=
+build:public-release --bes_backend=
+build:public-release --bes_results_url=
+build:public-release --tls_client_certificate=
+build:public-release --tls_client_key=
+build:public-release --experimental_remote_cache_compression=false
+build:public-release --grpc_keepalive_time=0s
+build:public-release --legacy_important_outputs
+
+# Avoid failing builds when BES metadata fails to upload.
+common --bes_upload_mode=fully_async
+
+# Enable Build without the Bytes
+common --remote_download_outputs=toplevel
 
 # try to import the bazelrc files if available
 try-import %workspace%/.bazelrc.local

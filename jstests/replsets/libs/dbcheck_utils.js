@@ -1,7 +1,53 @@
 /**
  * Contains helper functions for testing dbCheck.
  */
+import {configureFailPoint} from "jstests/libs/fail_point_util.js";
 import {FeatureFlagUtil} from "jstests/libs/feature_flag_util.js";
+
+export const defaultSnapshotSize = 1000;
+export const logQueries = {
+    allErrorsOrWarningsQuery: {$or: [{"severity": "warning"}, {"severity": "error"}]},
+    recordNotFoundQuery: {
+        "severity": "error",
+        "msg": "found extra index key entry without corresponding document",
+        "data.context.indexSpec": {$exists: true}
+    },
+    missingIndexKeysQuery: {
+        "severity": "error",
+        "msg": "Document has missing index keys",
+        "data.context.missingIndexKeys": {$exists: true},
+    },
+    recordDoesNotMatchQuery: {
+        "severity": "error",
+        "msg":
+            "found index key entry with corresponding document/keystring set that does not contain the expected key string",
+        "data.context.indexSpec": {$exists: true}
+    },
+    collNotFoundWarningQuery: {
+        severity: "warning",
+        "msg": "abandoning dbCheck extra index keys check because collection no longer exists"
+    },
+    indexNotFoundWarningQuery: {
+        severity: "warning",
+        "msg": "abandoning dbCheck extra index keys check because index no longer exists"
+    },
+    duringInitialSyncQuery:
+        {severity: "warning", "msg": "cannot execute dbcheck due to ongoing initial sync"},
+    duringStableRecovery:
+        {severity: "warning", "msg": "cannot execute dbcheck due to ongoing stable recovering"},
+    errorQuery: {"severity": "error"},
+    warningQuery: {"severity": "warning"},
+    infoOrErrorQuery:
+        {$or: [{"severity": "info", "operation": "dbCheckBatch"}, {"severity": "error"}]},
+    infoBatchQuery: {"severity": "info", "operation": "dbCheckBatch"},
+    inconsistentBatchQuery: {"severity": "error", "msg": "dbCheck batch inconsistent"},
+    startStopQuery: {
+        $or: [
+            {"operation": "dbCheckStart", "severity": "info"},
+            {"operation": "dbCheckStop", "severity": "info"}
+        ]
+    },
+};
 
 // Apply function on all secondary nodes except arbiters.
 export const forEachNonArbiterSecondary = (replSet, f) => {
@@ -27,7 +73,8 @@ export const clearHealthLog = (replSet) => {
 export const logEveryBatch =
     (replSet) => {
         forEachNonArbiterNode(replSet, conn => {
-            conn.adminCommand({setParameter: 1, "dbCheckHealthLogEveryNBatches": 1});
+            assert.commandWorked(
+                conn.adminCommand({setParameter: 1, "dbCheckHealthLogEveryNBatches": 1}));
         })
     }
 
@@ -44,18 +91,30 @@ export const awaitDbCheckCompletion =
             "dbCheck timed out for database: " + db.getName() + " for RS: " + replSet.getURL(),
             awaitCompletionTimeoutMs);
 
-        replSet.awaitSecondaryNodes();
-        replSet.awaitReplication();
+        const tokens = replSet.nodes.map(node => node._securityToken);
+        try {
+            // This function might be called with a security token (to specify a tenant) on a
+            // connection. Calling tenant agnostic commands to await replication conflict with this
+            // token so temporarily remove it.
+            replSet.nodes.forEach(node => node._setSecurityToken(undefined));
+            replSet.awaitSecondaryNodes();
+            replSet.awaitReplication();
 
-        if (waitForHealthLogDbCheckStop) {
-            forEachNonArbiterNode(replSet, function(node) {
-                const healthlog = node.getDB('local').system.healthlog;
-                assert.soon(
-                    function() {
-                        return (healthlog.find({"operation": "dbCheckStop"}).itcount() == 1);
-                    },
-                    "dbCheck command didn't complete for database: " + db.getName() +
-                        " for RS: " + replSet.getURL());
+            if (waitForHealthLogDbCheckStop) {
+                forEachNonArbiterNode(replSet, function(node) {
+                    const healthlog = node.getDB('local').system.healthlog;
+                    assert.soon(
+                        function() {
+                            return (healthlog.find({"operation": "dbCheckStop"}).itcount() == 1);
+                        },
+                        "dbCheck command didn't complete for database: " + db.getName() +
+                            " for RS: " + replSet.getURL() +
+                            ", found health log: " + tojson(healthlog.find().toArray()));
+                });
+            }
+        } finally {
+            replSet.nodes.forEach((node, idx) => {
+                node._setSecurityToken(tokens[idx]);
             });
         }
     };
@@ -77,6 +136,83 @@ export const resetAndInsert = (replSet, db, collName, nDocs, docSuffix = null) =
     assert.eq(db.getCollection(collName).find({}).count(), nDocs);
 };
 
+// Clear health log and insert nDocs documents with two fields `a` and `b`.
+export const resetAndInsertTwoFields = (replSet, db, collName, nDocs, docSuffix = null) => {
+    db[collName].drop();
+    clearHealthLog(replSet);
+
+    if (docSuffix) {
+        assert.commandWorked(db[collName].insertMany(
+            [...Array(nDocs).keys()].map(
+                x => ({a: x.toString() + docSuffix, b: x.toString() + docSuffix})),
+            {ordered: false}));
+    } else {
+        assert.commandWorked(db[collName].insertMany(
+            [...Array(nDocs).keys()].map(x => ({a: x, b: x})), {ordered: false}));
+    }
+
+    replSet.awaitReplication();
+    assert.eq(db.getCollection(collName).find({}).count(), nDocs);
+};
+
+// Clear health log and insert nDocs documents with identical 'a' field
+export const resetAndInsertIdentical = (replSet, db, collName, nDocs) => {
+    db[collName].drop();
+    clearHealthLog(replSet);
+
+    assert.commandWorked(db[collName].insertMany(
+        [...Array(nDocs).keys()].map(x => ({_id: x, a: 0.1})), {ordered: false}));
+
+    replSet.awaitReplication();
+    assert.eq(db.getCollection(collName).find({}).count(), nDocs);
+};
+
+// Insert numDocs documents with missing index keys for testing.
+export const insertDocsWithMissingIndexKeys =
+    (replSet, dbName, collName, doc, numDocs = 1, doPrimary = true, doSecondary = true) => {
+        const primaryDb = replSet.getPrimary().getDB(dbName);
+        const secondaryDb = replSet.getSecondary().getDB(dbName);
+
+        assert.commandWorked(primaryDb.createCollection(collName));
+
+        // Create an index for every key in the document.
+        let index = {};
+        for (let key in doc) {
+            index[key] = 1;
+            assert.commandWorked(primaryDb[collName].createIndex(index));
+            index = {};
+        }
+        replSet.awaitReplication();
+
+        // dbCheck requires the _id index to iterate through documents in a batch.
+        let skipIndexNewRecordsExceptIdPrimary;
+        let skipIndexNewRecordsExceptIdSecondary;
+        if (doPrimary) {
+            skipIndexNewRecordsExceptIdPrimary =
+                configureFailPoint(primaryDb, "skipIndexNewRecords", {skipIdIndex: false});
+        }
+        if (doSecondary) {
+            skipIndexNewRecordsExceptIdSecondary =
+                configureFailPoint(secondaryDb, "skipIndexNewRecords", {skipIdIndex: false});
+        }
+        for (let i = 0; i < numDocs; i++) {
+            assert.commandWorked(primaryDb[collName].insert(doc));
+        }
+        replSet.awaitReplication();
+        if (doPrimary) {
+            skipIndexNewRecordsExceptIdPrimary.off();
+        }
+        if (doSecondary) {
+            skipIndexNewRecordsExceptIdSecondary.off();
+        }
+
+        // Verify that index has been replicated to all nodes, including _id index.
+        forEachNonArbiterNode(replSet, function(node) {
+            assert.eq(Object.keys(doc).length + 1,
+                      node.getDB(dbName)[collName].getIndexes().length);
+        });
+    }
+
 // Run dbCheck with given parameters and potentially wait for completion.
 export const runDbCheck = (replSet,
                            db,
@@ -85,6 +221,10 @@ export const runDbCheck = (replSet,
                            awaitCompletion = false,
                            waitForHealthLogDbCheckStop = true,
                            allowedErrorCodes = []) => {
+    if (!parameters.hasOwnProperty('maxBatchTimeMillis')) {
+        // Make this huge because stalls and pauses sometimes break this test.
+        parameters['maxBatchTimeMillis'] = 20000;
+    }
     let dbCheckCommand = {dbCheck: collName};
     for (let parameter in parameters) {
         dbCheckCommand[parameter] = parameters[parameter];
@@ -110,7 +250,8 @@ export const checkHealthLog = (healthlog, query, numExpected, timeout = 60 * 100
             return query_count == numExpected;
         },
         "health log query returned " + query_count + " entries, expected " + numExpected +
-            "  query: " + tojson(query) + " found: " + tojson(healthlog.find(query).toArray()),
+            "  query: " + tojson(query) + " found: " + tojson(healthlog.find(query).toArray()) +
+            " HealthLog: " + tojson(healthlog.find().toArray()),
         timeout);
 };
 
@@ -160,7 +301,11 @@ function getIndexNames(db, collName, allowedErrorCodes) {
 }
 
 // List of collection names that are ignored from dbcheck.
-const collNamesIgnoredFromDBCheck = ["operationalLatencyHistogramTest_coll_temp"];
+const collNamesIgnoredFromDBCheck = [
+    "operationalLatencyHistogramTest_coll_temp",
+    "top_coll_temp",
+];
+
 // Run dbCheck for all collections in the database with given parameters and potentially wait for
 // completion.
 export const runDbCheckForDatabase =
@@ -298,4 +443,88 @@ export const assertForDbCheckErrorsForAllNodes =
  */
 export function checkSecondaryIndexChecksInDbCheckFeatureFlagEnabled(conn) {
     return FeatureFlagUtil.isPresentAndEnabled(conn, 'SecondaryIndexChecksInDbCheck');
+}
+
+export function checkNumSnapshots(debugBuild, expectedNumSnapshots) {
+    if (debugBuild) {
+        const actualNumSnapshots =
+            rawMongoProgramOutput()
+                .split(/7844808.*Catalog snapshot for reverse lookup check ending/)
+                .length -
+            1;
+        assert.eq(actualNumSnapshots,
+                  expectedNumSnapshots,
+                  "expected " + expectedNumSnapshots +
+                      " catalog snapshots during reverse lookup, found " + actualNumSnapshots);
+    }
+}
+
+export function setSnapshotSize(rst, snapshotSize) {
+    forEachNonArbiterNode(rst, conn => {
+        assert.commandWorked(conn.adminCommand(
+            {"setParameter": 1, "dbCheckMaxTotalIndexKeysPerSnapshot": snapshotSize}));
+    });
+}
+
+export function resetSnapshotSize(rst) {
+    setSnapshotSize(rst, defaultSnapshotSize);
+}
+
+// Verifies that the healthlog contains entries that span the entire range that dbCheck should run
+// against.
+export function assertCompleteCoverage(
+    healthlog, nDocs, docSuffix, start, end, inconsistentBatch = false) {
+    // For non-empty docSuffix like 'aaa' for instance, if we insert over 10 docs, the lexicographic
+    // sorting order would be '0aaa', '1aaa', '10aaa', instead of increasing numerical order. Skip
+    // these checks as we have test coverage without needing to account for these specific cases.
+    if (nDocs >= 10 && (docSuffix !== null || docSuffix !== "")) {
+        return;
+    }
+
+    const truncateDocSuffix =
+        (batchBoundary, docSuffix) => {
+            const index = batchBoundary.indexOf(docSuffix);
+            jsTestLog("Index : " + index);
+            if (index < 1) {
+                return batchBoundary;
+            }
+            return batchBoundary.substring(0, batchBoundary.indexOf(docSuffix));
+        }
+
+    let query = logQueries.infoBatchQuery;
+    if (inconsistentBatch) {
+        query = {"severity": "error", "msg": "dbCheck batch inconsistent"};
+    }
+
+    const batches = healthlog.find(query).toArray();
+    let expectedBatchStart = start === null ? 0 : start;
+    let batchEnd = "";
+    for (let batch of batches) {
+        let batchStart = batch.data.batchStart.a;
+        if (docSuffix) {
+            batchStart = truncateDocSuffix(batchStart, docSuffix);
+        }
+
+        // Verify that the batch start is correct.
+        assert.eq(expectedBatchStart, batchStart);
+        // Set our next expected batch start to the next value after the end of this batch.
+        batchEnd = batch.data.batchEnd.a;
+        if (docSuffix) {
+            batchEnd = truncateDocSuffix(batchEnd, docSuffix);
+        }
+        expectedBatchStart = batchEnd + 1;
+    }
+
+    if (end === null) {
+        // User did not issue a custom range, assert that we checked all documents.
+        // TODO (SERVER-86323): Fix this behavior and ensure maxKey is logged.
+        assert.eq(nDocs - 1, batchEnd);
+    } else {
+        // User issued a custom end, but we do not know if the documents in the collection actually
+        // ended at that range. Verify that we have hit either the end of the collection, or we
+        // checked up until the specified range.
+        assert((batchEnd === nDocs - 1) || (batchEnd === end),
+               `batch end ${batchEnd} did not equal end of collection ${
+                   nDocs - 1} nor end of custom range ${end}`);
+    }
 }

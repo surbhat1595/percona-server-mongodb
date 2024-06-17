@@ -102,13 +102,21 @@ IndexScan::IndexScan(ExpressionContext* expCtx,
     _specificStats.collation = params.indexDescriptor->infoObj()
                                    .getObjectField(IndexDescriptor::kCollationFieldName)
                                    .getOwned();
+    if (_shouldDedup && internalUseRoaringBitmapsForRecordIDDeduplication.load()) {
+        const size_t threshold = static_cast<size_t>(internalRoaringBitmapsThreshold.load());
+        const size_t batchSize = static_cast<size_t>(internalRoaringBitmapsBatchSize.load());
+        const uint64_t universeSize =
+            static_cast<uint64_t>(threshold / internalRoaringBitmapsMinimalDensity.load());
+        _recordIdDeduplicator =
+            std::make_unique<RecordIdDeduplicator>(threshold, batchSize, universeSize);
+    }
 }
 
 boost::optional<IndexKeyEntry> IndexScan::initIndexScan() {
     if (_lowPriority && gDeprioritizeUnboundedUserIndexScans.load() &&
         opCtx()->getClient()->isFromUserConnection() &&
-        shard_role_details::getLocker(opCtx())->shouldWaitForTicket()) {
-        _priority.emplace(shard_role_details::getLocker(opCtx()), AdmissionContext::Priority::kLow);
+        shard_role_details::getLocker(opCtx())->shouldWaitForTicket(opCtx())) {
+        _priority.emplace(opCtx(), AdmissionContext::Priority::kLow);
     }
 
     // Perform the possibly heavy-duty initialization of the underlying index cursor.
@@ -247,7 +255,9 @@ PlanStage::StageState IndexScan::doWork(WorkingSetID* out) {
 
     if (_shouldDedup) {
         ++_specificStats.dupsTested;
-        if (!_returned.insert(kv->loc).second) {
+        const bool newRecordId = _recordIdDeduplicator ? _recordIdDeduplicator->insert(kv->loc)
+                                                       : _returned.insert(kv->loc).second;
+        if (!newRecordId) {
             // We've seen this RecordId before. Skip it this time.
             ++_specificStats.dupsDropped;
             return PlanStage::NEED_TIME;
@@ -311,8 +321,8 @@ void IndexScan::doDetachFromOperationContext() {
 void IndexScan::doReattachToOperationContext() {
     if (_lowPriority && gDeprioritizeUnboundedUserIndexScans.load() &&
         opCtx()->getClient()->isFromUserConnection() &&
-        shard_role_details::getLocker(opCtx())->shouldWaitForTicket()) {
-        _priority.emplace(shard_role_details::getLocker(opCtx()), AdmissionContext::Priority::kLow);
+        shard_role_details::getLocker(opCtx())->shouldWaitForTicket(opCtx())) {
+        _priority.emplace(opCtx(), AdmissionContext::Priority::kLow);
     }
     if (_indexCursor)
         _indexCursor->reattachToOperationContext(opCtx());

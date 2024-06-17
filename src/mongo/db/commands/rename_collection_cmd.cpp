@@ -64,7 +64,7 @@ class CmdRenameCollection final : public TypedCommand<CmdRenameCollection> {
 public:
     using Request = RenameCollectionCommand;
 
-    virtual bool adminOnly() const {
+    bool adminOnly() const override {
         return true;
     }
     AllowedOnSecondary secondaryAllowed(ServiceContext*) const override {
@@ -86,6 +86,10 @@ public:
     class Invocation final : public InvocationBase {
     public:
         using InvocationBase::InvocationBase;
+
+        bool isSubjectToIngressAdmissionControl() const override {
+            return true;
+        }
 
         void typedRun(OperationContext* opCtx) {
             const auto& fromNss = ns();

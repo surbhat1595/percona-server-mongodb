@@ -1,10 +1,11 @@
 # Ubuntu build variants for testing development environments
-# that should run only on master branch projects
+#
+# After the branching variants in this file
+# should NOT run on a new rapid release (v7.1, v7.2 etc.)
+# and LTS release (v7.0, v6.0 etc.) branch projects
 
 variables:
 - &enterprise-ubuntu2204-64-libvoidstar-template
-  modules:
-  - enterprise
   run_on:
   - ubuntu2204-large
   stepback: false
@@ -21,19 +22,37 @@ variables:
 
 
 buildvariants:
-# Note that this task is currently optional;
-# This will eventually become suggested, then required.
 - name: &ubuntu2204-arm64-bazel-compile ubuntu2204-arm64-bazel-compile
-  display_name: "Ubuntu 22.04 arm64 Bazel Compile"
-  cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
+  display_name: "! Ubuntu 22.04 arm64 Enterprise Bazel Compile"
+  cron: "0 */4 * * *" # From the ${project_required_suggested_cron} parameter
   tags: ["bazel_check"]
   run_on:
   - ubuntu2204-arm64-small
   stepback: false
   expansions:
+    scons_cache_scope: shared
     compile_variant: *ubuntu2204-arm64-bazel-compile
   tasks:
     - name: compile_bazel_TG
+    - name: compile_bazel_sanitize_TG
+    - name: compile_bazel_ninja_TG
+    - name: bazel_workstation_TG
+      distros:
+      - ubuntu2204-arm64-large
+
+- name: &ubuntu2204-x86-64-bazel-compile ubuntu2204-x86-64-bazel-compile
+  display_name: "Ubuntu 22.04 x86_64 Enterprise Bazel Compile"
+  cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
+  tags: ["bazel_check"]
+  run_on:
+  - ubuntu2204-small
+  stepback: false
+  expansions:
+    compile_variant: *ubuntu2204-x86-64-bazel-compile
+  tasks:
+    - name: compile_bazel_TG
+    - name: compile_bazel_sanitize_TG
+    - name: compile_bazel_ninja_TG
 
 - <<: *enterprise-ubuntu2204-64-libvoidstar-template
   name: &enterprise-ubuntu2204-64-libvoidstar enterprise-ubuntu2204-64-libvoidstar
@@ -42,11 +61,9 @@ buildvariants:
   expansions:
     <<: *enterprise-ubuntu2204-64-libvoidstar-expansions-template
     compile_variant: *enterprise-ubuntu2204-64-libvoidstar
-    # Do not set link-model=dynamic on this build. The antithesis image builder
-    # scripts cannot handle the shared library build
     compile_flags: >-
       --ssl
-      --ocsp-stapling=off MONGO_DISTMOD=ubuntu2204
+      MONGO_DISTMOD=ubuntu2204
       -j$(grep -c ^processor /proc/cpuinfo)
       --variables-files=etc/scons/mongodbtoolchain_stable_clang.vars
       CCFLAGS="-fsanitize-coverage=trace-pc-guard"
@@ -67,11 +84,12 @@ buildvariants:
       --ssl
       --opt=on
       --dbg=on
-      --ocsp-stapling=off MONGO_DISTMOD=ubuntu2204
+      MONGO_DISTMOD=ubuntu2204
       -j$(grep -c ^processor /proc/cpuinfo)
       --variables-files=etc/scons/mongodbtoolchain_stable_clang.vars
-      CCFLAGS="-fsanitize-coverage=trace-pc-guard -shared-libasan"
-      LINKFLAGS="-shared-libasan"
+      --shared-libsan
+      --link-model=dynamic
+      CCFLAGS="-fsanitize-coverage=trace-pc-guard"
       LIBS="voidstar"
       --use-diagnostic-latches=on
     san_options: >-
@@ -97,13 +115,13 @@ buildvariants:
       --opt=on
       --dbg=on
       --ssl
-      --ocsp-stapling=off MONGO_DISTMOD=ubuntu2204
+      MONGO_DISTMOD=ubuntu2204
       --link-model=dynamic
       -j$(grep -c ^processor /proc/cpuinfo)
       --variables-files=etc/scons/mongodbtoolchain_stable_clang.vars
       CCFLAGS="-fsanitize-coverage=trace-pc-guard"
       LIBS="voidstar"
       --use-diagnostic-latches=on
-    san_options: TSAN_OPTIONS="abort_on_error=1:disable_coredump=0:handle_abort=1:halt_on_error=1:report_thread_leaks=0:die_after_fork=0:history_size=4"
+    san_options: TSAN_OPTIONS="abort_on_error=1:disable_coredump=0:handle_abort=1:halt_on_error=1:report_thread_leaks=0:die_after_fork=0:history_size=5"
     test_flags: >-
       --excludeWithAnyTags=tsan_incompatible

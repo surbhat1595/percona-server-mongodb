@@ -67,9 +67,11 @@ public:
         : PrimaryOnlyService(serviceContext),
           _externalStateFactory(std::move(externalStateFactory)) {}
 
-    ~ShardingDDLCoordinatorService() = default;
+    ~ShardingDDLCoordinatorService() override = default;
 
     static ShardingDDLCoordinatorService* getService(OperationContext* opCtx);
+
+    using repl::PrimaryOnlyService::getAllInstances;
 
     StringData getServiceName() const override {
         return kServiceName;
@@ -93,9 +95,11 @@ public:
 
     std::shared_ptr<Instance> constructInstance(BSONObj initialState) override;
 
-    std::unique_ptr<ShardingDDLCoordinatorExternalState> createExternalState() const;
+    std::shared_ptr<ShardingDDLCoordinatorExternalState> createExternalState() const;
 
-    std::shared_ptr<Instance> getOrCreateInstance(OperationContext* opCtx, BSONObj initialState);
+    std::shared_ptr<Instance> getOrCreateInstance(OperationContext* opCtx,
+                                                  BSONObj initialState,
+                                                  bool checkOptions = true);
 
     std::shared_ptr<executor::TaskExecutor> getInstanceCleanupExecutor() const;
 

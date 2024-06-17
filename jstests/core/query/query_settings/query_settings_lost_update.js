@@ -5,13 +5,13 @@
  * @tags: [
  *   command_not_supported_in_serverless,
  *   directly_against_shardsvrs_incompatible,
- *   does_not_support_stepdowns,
- *   featureFlagQuerySettings,
  *   tenant_migration_incompatible,
  *   uses_parallel_shell,
+ *   requires_fcv_80,
  * ]
  */
 
+import {assertDropAndRecreateCollection} from "jstests/libs/collection_drop_recreate.js";
 import {configureFailPoint} from "jstests/libs/fail_point_util.js";
 import {FixtureHelpers} from "jstests/libs/fixture_helpers.js";
 import {funWithArgs} from "jstests/libs/parallel_shell_helpers.js";
@@ -25,20 +25,25 @@ if (!FixtureHelpers.isMongos(db) && !db.runCommand({hello: 1}).hasOwnProperty('s
 }
 
 const testConn = db.getMongo();
-const adminDB = testConn.getDB("admin");
-const qsutils = new QuerySettingsUtils(adminDB, jsTestName());
-
+// (Re)create the collection - will be sharded if required.
+const collName = jsTestName();
+const coll = assertDropAndRecreateCollection(db, collName);
+const ns = {
+    db: db.getName(),
+    coll: collName
+};
+const qsutils = new QuerySettingsUtils(db, collName);
 const queryA = qsutils.makeFindQueryInstance({filter: {a: 1}});
 const queryB = qsutils.makeFindQueryInstance({filter: {b: "string"}});
 const queryC = qsutils.makeFindQueryInstance({filter: {c: 1}});
 const querySettingsA = {
-    indexHints: {allowedIndexes: ["a_1", {$natural: 1}]}
+    indexHints: {ns, allowedIndexes: ["a_1", {$natural: 1}]}
 };
 const querySettingsB = {
-    indexHints: {allowedIndexes: ["b_1"]}
+    indexHints: {ns, allowedIndexes: ["b_1"]}
 };
 const querySettingsC = {
-    indexHints: {allowedIndexes: ["c_1"]}
+    indexHints: {ns, allowedIndexes: ["c_1"]}
 };
 
 function runSetQuerySettingsConcurrently(

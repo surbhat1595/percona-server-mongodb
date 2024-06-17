@@ -2,8 +2,6 @@
  * Tests that when certain planning-related server parameters are changed at runtime, the SBE plan
  * cache is cleared.
  * @tags: [
- *   # TODO SERVER-67607: Test plan cache with CQF enabled.
- *   cqf_experimental_incompatible,
  *   # This test is specifically verifying the behavior of the SBE plan cache.
  *   featureFlagSbeFull,
  * ]
@@ -20,6 +18,7 @@ const paramList = [
     {name: "internalQueryForceIntersectionPlans", value: true},
     {name: "internalQueryPlannerEnableIndexIntersection", value: false},
     {name: "internalQueryPlannerEnableHashIntersection", value: true},
+    {name: "internalQueryPlannerEnableIndexPruning", value: false},
     {name: "internalQueryCacheEvictionRatio", value: 11.0},
     {name: "internalQueryCacheWorksGrowthCoefficient", value: 3.0},
     {name: "internalQueryCacheDisableInactiveEntries", value: true},
@@ -56,6 +55,7 @@ const paramList = [
     {name: "internalCascadesOptimizerMinIndexEqPrefixes", value: 2},
     {name: "internalCascadesOptimizerMaxIndexEqPrefixes", value: 2},
     {name: "internalQuerySlotBasedExecutionDisableTimeSeriesPushdown", value: true},
+    {name: "internalQueryDisablePlanCache", value: true},
 ];
 
 const conn = MongoRunner.runMongod();

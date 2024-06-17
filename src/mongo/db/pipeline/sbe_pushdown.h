@@ -29,8 +29,11 @@
 
 #pragma once
 
-#include "mongo/db/exec/document_value/document_metadata_fields.h"
 #include <vector>
+
+#include "mongo/db/exec/document_value/document_metadata_fields.h"
+#include "mongo/db/pipeline/expression_context.h"
+#include "mongo/db/query/query_knob_configuration.h"
 
 namespace mongo {
 class CanonicalQuery;
@@ -55,4 +58,13 @@ void attachPipelineStages(const MultipleCollectionAccessor& collections,
                           const Pipeline* pipeline,
                           bool needsMerge,
                           CanonicalQuery* canonicalQuery);
+
+/**
+ * Set the minimum required compatibility based on the 'featureFlagSbeFull' and the
+ * query framework control knob. If 'featureFlagSbeFull' is true, set the compatibility to
+ * 'requiresSbeFull'; otherwise,  if query framework control knob is 'trySbeEngine', set
+ * compatibility to 'requiresTrySbe'; otherwise set it to 'noRequirements'.
+ */
+SbeCompatibility getMinRequiredSbeCompatibility(QueryFrameworkControlEnum currentQueryKnobFramework,
+                                                bool sbeFullEnabled);
 }  // namespace mongo

@@ -52,6 +52,7 @@
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/timestamp.h"
 #include "mongo/client/dbclient_cursor.h"
+#include "mongo/crypto/fle_crypto.h"
 #include "mongo/db/audit.h"
 #include "mongo/db/auth/action_type.h"
 #include "mongo/db/auth/authorization_session.h"
@@ -99,6 +100,7 @@
 #include "mongo/db/repl/tenant_migration_recipient_service.h"
 #include "mongo/db/s/config/configsvr_coordinator_service.h"
 #include "mongo/db/s/config/sharding_catalog_manager.h"
+#include "mongo/db/s/migration_blocking_operation/multi_update_coordinator.h"
 #include "mongo/db/s/resharding/coordinator_document_gen.h"
 #include "mongo/db/s/resharding/resharding_coordinator_service.h"
 #include "mongo/db/s/shard_authoritative_catalog_gen.h"
@@ -126,6 +128,7 @@
 #include "mongo/s/catalog/type_collection.h"
 #include "mongo/s/catalog/type_collection_gen.h"
 #include "mongo/s/catalog/type_index_catalog_gen.h"
+#include "mongo/s/migration_blocking_operation/migration_blocking_operation_feature_flags_gen.h"
 #include "mongo/s/resharding/resharding_feature_flag_gen.h"
 #include "mongo/s/sharding_feature_flags_gen.h"
 #include "mongo/s/sharding_state.h"
@@ -234,22 +237,29 @@ void deleteShardingStateRecoveryDoc(OperationContext* opCtx) {
 
 void _setShardedClusterCardinalityParameter(
     OperationContext* opCtx, const multiversion::FeatureCompatibilityVersion requestedVersion) {
-    // The config.shards collection is stable during FCV changes, so query that to discover the
-    // current number of shards.
-    DBDirectClient client(opCtx);
-    FindCommandRequest findRequest{NamespaceString::kConfigsvrShardsNamespace};
-    findRequest.setLimit(2);
-    auto numShards = client.find(std::move(findRequest))->itcount();
+    // If the replica set endpoint is not active, then it isn't safe to allow direct connections
+    // again after a second shard has been added. The replica set endpoint requires the cluster
+    // parameter to be correct (go back to false when the second shard is removed) so we will need
+    // to update the cluster parameter whenever replica set endpoint is enabled.
+    if (feature_flags::gFeatureFlagRSEndpointClusterCardinalityParameter.isEnabledOnVersion(
+            requestedVersion)) {
+        // The config.shards collection is stable during FCV changes, so query that to discover the
+        // current number of shards.
+        DBDirectClient client(opCtx);
+        FindCommandRequest findRequest{NamespaceString::kConfigsvrShardsNamespace};
+        findRequest.setLimit(2);
+        auto numShards = client.find(std::move(findRequest))->itcount();
 
-    // Prior to 7.3, the cluster parameter 'hasTwoOrMoreShards' gets set to true when the number
-    // of shards goes from 1 to 2 but doesn't get set to false when the number of shards goes down
-    // to 1.
-    if (numShards >= 2) {
-        return;
+        // Prior to 7.3, the cluster parameter 'hasTwoOrMoreShards' gets set to true when the number
+        // of shards goes from 1 to 2 but doesn't get set to false when the number of shards goes
+        // down to 1.
+        if (numShards >= 2) {
+            return;
+        }
+
+        uassertStatusOK(ShardingCatalogManager::get(opCtx)->updateClusterCardinalityParameter(
+            opCtx, numShards));
     }
-
-    uassertStatusOK(
-        ShardingCatalogManager::get(opCtx)->updateClusterCardinalityParameter(opCtx, numShards));
 }
 
 void uassertStatusOKIgnoreNSNotFound(Status status) {
@@ -619,14 +629,9 @@ private:
         }
 
         // TODO SERVER-77915: Remove once v8.0 branches out
-        if ((isUpgrading &&
-             feature_flags::gTrackUnshardedCollectionsOnShardingCatalog
-                 .isEnabledOnTargetFCVButDisabledOnOriginalFCV(requestedVersion,
-                                                               originalVersion)) ||
-            (isDowngrading &&
-             feature_flags::gTrackUnshardedCollectionsOnShardingCatalog
-                 .isDisabledOnTargetFCVButEnabledOnOriginalFCV(requestedVersion,
-                                                               originalVersion))) {
+        if (isDowngrading &&
+            feature_flags::gTrackUnshardedCollectionsUponMoveCollection
+                .isDisabledOnTargetFCVButEnabledOnOriginalFCV(requestedVersion, originalVersion)) {
             ShardingDDLCoordinatorService::getService(opCtx)
                 ->waitForCoordinatorsOfGivenTypeToComplete(
                     opCtx, DDLCoordinatorTypeEnum::kRenameCollection);
@@ -663,15 +668,19 @@ private:
                     opCtx, DDLCoordinatorTypeEnum::kCreateCollection);
         }
 
-        // TODO SERVER-77915: Remove once trackUnshardedCollections becomes lastLTS.
-        if ((isUpgrading &&
-             feature_flags::gTrackUnshardedCollectionsOnShardingCatalog
-                 .isEnabledOnTargetFCVButDisabledOnOriginalFCV(requestedVersion,
-                                                               originalVersion)) ||
-            (isDowngrading &&
-             feature_flags::gTrackUnshardedCollectionsOnShardingCatalog
-                 .isDisabledOnTargetFCVButEnabledOnOriginalFCV(requestedVersion,
-                                                               originalVersion))) {
+        // TODO SERVER-87119 remove the following scope once v8.0 branches out
+        if (isDowngrading &&
+            feature_flags::gConvertToCappedCoordinator.isDisabledOnTargetFCVButEnabledOnOriginalFCV(
+                requestedVersion, originalVersion)) {
+            ShardingDDLCoordinatorService::getService(opCtx)
+                ->waitForCoordinatorsOfGivenTypeToComplete(
+                    opCtx, DDLCoordinatorTypeEnum::kConvertToCapped);
+        }
+
+        // TODO SERVER-77915: Remove once v8.0 branches out.
+        if (isDowngrading &&
+            feature_flags::gTrackUnshardedCollectionsUponMoveCollection
+                .isDisabledOnTargetFCVButEnabledOnOriginalFCV(requestedVersion, originalVersion)) {
             ShardingDDLCoordinatorService::getService(opCtx)
                 ->waitForCoordinatorsOfGivenTypeToComplete(opCtx, DDLCoordinatorTypeEnum::kCollMod);
         }
@@ -724,8 +733,33 @@ private:
     // to happen during the upgrade. It is required that the code in this helper function is
     // idempotent and could be done after _runDowngrade even if it failed at any point in the middle
     // of _userCollectionsUassertsForDowngrade or _internalServerCleanupForDowngrade.
-    void _userCollectionsWorkForUpgrade() {
-        return;
+    void _userCollectionsWorkForUpgrade(
+        OperationContext* opCtx, const multiversion::FeatureCompatibilityVersion requestedVersion) {
+        const auto& [originalVersion, _] = getTransitionFCVFromAndTo(
+            serverGlobalParams.featureCompatibility.acquireFCVSnapshot().getVersion());
+        if (gFeatureFlagQERangeV2.isEnabledOnTargetFCVButDisabledOnOriginalFCV(requestedVersion,
+                                                                               originalVersion)) {
+            auto checkForDeprecatedQueryType = [](const Collection* collection) {
+                const auto& encryptedFields =
+                    collection->getCollectionOptions().encryptedFieldConfig;
+                if (encryptedFields) {
+                    uassert(ErrorCodes::CannotUpgrade,
+                            str::stream()
+                                << "Collection " << collection->ns().toStringForErrorMsg()
+                                << " has an encrypted field with query type rangePreview, "
+                                   "which is deprecated. Please drop this collection "
+                                   "before trying to upgrade FCV.",
+                            !hasQueryType(encryptedFields.get(),
+                                          QueryTypeEnum::RangePreviewDeprecated));
+                }
+                return true;
+            };
+            for (const auto& dbName : DatabaseHolder::get(opCtx)->getNames()) {
+                Lock::DBLock dbLock(opCtx, dbName, MODE_IS);
+                catalog::forEachCollectionFromDb(
+                    opCtx, dbName, MODE_IS, checkForDeprecatedQueryType);
+            }
+        }
     }
 
     void _maybeRemoveOldAuditConfig(
@@ -799,6 +833,7 @@ private:
         ON_BLOCK_EXIT([&] { WriteBlockBypass::get(opCtx).set(originalValue); });
         WriteBlockBypass::get(opCtx).set(true);
 
+        auto curop = CurOp::get(opCtx);
         for (const auto& dbName : DatabaseHolder::get(opCtx)->getNames()) {
             Lock::DBLock dbLock(opCtx, dbName, MODE_IX);
             catalog::forEachCollectionFromDb(
@@ -808,10 +843,36 @@ private:
                 [&](const Collection* collection) {
                     NamespaceStringOrUUID nsOrUUID(dbName, collection->uuid());
                     CollMod collModCmd(collection->ns());
+
+                    // Nested CurOp for collMod. Namespace should ideally be
+                    // the command namespace for 'dbName' but collMod internally
+                    // overrides the CurOp namespace (through OldClientContext)
+                    // with the namespace of the collection being modified.
+                    CurOp collModCurOp;
+                    collModCurOp.push(opCtx);
+                    collModCurOp.setGenericOpRequestDetails(collection->ns(),
+                                                            curop->getCommand(),
+                                                            collModCmd.toBSON({}),
+                                                            NetworkOp::dbMsg);
+
                     BSONObjBuilder unusedBuilder;
                     uassertStatusOK(
                         processCollModCommand(opCtx, nsOrUUID, collModCmd, &unusedBuilder));
 
+                    try {
+                        // Logs the collMod statistics if it took longer than the server
+                        // parameter `slowMs` to complete.
+                        collModCurOp.completeAndLogOperation(
+                            {MONGO_LOGV2_DEFAULT_COMPONENT, toLogService(opCtx->getService())},
+                            CollectionCatalog::get(opCtx)
+                                ->getDatabaseProfileSettings(dbName)
+                                .filter);
+                    } catch (const DBException& e) {
+                        LOGV2_WARNING(8592500,
+                                      "unable to log collMod operation during setFCV upgrade",
+                                      "dbName"_attr = dbName,
+                                      "error"_attr = e);
+                    }
                     return true;
                 },
                 [&](const Collection* coll) {
@@ -996,7 +1057,7 @@ private:
         // is idempotent and could be done after _runDowngrade even if it failed at any point in the
         // middle of _userCollectionsUassertsForDowngrade or _internalServerCleanupForDowngrade.
         if (!role || role->has(ClusterRole::None) || role->has(ClusterRole::ShardServer)) {
-            _userCollectionsWorkForUpgrade();
+            _userCollectionsWorkForUpgrade(opCtx, requestedVersion);
         }
 
         uassert(ErrorCodes::Error(549180),
@@ -1146,6 +1207,52 @@ private:
                         !hasShardingIndexCatalogEntries);
             }
         }
+
+        if (gFeatureFlagRecordIdsReplicated.isDisabledOnTargetFCVButEnabledOnOriginalFCV(
+                requestedVersion, originalVersion)) {
+            // so don't allow downgrading with such a collection.
+            for (const auto& dbName : DatabaseHolder::get(opCtx)->getNames()) {
+                Lock::DBLock dbLock(opCtx, dbName, MODE_IS);
+                catalog::forEachCollectionFromDb(
+                    opCtx,
+                    dbName,
+                    MODE_IS,
+                    [&](const Collection* collection) -> bool {
+                        uasserted(
+                            ErrorCodes::CannotDowngrade,
+                            fmt::format(
+                                "Cannot downgrade the cluster when there are collections with "
+                                "'recordIdsReplicated' enabled. Please unset the option or "
+                                "drop the collection(s) before downgrading. First detected "
+                                "collection with 'recordIdsReplicated' enabled: {} (UUID: {}).",
+                                collection->ns().toStringForErrorMsg(),
+                                collection->uuid().toString()));
+                    },
+                    [&](const Collection* collection) {
+                        return collection->areRecordIdsReplicated();
+                    });
+            }
+        }
+
+        if (!gFeatureFlagQERangeV2.isEnabledOnVersion(requestedVersion)) {
+            auto checkForNewRangeQueryType = [](const Collection* collection) {
+                const auto& encryptedFields =
+                    collection->getCollectionOptions().encryptedFieldConfig;
+                if (encryptedFields) {
+                    uassert(ErrorCodes::CannotDowngrade,
+                            str::stream() << "Collection " << collection->ns().toStringForErrorMsg()
+                                          << " has an encrypted field with query type range, "
+                                             "which is new in 8.0. Please drop this collection "
+                                             "before trying to downgrade FCV.",
+                            !hasQueryType(encryptedFields.get(), QueryTypeEnum::Range));
+                }
+                return true;
+            };
+            for (const auto& dbName : DatabaseHolder::get(opCtx)->getNames()) {
+                Lock::DBLock dbLock(opCtx, dbName, MODE_IS);
+                catalog::forEachCollectionFromDb(opCtx, dbName, MODE_IS, checkForNewRangeQueryType);
+            }
+        }
     }
 
     // Remove cluster parameters from the clusterParameters collections which are not enabled on
@@ -1271,9 +1378,14 @@ private:
                 requestedVersion,
                 originalVersion,
                 NamespaceString::kShardIndexCatalogNamespace);
+
+            abortAllMultiUpdateCoordinators(opCtx, requestedVersion, originalVersion);
         } else {
             _updateAuditConfigOnDowngrade(opCtx, requestedVersion);
         }
+        // TODO(SERVER-84271): Remove this when featureFlagReplicateVectoredInsertsTransactionally
+        // is removed.
+        _truncateRetryableWriteSessionsForDowngrade(opCtx);
     }
 
     void _dropInternalShardingIndexCatalogCollection(
@@ -1356,6 +1468,68 @@ private:
                     deletionStatus.isOK() ||
                         deletionStatus.code() == ErrorCodes::NamespaceNotFound);
         }
+    }
+
+    void abortAllMultiUpdateCoordinators(
+        OperationContext* opCtx,
+        const multiversion::FeatureCompatibilityVersion requestedVersion,
+        const multiversion::FeatureCompatibilityVersion originalVersion) {
+        if (!migration_blocking_operation::gFeatureFlagPauseMigrationsDuringMultiUpdatesAvailable
+                 .isDisabledOnTargetFCVButEnabledOnOriginalFCV(requestedVersion, originalVersion)) {
+            return;
+        }
+        MultiUpdateCoordinatorService::abortAndWaitForAllInstances(
+            opCtx,
+            {ErrorCodes::IllegalOperation,
+             fmt::format("FCV downgrading to {} and pauseMigrationsDuringMultiUpdates is not "
+                         "supported on this version",
+                         toString(requestedVersion))});
+    }
+
+    // Set config.transactions entries for retryable writes to appear to have a truncated oplog
+    // history.  This is to prevent attempting to read sessions which contain an oplog entry
+    // unparseable with an earlier binary, which would make that session unusable.
+    // TODO(SERVER-84271): Removed thi when featureFlagReplicateVectoredInsertsTransactionally
+    // is removed.
+    void _truncateRetryableWriteSessionsForDowngrade(OperationContext* opCtx) {
+        // Must use a new client/opCtx because the current one might have a session and direct
+        // writes to the config.transactions table are not permitted in a session.
+        auto newClient = opCtx->getServiceContext()->getService()->makeClient(
+            "TruncateRetryableWriteSessionsForDowngradeClient");
+        AlternativeClientRegion acr(newClient);
+        auto newOpCtx = cc().makeOperationContext();
+        DBDirectClient client(newOpCtx.get());
+        write_ops::UpdateCommandRequest update(NamespaceString::kSessionTransactionsTableNamespace);
+        update.setUpdates({[&]() {
+            write_ops::UpdateOpEntry entry;
+            // The relevant entries are not child sessions and have no state (only
+            // transactions have state).
+            BSONObjBuilder queryBuilder(BSON(SessionTxnRecord::kParentSessionIdFieldName
+                                             << BSON("$exists" << false)
+                                             << SessionTxnRecord::kStateFieldName
+                                             << BSON("$exists" << false)));
+            auto lsidToIgnore = opCtx->getLogicalSessionId();
+            if (lsidToIgnore) {
+                // Make sure we don't deadlock by trying to change the session of the opCtx
+                // which called setFeatureCompatibilityVersion.  It should be safe to leave
+                // this session alone because setFCV is not a retryable write.
+                queryBuilder.append(SessionTxnRecord::kSessionIdFieldName,
+                                    BSON("$ne" << lsidToIgnore->toBSON()));
+            }
+            entry.setQ(queryBuilder.obj());
+            // Set the last-write optime to something that won't appear in the oplog but
+            // also isn't null.  This will cause the TransactionParticipant to consider the
+            // transaction history truncated.  The fallbackOpObserver handles keeping the
+            // in-memory session catalog up to date.
+            entry.setU(write_ops::UpdateModification::parseFromClassicUpdate(
+                BSON("$set" << BSON(SessionTxnRecord::kLastWriteOpTimeFieldName
+                                    << repl::OpTime::max()))));
+            entry.setMulti(true);
+            return entry;
+        }()});
+        update.getWriteCommandRequestBase().setOrdered(false);
+        auto result = client.update(update);
+        LOGV2(8674100, "Truncated all retryable write sessions", "result"_attr = result);
     }
 
     /**
@@ -1670,6 +1844,23 @@ private:
             ShardingDDLCoordinatorService::getService(opCtx)
                 ->waitForCoordinatorsOfGivenTypeToComplete(
                     opCtx, DDLCoordinatorTypeEnum::kCreateCollection);
+        }
+
+        // TODO SERVER-77915: Remove once v8.0 branches out.
+        if (role && role->has(ClusterRole::ShardServer) &&
+            feature_flags::gTrackUnshardedCollectionsUponMoveCollection.isEnabledOnVersion(
+                requestedVersion)) {
+            ShardingDDLCoordinatorService::getService(opCtx)
+                ->waitForCoordinatorsOfGivenTypeToComplete(
+                    opCtx, DDLCoordinatorTypeEnum::kRenameCollection);
+        }
+
+        // TODO SERVER-77915: Remove once v8.0 branches out.
+        if (role && role->has(ClusterRole::ShardServer) &&
+            feature_flags::gTrackUnshardedCollectionsUponMoveCollection.isEnabledOnVersion(
+                requestedVersion)) {
+            ShardingDDLCoordinatorService::getService(opCtx)
+                ->waitForCoordinatorsOfGivenTypeToComplete(opCtx, DDLCoordinatorTypeEnum::kCollMod);
         }
 
         _maybeRemoveOldAuditConfig(opCtx, requestedVersion);

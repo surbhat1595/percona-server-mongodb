@@ -1655,7 +1655,10 @@ TEST_F(BottomRemoveTest, BottomRemoveNoUnderflow) {
 
 TEST(Accumulators, Rank) {
     auto expCtx = ExpressionContextForTest{};
-    assertExpectedResults<AccumulatorRank>(
+    auto accInit = [&](ExpressionContext* const expCtx) -> boost::intrusive_ptr<AccumulatorState> {
+        return AccumulatorRank::create(expCtx, true /* isAscending */);
+    };
+    assertExpectedResults(
         &expCtx,
         {
             // Document number is correct.
@@ -1673,12 +1676,16 @@ TEST(Accumulators, Rank) {
             {{Value{}, Value{}}, Value(1)},
 
         },
+        accInit,
         true /* rank can't be merged */);
 }
 
 TEST(Accumulators, DenseRank) {
     auto expCtx = ExpressionContextForTest{};
-    assertExpectedResults<AccumulatorDenseRank>(
+    auto accInit = [&](ExpressionContext* const expCtx) -> boost::intrusive_ptr<AccumulatorState> {
+        return AccumulatorDenseRank::create(expCtx, true /* isAscending */);
+    };
+    assertExpectedResults(
         &expCtx,
         {
             // Document number is correct.
@@ -1693,12 +1700,16 @@ TEST(Accumulators, DenseRank) {
             {{Value(1), Value(1), Value(1), Value(3), Value(3), Value(7)}, Value(3)},
 
         },
+        accInit,
         true /* denseRank can't be merged */);
 }
 
 TEST(Accumulators, DocumentNumberRank) {
     auto expCtx = ExpressionContextForTest{};
-    assertExpectedResults<AccumulatorDocumentNumber>(
+    auto accInit = [&](ExpressionContext* const expCtx) -> boost::intrusive_ptr<AccumulatorState> {
+        return AccumulatorDocumentNumber::create(expCtx, true /* isAscending */);
+    };
+    assertExpectedResults(
         &expCtx,
         {
             // Document number is correct.
@@ -1712,6 +1723,7 @@ TEST(Accumulators, DocumentNumberRank) {
             {{Value(1), Value(1), Value(1), Value(3), Value(3), Value(7)}, Value(6)},
 
         },
+        accInit,
         true /* denseRank can't be merged */);
 }
 
@@ -1914,6 +1926,19 @@ Document parseAndSerializeAccum(
     std::function<AccumulationExpression(
         ExpressionContext* const expCtx, BSONElement, VariablesParseState)> func) {
     SerializationOptions options = SerializationOptions::kDebugShapeAndMarkIdentifiers_FOR_TEST;
+    auto expCtx = make_intrusive<ExpressionContextForTest>();
+    VariablesParseState vps = expCtx->variablesParseState;
+
+    auto expr = func(expCtx.get(), elem, vps);
+    auto accum = expr.factory();
+    return accum->serialize(expr.initializer, expr.argument, options);
+}
+
+Document parseAndSerializeAccumRepresentative(
+    const BSONElement elem,
+    std::function<AccumulationExpression(
+        ExpressionContext* const expCtx, BSONElement, VariablesParseState)> func) {
+    SerializationOptions options = SerializationOptions::kRepresentativeQueryShapeSerializeOptions;
     auto expCtx = make_intrusive<ExpressionContextForTest>();
     VariablesParseState vps = expCtx->variablesParseState;
 
@@ -2128,6 +2153,23 @@ TEST(AccumulatorMergeObjects, MergingWithEmptyDocumentShouldIgnore) {
     auto second = Value(Document({}));
     auto expected = Value(Document({{"a", 0}, {"b", 1}, {"c", 1}}));
     assertExpectedResults<AccumulatorMergeObjects>(&expCtx, {{{first, second}, expected}});
+}
+
+TEST(AccumulatorMergeObjects, RoundTripSerializationLiteral) {
+    auto mergeObjs = BSON("$mergeObjects" << BSON("$literal" << BSON_ARRAY(5 << true)));
+    auto actual = parseAndSerializeAccumRepresentative(
+        mergeObjs.firstElement(),
+        &genericParseSingleExpressionAccumulator<AccumulatorMergeObjects>);
+    ASSERT_DOCUMENT_EQ_AUTO(  // NOLINT
+        R"({"$mergeObjects":{"$const":[2,"or more types"]}})",
+        actual);
+
+    auto roundTrip = parseAndSerializeAccumRepresentative(
+        actual.toBson().firstElement(),
+        &genericParseSingleExpressionAccumulator<AccumulatorMergeObjects>);
+    ASSERT_DOCUMENT_EQ_AUTO(  // NOLINT
+        R"({"$mergeObjects":{"$const":[2,"or more types"]}})",
+        roundTrip);
 }
 
 }  // namespace AccumulatorTests

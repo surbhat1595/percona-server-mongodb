@@ -2,13 +2,14 @@
  * Tests that CRUD and DDL commands work correctly when the replica set endpoint is used.
  *
  * @tags: [
- *   requires_fcv_73,
- *   featureFlagEmbeddedRouter,
+ *   requires_fcv_80,
+ *   featureFlagRouterPort,
  *   featureFlagSecurityToken,
- *   requires_persistence
+ *   requires_persistence,
  * ]
  */
 
+import {runCommandWithSecurityToken} from "jstests/libs/multitenancy_utils.js";
 import {extractUUIDFromObject} from "jstests/libs/uuid_util.js";
 import {
     getReplicaSetURL,
@@ -16,6 +17,9 @@ import {
     makeCreateUserCmdObj,
     waitForAutoBootstrap
 } from "jstests/noPassthrough/rs_endpoint/lib/util.js";
+import {
+    moveDatabaseAndUnshardedColls
+} from "jstests/sharding/libs/move_database_and_unsharded_coll_helper.js";
 
 function runTests(shard0Primary, tearDownFunc, isMultitenant) {
     jsTest.log("Running tests for " + shard0Primary.host +
@@ -60,16 +64,22 @@ function runTests(shard0Primary, tearDownFunc, isMultitenant) {
 
     // Run the enableSharding and addShard commands against shard0's primary mongod instead
     // to verify that replica set endpoint supports router commands.
-    // TODO (PM-3364): Remove the enableSharding command below once we start tracking unsharded
-    // collections.
-    assert.commandWorked(shard0Primary.adminCommand({enableSharding: dbName}));
     assert.commandWorked(
         shard0Primary.adminCommand({addShard: shard1Rst.getURL(), name: shard1Name}));
 
-    const shard0URL = getReplicaSetURL(shard0Primary);
-    // TODO (SERVER-83380): Connect to the router port on a shardsvr mongod instead.
-    const mongos = MongoRunner.runMongos({configdb: shard0URL});
-    const mongosTestColl = mongos.getDB(dbName).getCollection(collName);
+    const {router, mongos} = (() => {
+        if (shard0Primary.routerHost) {
+            const router = new Mongo(shard0Primary.routerHost);
+            return {
+                router
+            }
+        }
+        const shard0URL = getReplicaSetURL(shard0Primary);
+        const mongos = MongoRunner.runMongos({configdb: shard0URL});
+        return {router: mongos, mongos};
+    })();
+    jsTest.log("Using " + tojsononeline({router, mongos}));
+    const mongosTestColl = router.getDB(dbName).getCollection(collName);
 
     jsTest.log("Running tests for " + shard0Primary.host +
                " while the cluster contains two shards (one config shard and one regular shard)");
@@ -80,10 +90,10 @@ function runTests(shard0Primary, tearDownFunc, isMultitenant) {
     // shard1 doesn't have any documents for the collection.
     assert.eq(shard1TestColl.find().itcount(), 0);
 
-    assert.commandWorked(mongos.adminCommand({shardCollection: ns, key: {x: 1}}));
-    assert.commandWorked(mongos.adminCommand({split: ns, middle: {x: 0}}));
+    assert.commandWorked(router.adminCommand({shardCollection: ns, key: {x: 1}}));
+    assert.commandWorked(router.adminCommand({split: ns, middle: {x: 0}}));
     assert.commandWorked(
-        mongos.adminCommand({moveChunk: ns, find: {x: 0}, to: shard1Name, _waitForDelete: true}));
+        router.adminCommand({moveChunk: ns, find: {x: 0}, to: shard1Name, _waitForDelete: true}));
 
     assert.eq(mongosTestColl.find().itcount(), 2);
     // shard0 and shard1 each have one document for the collection.
@@ -98,9 +108,9 @@ function runTests(shard0Primary, tearDownFunc, isMultitenant) {
 
     // Remove the second shard from the cluster.
     assert.commandWorked(
-        mongos.adminCommand({moveChunk: ns, find: {x: 0}, to: "config", _waitForDelete: true}));
+        router.adminCommand({moveChunk: ns, find: {x: 0}, to: "config", _waitForDelete: true}));
     assert.soon(() => {
-        const res = assert.commandWorked(mongos.adminCommand({removeShard: shard1Name}));
+        const res = assert.commandWorked(router.adminCommand({removeShard: shard1Name}));
         return res.state == "completed";
     });
     assert(shard1TestColl.drop());
@@ -113,20 +123,31 @@ function runTests(shard0Primary, tearDownFunc, isMultitenant) {
     assert.eq(shard1TestColl.find().itcount(), 0);
 
     // Add the second shard back but convert the config shard to dedicated config server.
-    assert.commandWorked(mongos.adminCommand({addShard: shard1Rst.getURL(), name: shard1Name}));
-    assert.commandWorked(mongos.adminCommand({movePrimary: dbName, to: shard1Name}));
-    assert.commandWorked(mongos.adminCommand({transitionToDedicatedConfigServer: 1}));
+    assert.commandWorked(router.adminCommand({addShard: shard1Rst.getURL(), name: shard1Name}));
+    moveDatabaseAndUnshardedColls(router.getDB(dbName), shard1Name);
+    assert.commandWorked(router.adminCommand({transitionToDedicatedConfigServer: 1}));
+
+    // Ensure the balancer is enabled so sharded data can be moved out by the transition to
+    // dedicated command.
+    assert.commandWorked(router.adminCommand({balancerStart: 1}));
+
+    assert.soon(() => {
+        let res = router.adminCommand({transitionToDedicatedConfigServer: 1});
+        return res.state == "completed";
+    });
 
     jsTest.log("Running tests for " + shard0Primary.host +
                " while the cluster contains one shard (regular shard)");
 
     assert.eq(mongosTestColl.find().itcount(), 3);
-    assert.eq(shard0TestColl.find().itcount(), 3);
-    assert.eq(shard1TestColl.find().itcount(), 0);
+    assert.eq(shard0TestColl.find().itcount(), 0);
+    assert.eq(shard1TestColl.find().itcount(), 3);
 
     tearDownFunc();
     shard1Rst.stopSet();
-    MongoRunner.stopMongos(mongos);
+    if (mongos) {
+        MongoRunner.stopMongos(mongos);
+    }
 }
 
 {
@@ -183,7 +204,7 @@ function runTests(shard0Primary, tearDownFunc, isMultitenant) {
 
 {
     jsTest.log("Running tests for a serverless replica set bootstrapped as a single-shard cluster");
-    // For serverless, commands against user collections require the "$tenant" field and auth.
+    // For serverless, commands against user collections require the unsigned token and auth.
     const keyFile = "jstests/libs/key1";
     const tenantId = ObjectId();
     const vtsKey = "secret";
@@ -221,14 +242,15 @@ function runTests(shard0Primary, tearDownFunc, isMultitenant) {
         privileges: [{resource: {db: "config", collection: ""}, actions: ["find"]}],
         tenantId
     };
-    const testUser =
-        {userName: "testUser", password: "testUserPwd", roles: [testRole.name], tenantId};
-    testUser.securityToken =
-        _createSecurityToken({user: testUser.userName, db: authDbName, tenant: tenantId}, vtsKey);
-    assert.commandWorked(adminDB.runCommand(makeCreateRoleCmdObj(testRole)));
-    assert.commandWorked(adminDB.runCommand(makeCreateUserCmdObj(testUser)));
+    const testUser = {userName: "testUser", password: "testUserPwd", roles: [testRole.name]};
+    const unsignedToken = _createTenantToken({tenant: tenantId});
+    assert.commandWorked(
+        runCommandWithSecurityToken(unsignedToken, adminDB, makeCreateRoleCmdObj(testRole)));
+    assert.commandWorked(
+        runCommandWithSecurityToken(unsignedToken, adminDB, makeCreateUserCmdObj(testUser)));
     adminDB.logout();
 
-    primary._setSecurityToken(testUser.securityToken);
+    primary._setSecurityToken(
+        _createSecurityToken({user: testUser.userName, db: authDbName, tenant: tenantId}, vtsKey));
     runTests(primary /* shard0Primary */, tearDownFunc, true /* isMultitenant */);
 }

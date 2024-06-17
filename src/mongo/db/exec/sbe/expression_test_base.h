@@ -115,6 +115,14 @@ protected:
     }
 
     /**
+     * Compile and run the given expression.
+     */
+    FastTuple<bool, value::TypeTags, value::Value> runExpression(const EExpression& expr) {
+        auto compiledExpr = expr.compile(_ctx);
+        return _vm.run(compiledExpr.get());
+    }
+
+    /**
      * The caller takes ownership of the Value returned by this function and must call
      * 'releaseValue()' on it. The preferred way to ensure the Value is properly released is to
      * immediately store it in a ValueGuard.
@@ -186,134 +194,19 @@ protected:
         ASSERT_EQUALS(resultTag, sbe::value::TypeTags::Nothing);
     }
 
-    void assertBlockEq(value::TypeTags blockTag,
-                       value::Value blockVal,
-                       const std::vector<std::pair<value::TypeTags, value::Value>>& expected) {
-        ASSERT_EQ(blockTag, value::TypeTags::valueBlock);
-        auto* block = value::bitcastTo<value::ValueBlock*>(blockVal);
-        auto extracted = block->extract();
-        ASSERT_EQ(expected.size(), extracted.count);
+    static std::pair<value::TypeTags, value::Value> makeEmptyState(
+        size_t maxSize, int32_t memLimit = std::numeric_limits<int32_t>::max()) {
+        auto [stateTag, stateVal] = value::makeNewArray();
+        auto state = value::getArrayView(stateVal);
 
-        for (size_t i = 0; i < extracted.count; ++i) {
-            auto [t, v] = value::compareValue(
-                extracted.tags[i], extracted.vals[i], expected[i].first, expected[i].second);
-            // ASSERT_EQ(t, value::TypeTags::NumberInt32) << extracted;
-            // ASSERT_EQ(value::bitcastTo<int32_t>(v), 0)
-            ASSERT_THAT((std::pair{t, v}), ValueEq(std::pair{value::TypeTags::NumberInt32, 0}))
-                << "Got " << extracted[i] << " expected " << expected[i] << " full extracted output"
-                << extracted;
-        }
-    }
+        state->push_back(value::makeNewArray() /* internalArr */);
+        state->push_back(makeInt64(0) /* StartIdx */);
+        state->push_back(makeInt64(maxSize) /* MaxSize */);
+        state->push_back(makeInt32(0) /* MemUsage */);
+        state->push_back(makeInt32(memLimit) /* MemLimit */);
+        state->push_back(makeBool(true) /* IsGroupAccum */);
 
-    static std::pair<value::TypeTags, value::Value> makeBsonArray(const BSONArray& ba) {
-        return value::copyValue(value::TypeTags::bsonArray,
-                                value::bitcastFrom<const char*>(ba.objdata()));
-    }
-
-
-    static std::pair<value::TypeTags, value::Value> makeBsonObject(const BSONObj& bo) {
-        return value::copyValue(value::TypeTags::bsonObject,
-                                value::bitcastFrom<const char*>(bo.objdata()));
-    }
-
-    static std::pair<value::TypeTags, value::Value> makeArraySet(const BSONArray& arr) {
-        auto [tmpTag, tmpVal] = makeBsonArray(arr);
-        value::ValueGuard tmpGuard{tmpTag, tmpVal};
-
-        value::ArrayEnumerator enumerator{tmpTag, tmpVal};
-
-        auto [arrTag, arrVal] = value::makeNewArraySet();
-        value::ValueGuard guard{arrTag, arrVal};
-
-        auto arrView = value::getArraySetView(arrVal);
-
-        while (!enumerator.atEnd()) {
-            auto [tag, val] = enumerator.getViewOfValue();
-            enumerator.advance();
-
-            auto [copyTag, copyVal] = value::copyValue(tag, val);
-            arrView->push_back(copyTag, copyVal);
-        }
-        guard.reset();
-
-        return {arrTag, arrVal};
-    }
-
-    static std::pair<value::TypeTags, value::Value> makeArray(const BSONArray& arr) {
-        auto [tmpTag, tmpVal] = makeBsonArray(arr);
-        value::ValueGuard tmpGuard{tmpTag, tmpVal};
-
-        value::ArrayEnumerator enumerator{tmpTag, tmpVal};
-
-        auto [arrTag, arrVal] = value::makeNewArray();
-        value::ValueGuard guard{arrTag, arrVal};
-
-        auto arrView = value::getArrayView(arrVal);
-
-        while (!enumerator.atEnd()) {
-            auto [tag, val] = enumerator.getViewOfValue();
-            enumerator.advance();
-
-            auto [copyTag, copyVal] = value::copyValue(tag, val);
-            arrView->push_back(copyTag, copyVal);
-        }
-        guard.reset();
-
-        return {arrTag, arrVal};
-    }
-
-    static std::pair<value::TypeTags, value::Value> makeObject(const BSONObj& obj) {
-        auto [tmpTag, tmpVal] = makeBsonObject(obj);
-        value::ValueGuard tmpGuard{tmpTag, tmpVal};
-
-        value::ObjectEnumerator enumerator{tmpTag, tmpVal};
-
-        auto [objTag, objVal] = value::makeNewObject();
-        value::ValueGuard guard{objTag, objVal};
-
-        auto objView = value::getObjectView(objVal);
-
-        while (!enumerator.atEnd()) {
-            auto [tag, val] = enumerator.getViewOfValue();
-            auto [copyTag, copyVal] = value::copyValue(tag, val);
-            objView->push_back(enumerator.getFieldName(), copyTag, copyVal);
-            enumerator.advance();
-        }
-        guard.reset();
-
-        return {objTag, objVal};
-    }
-
-    static std::pair<value::TypeTags, value::Value> makeNothing() {
-        return {value::TypeTags::Nothing, value::bitcastFrom<int64_t>(0)};
-    }
-
-    static std::pair<value::TypeTags, value::Value> makeNull() {
-        return {value::TypeTags::Null, value::bitcastFrom<int64_t>(0)};
-    }
-
-    static std::pair<value::TypeTags, value::Value> makeInt32(int32_t value) {
-        return {value::TypeTags::NumberInt32, value::bitcastFrom<int32_t>(value)};
-    }
-
-    static std::pair<value::TypeTags, value::Value> makeInt64(int64_t value) {
-        return {value::TypeTags::NumberInt64, value::bitcastFrom<int64_t>(value)};
-    }
-
-    static std::pair<value::TypeTags, value::Value> makeDouble(double value) {
-        return {value::TypeTags::NumberDouble, value::bitcastFrom<double>(value)};
-    }
-
-    static std::pair<value::TypeTags, value::Value> makeDecimal(std::string value) {
-        return value::makeCopyDecimal(Decimal128(value));
-    }
-
-    static std::pair<value::TypeTags, value::Value> makeBool(bool value) {
-        return {value::TypeTags::Boolean, value::bitcastFrom<bool>(value)};
-    }
-
-    static std::pair<value::TypeTags, value::Value> makeTimestamp(Timestamp timestamp) {
-        return {value::TypeTags::Timestamp, value::bitcastFrom<uint64_t>(timestamp.asULL())};
+        return {stateTag, stateVal};
     }
 
     static std::unique_ptr<EConstant> makeC(value::TypeTags tag, value::Value value) {

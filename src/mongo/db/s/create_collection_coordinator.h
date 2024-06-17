@@ -79,6 +79,19 @@ std::unique_ptr<InitialSplitPolicy> createPolicy(
     bool isUnsplittable,
     boost::optional<ShardId> dataShard,
     boost::optional<std::vector<ShardId>> availableShardIds = boost::none);
+
+/**
+ * Generates, using a ShardsvrCreateCollectionRequest as source, a CreateCommand that
+ * can be used with the command execution framework to create a collection on this
+ * shard server.
+ *
+ * TODO(SERVER-81447): build CreateCommand by simply extracting CreateCollectionRequest
+ * from ShardsvrCreateCollectionRequest. Also, see SERVER-65865.
+ */
+CreateCommand makeCreateCommand(OperationContext* opCtx,
+                                const NamespaceString& nss,
+                                const ShardsvrCreateCollectionRequest& request);
+
 }  // namespace create_collection_util
 
 // This interface allows the retrieval of the outcome of a shardCollection request (which may be
@@ -87,6 +100,12 @@ class CreateCollectionResponseProvider {
 public:
     virtual CreateCollectionResponse getResult(OperationContext* opCtx) = 0;
     virtual ~CreateCollectionResponseProvider() {}
+};
+
+struct OptionsAndIndexes {
+    BSONObj options;
+    std::vector<BSONObj> indexSpecs;
+    BSONObj idIndexSpec;
 };
 
 // TODO (SERVER-79304): Remove once 8.0 becomes last LTS.
@@ -108,7 +127,7 @@ public:
                               << NamespaceStringUtil::serialize(
                                      originalNss(), SerializationContext::stateDefault()))) {}
 
-    ~CreateCollectionCoordinatorLegacy() = default;
+    ~CreateCollectionCoordinatorLegacy() override = default;
 
 
     void checkIfOptionsConflict(const BSONObj& coorDoc) const override;
@@ -128,6 +147,9 @@ private:
     StringData serializePhase(const Phase& phase) const override {
         return CreateCollectionCoordinatorPhaseLegacy_serializer(phase);
     }
+
+    OptionsAndIndexes _getCollectionOptionsAndIndexes(OperationContext* opCtx,
+                                                      const NamespaceStringOrUUID& nssOrUUID);
 
     ExecutorFuture<void> _runImpl(std::shared_ptr<executor::ScopedTaskExecutor> executor,
                                   const CancellationToken& token) noexcept override;
@@ -170,7 +192,7 @@ public:
                               << NamespaceStringUtil::serialize(
                                      originalNss(), SerializationContext::stateDefault()))) {}
 
-    ~CreateCollectionCoordinator() = default;
+    ~CreateCollectionCoordinator() override = default;
 
 
     void checkIfOptionsConflict(const BSONObj& coorDoc) const override;
@@ -202,15 +224,27 @@ private:
 
     // Enter to the critical section on the coordinator for the namespace and its buckets namespace.
     // Only blocks writes.
-    void _enterWriteCriticalSectionOnCoordinatorAndDataShard(
-        const std::shared_ptr<executor::ScopedTaskExecutor>& executor,
-        const CancellationToken& token);
+    void _enterWriteCriticalSectionOnCoordinator();
 
     // Translate the request parameters and persist them in the coordinator document.
     void _translateRequestParameters();
 
+    // Enter to the critical section on the coordinator for the namespace and its buckets namespace.
+    // Only blocks writes. Additionally, checks if the collection is empty and sets the
+    // collectionExistsAndIsEmpty parameter on the coordiantor document.
+    void _enterWriteCriticalSectionOnDataShardAndCheckCollectionEmpty(
+        const std::shared_ptr<executor::ScopedTaskExecutor>& executor,
+        const CancellationToken& token);
+
+    // Clone the indexes from the data shard to the coordinator. This ensures that the coordinator
+    // has the most up to date indexes.
+    void _syncIndexesOnCoordinator(const std::shared_ptr<executor::ScopedTaskExecutor>& executor,
+                                   const CancellationToken& token);
+
     // Ensure that the collection is created locally and build the shard key index if necessary.
-    void _createCollectionOnCoordinator();
+    void _createCollectionOnCoordinator(
+        const std::shared_ptr<executor::ScopedTaskExecutor>& executor,
+        const CancellationToken& token);
 
     // Enter to the critical section on the specified shards. Blocks writes and reads.
     void _enterCriticalSectionOnShards(
@@ -224,6 +258,10 @@ private:
     // Enter to the critical section on all the shards. Blocks writes and reads.
     void _enterCriticalSection(const std::shared_ptr<executor::ScopedTaskExecutor>& executor,
                                const CancellationToken& token);
+
+    // Fetches the collection options and indexes from the specified shard.
+    OptionsAndIndexes _getCollectionOptionsAndIndexes(OperationContext* opCtx,
+                                                      const ShardId& fromShard);
 
     // Broadcast create collection to the other shards.
     void _createCollectionOnParticipants(
@@ -243,7 +281,6 @@ private:
 
     // Exit critical sections on participant shards.
     void _exitCriticalSectionOnShards(OperationContext* opCtx,
-                                      const NamespaceString& nss,
                                       bool throwIfReasonDiffers,
                                       std::shared_ptr<executor::ScopedTaskExecutor> executor,
                                       const CancellationToken& token,

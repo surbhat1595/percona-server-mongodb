@@ -94,7 +94,7 @@ inline void assertBSONObjsSame(const std::vector<BSONObj>& expectedBSON,
 class ConfigServerTestFixture : public ShardingMongoDTestFixture {
 protected:
     explicit ConfigServerTestFixture(Options options = {}, bool setUpMajorityReads = true);
-    ~ConfigServerTestFixture();
+    ~ConfigServerTestFixture() override;
 
     void setUp() override;
     void tearDown() override;
@@ -164,9 +164,12 @@ protected:
     /**
      * Setup the config.chunks collection to contain the given chunks.
      */
-    CollectionType setupCollection(const NamespaceString& nss,
-                                   const KeyPattern& shardKey,
-                                   const std::vector<ChunkType>& chunks);
+    CollectionType setupCollection(
+        const NamespaceString& nss,
+        const KeyPattern& shardKey,
+        const std::vector<ChunkType>& chunks,
+        std::function<void(CollectionType& coll)> collectionCustomizer = [](CollectionType& coll) {
+        });
 
     /**
      * Retrieves the chunk document <uuid, minKey> from the config server.

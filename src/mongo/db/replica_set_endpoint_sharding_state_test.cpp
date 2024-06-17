@@ -49,6 +49,8 @@ protected:
 private:
     RAIIServerParameterControllerForTest _replicaSetEndpointController{
         "featureFlagReplicaSetEndpoint", true};
+
+    RAIIServerParameterControllerForTest _multitenanyController{"multitenancySupport", false};
 };
 
 TEST_F(ReplicaSetEndpointShardingStateTest, SetUnSetGetIsConfigShard) {
@@ -122,21 +124,10 @@ TEST_F(ReplicaSetEndpointShardingStateTest, SupportsReplicaSetEndpoint) {
 
     auto shardingState = ReplicaSetEndpointShardingState::get(getServiceContext());
     shardingState->setIsConfigShard(true);
+    shardingState->setIsReplicaSetMember(true);
 
     ASSERT(shardingState->isConfigShardForTest());
     ASSERT(shardingState->supportsReplicaSetEndpoint());
-}
-
-TEST_F(ReplicaSetEndpointShardingStateTest, SupportsReplicaSetEndpoint_NotRouterServer) {
-    serverGlobalParams.clusterRole = {ClusterRole::ShardServer, ClusterRole::ConfigServer};
-    setHasTwoOrShardsClusterParameter(false);
-    ASSERT_FALSE(getHasTwoOrShardsClusterParameter());
-
-    auto shardingState = ReplicaSetEndpointShardingState::get(getServiceContext());
-    shardingState->setIsConfigShard(true);
-
-    ASSERT(shardingState->isConfigShardForTest());
-    ASSERT_FALSE(shardingState->supportsReplicaSetEndpoint());
 }
 
 TEST_F(ReplicaSetEndpointShardingStateTest, SupportsReplicaSetEndpoint_NotConfigShard) {
@@ -146,8 +137,22 @@ TEST_F(ReplicaSetEndpointShardingStateTest, SupportsReplicaSetEndpoint_NotConfig
     ASSERT_FALSE(getHasTwoOrShardsClusterParameter());
 
     auto shardingState = ReplicaSetEndpointShardingState::get(getServiceContext());
+    shardingState->setIsReplicaSetMember(true);
 
     ASSERT_FALSE(shardingState->isConfigShardForTest());
+    ASSERT_FALSE(shardingState->supportsReplicaSetEndpoint());
+}
+
+TEST_F(ReplicaSetEndpointShardingStateTest, SupportsReplicaSetEndpoint_NotReplicaSetMember) {
+    serverGlobalParams.clusterRole = {
+        ClusterRole::ShardServer, ClusterRole::ConfigServer, ClusterRole::RouterServer};
+    setHasTwoOrShardsClusterParameter(false);
+    ASSERT_FALSE(getHasTwoOrShardsClusterParameter());
+
+    auto shardingState = ReplicaSetEndpointShardingState::get(getServiceContext());
+    shardingState->setIsConfigShard(true);
+
+    ASSERT_TRUE(shardingState->isConfigShardForTest());
     ASSERT_FALSE(shardingState->supportsReplicaSetEndpoint());
 }
 
@@ -159,6 +164,7 @@ TEST_F(ReplicaSetEndpointShardingStateTest, SupportsReplicaSetEndpoint_HasTwoOrM
 
     auto shardingState = ReplicaSetEndpointShardingState::get(getServiceContext());
     shardingState->setIsConfigShard(true);
+    shardingState->setIsReplicaSetMember(true);
 
     ASSERT_TRUE(shardingState->isConfigShardForTest());
     ASSERT_FALSE(shardingState->supportsReplicaSetEndpoint());
@@ -174,6 +180,22 @@ TEST_F(ReplicaSetEndpointShardingStateTest, SupportsReplicaSetEndpoint_FeatureFl
 
     auto shardingState = ReplicaSetEndpointShardingState::get(getServiceContext());
     shardingState->setIsConfigShard(true);
+    shardingState->setIsReplicaSetMember(true);
+
+    ASSERT_TRUE(shardingState->isConfigShardForTest());
+    ASSERT_FALSE(shardingState->supportsReplicaSetEndpoint());
+}
+
+TEST_F(ReplicaSetEndpointShardingStateTest, SupportsReplicaSetEndpoint_Multitenant) {
+    serverGlobalParams.clusterRole = {
+        ClusterRole::ShardServer, ClusterRole::ConfigServer, ClusterRole::RouterServer};
+    setHasTwoOrShardsClusterParameter(false);
+    ASSERT_FALSE(getHasTwoOrShardsClusterParameter());
+    RAIIServerParameterControllerForTest replicaSetEndpointController{"multitenancySupport", true};
+
+    auto shardingState = ReplicaSetEndpointShardingState::get(getServiceContext());
+    shardingState->setIsConfigShard(true);
+    shardingState->setIsReplicaSetMember(true);
 
     ASSERT_TRUE(shardingState->isConfigShardForTest());
     ASSERT_FALSE(shardingState->supportsReplicaSetEndpoint());

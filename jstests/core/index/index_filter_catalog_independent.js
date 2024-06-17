@@ -11,19 +11,22 @@
  *   assumes_read_preference_unchanged,
  *   does_not_support_stepdowns,
  *   tenant_migration_incompatible,
+ *   assumes_balancer_off,
  * ]
  */
 import {
     getOptimizer,
     getPlanStages,
+    getQueryPlanners,
     getWinningPlan,
     getWinningPlanFromExplain,
     isCollscan
 } from "jstests/libs/analyze_plan.js";
+import {assertDropAndRecreateCollection} from "jstests/libs/collection_drop_recreate.js";
 
 const collName = "index_filter_catalog_independent";
 const coll = db[collName];
-coll.drop();
+assertDropAndRecreateCollection(db, collName, {});
 
 /*
  * Check that there's one index filter on the given query which allows only 'indexes'.
@@ -57,21 +60,24 @@ function assertIsIxScanOnIndex(explain, keyPattern) {
 }
 
 function checkIndexFilterSet(explain, shouldBeSet) {
-    if (explain.queryPlanner.winningPlan.shards) {
-        for (let shard of explain.queryPlanner.winningPlan.shards) {
-            assert.eq(shard.indexFilterSet, shouldBeSet);
-        }
-    } else {
-        assert.eq(explain.queryPlanner.indexFilterSet, shouldBeSet);
-    }
+    getQueryPlanners(explain).forEach((queryPlanner) => {
+        // When field "indexFilterSet" is not set (indicated as value 'undefined'), convert it to
+        // false.
+        assert.eq(!!queryPlanner.indexFilterSet, shouldBeSet, explain);
+    });
 }
+
+// Verify that no index filter on "find" command is applied when no index filters are set on the
+// collection.
+let explain = assert.commandWorked(coll.find({x: 3}).explain());
+checkIndexFilterSet(explain, false);
 
 assert.commandWorked(coll.createIndexes([{x: 1}, {x: 1, y: 1}]));
 assert.commandWorked(
     db.runCommand({planCacheSetFilter: collName, query: {"x": 3}, indexes: [{x: 1, y: 1}]}));
 assertOneIndexFilter({x: 3}, [{x: 1, y: 1}]);
 
-let explain = assert.commandWorked(coll.find({x: 3}).explain());
+explain = assert.commandWorked(coll.find({x: 3}).explain());
 checkIndexFilterSet(explain, true);
 assertIsIxScanOnIndex(explain, {x: 1, y: 1});
 

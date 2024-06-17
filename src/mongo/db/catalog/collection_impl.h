@@ -94,7 +94,7 @@ public:
                             std::shared_ptr<BSONCollectionCatalogEntry::MetaData> metadata,
                             std::unique_ptr<RecordStore> recordStore);
 
-    ~CollectionImpl();
+    ~CollectionImpl() override;
 
     std::shared_ptr<Collection> clone() const final;
 
@@ -247,7 +247,8 @@ public:
     void setTimeseriesBucketingParametersChanged(OperationContext* opCtx,
                                                  boost::optional<bool> value) final;
 
-    bool doesTimeseriesBucketsDocContainMixedSchemaData(const BSONObj& bucketsDoc) const final;
+    StatusWith<bool> doesTimeseriesBucketsDocContainMixedSchemaData(
+        const BSONObj& bucketsDoc) const final;
 
     bool getRequiresTimeseriesExtendedRangeSupport() const final;
     void setRequiresTimeseriesExtendedRangeSupport(OperationContext* opCtx) const final;
@@ -267,9 +268,13 @@ public:
                             boost::optional<long long> newCappedSize,
                             boost::optional<long long> newCappedMax) final;
 
+    void unsetRecordIdsReplicated(OperationContext* opCtx) final;
+
     //
     // Stats
     //
+
+    bool areRecordIdsReplicated() const final;
 
     bool isCapped() const final;
     long long getCappedMaxDocs() const final;
@@ -297,7 +302,7 @@ public:
      */
     bool isEmpty(OperationContext* opCtx) const final;
 
-    inline int averageObjectSize(OperationContext* opCtx) const {
+    inline int averageObjectSize(OperationContext* opCtx) const override {
         uint64_t n = numRecords(opCtx);
 
         if (n == 0)

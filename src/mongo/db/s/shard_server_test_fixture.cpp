@@ -49,8 +49,6 @@
 
 namespace mongo {
 
-const HostAndPort ShardServerTestFixture::kConfigHostAndPort("dummy", 123);
-
 ShardServerTestFixture::ShardServerTestFixture(Options options, bool setUpMajorityReads)
     : ShardingMongoDTestFixture(std::move(options), setUpMajorityReads) {}
 
@@ -65,14 +63,11 @@ void ShardServerTestFixture::setUp() {
 
     replicationCoordinator()->alwaysAllowWrites(true);
 
-    // Initialize sharding components as a shard server.
-    serverGlobalParams.clusterRole = ClusterRole::ShardServer;
-
     ShardingState::get(getServiceContext())
         ->setRecoveryCompleted({OID::gen(),
                                 ClusterRole::ShardServer,
                                 ConnectionString(kConfigHostAndPort),
-                                _myShardName});
+                                kMyShardName});
 
     if (!_catalogCacheLoader)
         _catalogCacheLoader = std::make_unique<ShardServerCatalogCacheLoader>(
@@ -92,11 +87,6 @@ void ShardServerTestFixture::setUp() {
 void ShardServerTestFixture::setCatalogCacheLoader(std::unique_ptr<CatalogCacheLoader> loader) {
     invariant(loader && !_catalogCacheLoader);
     _catalogCacheLoader = std::move(loader);
-}
-
-void ShardServerTestFixture::tearDown() {
-    ShardingMongoDTestFixture::tearDown();
-    CatalogCacheLoader::clearForTests(getServiceContext());
 }
 
 std::unique_ptr<ShardingCatalogClient> ShardServerTestFixture::makeShardingCatalogClient() {

@@ -43,6 +43,18 @@ function initializeCluster() {
 function resetCollection(setupCommand) {
     testColl.drop();
     assert.commandWorked(testDB.createCollection(collName));
+    // The create coordinator issues a best effort refresh at the end of the coordinator which can
+    // inferfere with the counts in the test cases. Wait here for the refreshes to finish.
+    let curOps = [];
+    assert.soon(() => {
+        curOps = primary.getDB("admin")
+                     .aggregate([
+                         {$currentOp: {allUsers: true}},
+                         {$match: {"command._flushRoutingTableCacheUpdates": {$exists: true}}}
+                     ])
+                     .toArray();
+        return curOps.length == 0;
+    }, "Timed out waiting for create refreshes to finish, found: " + tojson(curOps));
     if (setupCommand) {
         assert.commandWorked(testDB.runCommand(setupCommand));
     }
@@ -53,10 +65,10 @@ function testWriteConcernMetrics(cmd, opName, inc, setupCommand) {
     initializeCluster();
 
     // Run command with no writeConcern and no CWWC set.
-    resetCollection(setupCommand);
     const cmdsWithNoWCProvided = generateCmdsWithNoWCProvided(cmd);
     let serverStatus, newStatus;
     cmdsWithNoWCProvided.forEach(cmd => {
+        resetCollection(setupCommand);
         serverStatus = assert.commandWorked(primary.adminCommand({serverStatus: 1}));
         verifyServerStatusFields(serverStatus);
         assert.commandWorked(testDB.runCommand(cmd));
@@ -68,13 +80,13 @@ function testWriteConcernMetrics(cmd, opName, inc, setupCommand) {
     });
 
     // Run command with no writeConcern with CWWC set to majority.
-    resetCollection(setupCommand);
     assert.commandWorked(conn.adminCommand({
         setDefaultRWConcern: 1,
         defaultWriteConcern: {w: "majority"},
         writeConcern: {w: "majority"}
     }));
     cmdsWithNoWCProvided.forEach(cmd => {
+        resetCollection(setupCommand);
         serverStatus = assert.commandWorked(primary.adminCommand({serverStatus: 1}));
         verifyServerStatusFields(serverStatus);
         assert.commandWorked(testDB.runCommand(cmd));
@@ -86,10 +98,10 @@ function testWriteConcernMetrics(cmd, opName, inc, setupCommand) {
     });
 
     // Run command with no writeConcern with CWWC set to w:1.
-    resetCollection(setupCommand);
     assert.commandWorked(conn.adminCommand(
         {setDefaultRWConcern: 1, defaultWriteConcern: {w: 1}, writeConcern: {w: "majority"}}));
     cmdsWithNoWCProvided.forEach(cmd => {
+        resetCollection(setupCommand);
         serverStatus = assert.commandWorked(primary.adminCommand({serverStatus: 1}));
         verifyServerStatusFields(serverStatus);
         assert.commandWorked(testDB.runCommand(cmd));
@@ -101,13 +113,13 @@ function testWriteConcernMetrics(cmd, opName, inc, setupCommand) {
     });
 
     // Run command with no writeConcern and with CWWC set with (w: "myTag").
-    resetCollection(setupCommand);
     assert.commandWorked(conn.adminCommand({
         setDefaultRWConcern: 1,
         defaultWriteConcern: {w: "myTag"},
         writeConcern: {w: "majority"}
     }));
     cmdsWithNoWCProvided.forEach(cmd => {
+        resetCollection(setupCommand);
         serverStatus = assert.commandWorked(primary.adminCommand({serverStatus: 1}));
         verifyServerStatusFields(serverStatus);
         assert.commandWorked(testDB.runCommand(cmd));
@@ -199,8 +211,8 @@ function testWriteConcernMetrics(cmd, opName, inc, setupCommand) {
               "expected no change in secondary writeConcern metrics, before: " +
                   tojson(serverStatus) + ", after: " + tojson(newStatus));
 
-    rst.stopSet();
     st.stop();
+    rst.stopSet();
 }
 
 // Test single insert/update/delete.

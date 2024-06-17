@@ -83,7 +83,6 @@
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kWiredTiger
 
-
 // From src/third_party/wiredtiger/src/include/txn.h
 #define WT_TXN_ROLLBACK_REASON_OLDEST_FOR_EVICTION \
     "oldest pinned transaction ID rolled back for eviction"
@@ -91,6 +90,36 @@
 #define WT_TXN_ROLLBACK_REASON_TOO_LARGE_FOR_CACHE \
     "transaction is too large and will not fit in the storage engine cache"
 namespace mongo {
+
+void WiredTigerEventHandler::setWtConnReadyStatus(bool status) {
+    stdx::unique_lock<mongo::Mutex> lock(_mutex);
+    _wtConnReady = status;
+    if (_activeSections == 0 || _wtConnReady) {
+        return;
+    }
+    LOGV2(7003100,
+          "WiredTiger connection close is waiting for active statistics readers to finish",
+          "activeReaders"_attr = _activeSections);
+    _idleCondition.wait(lock, [this]() { return _activeSections != 0; });
+}
+
+bool WiredTigerEventHandler::getSectionActivityPermit() {
+    stdx::lock_guard<mongo::Mutex> lock(_mutex);
+    if (_wtConnReady) {
+        _activeSections++;
+        return true;
+    }
+    return false;
+}
+
+void WiredTigerEventHandler::releaseSectionActivityPermit() {
+    stdx::unique_lock<mongo::Mutex> lock(_mutex);
+    _activeSections--;
+    if (_activeSections == 0 && !_wtConnReady) {
+        _idleCondition.notify_all();
+        return;
+    }
+}
 
 namespace {
 
@@ -597,6 +626,17 @@ int64_t WiredTigerUtil::getIdentReuseSize(WT_SESSION* s, const std::string& uri)
     return result.getValue();
 }
 
+int64_t WiredTigerUtil::getIdentCompactRewrittenExpectedSize(WT_SESSION* s,
+                                                             const std::string& uri) {
+    auto result =
+        WiredTigerUtil::getStatisticsValue(s,
+                                           "statistics:" + uri,
+                                           "statistics=(fast)",
+                                           WT_STAT_DSRC_BTREE_COMPACT_BYTES_REWRITTEN_EXPECTED);
+    uassertStatusOK(result.getStatus());
+    return result.getValue();
+}
+
 size_t WiredTigerUtil::getCacheSizeMB(double requestedCacheSizeGB) {
     double cacheSizeMB;
     const double kMaxSizeCacheMB = 10 * 1000 * 1000;
@@ -641,17 +681,12 @@ logv2::LogSeverity getWTLOGV2SeverityLevel(const BSONObj& obj) {
             return logv2::LogSeverity::Info();
         case WT_VERBOSE_INFO:
             return logv2::LogSeverity::Log();
-        case WT_VERBOSE_DEBUG_1:
-            return logv2::LogSeverity::Debug(1);
-        case WT_VERBOSE_DEBUG_2:
-            return logv2::LogSeverity::Debug(2);
-        case WT_VERBOSE_DEBUG_3:
-            return logv2::LogSeverity::Debug(3);
-        case WT_VERBOSE_DEBUG_4:
-            return logv2::LogSeverity::Debug(4);
-        case WT_VERBOSE_DEBUG_5:
-            return logv2::LogSeverity::Debug(5);
         default:
+            // MongoDB enables some WT debug compnonents by default. If performed a 1:1
+            // translation from WT log severity levels, MongoDB would not log anything
+            // below default level Log, even if a Debug message came through the message
+            // handler.  To solve this, we upgrade all Debug messages to the Log level
+            // to ensure they are seen.
             return logv2::LogSeverity::Log();
     }
 }
@@ -834,6 +869,12 @@ int mdb_handle_general(WT_EVENT_HANDLER* handler,
                        WT_SESSION* session,
                        WT_EVENT_TYPE type,
                        void* arg) {
+    WiredTigerEventHandler* wtHandler = reinterpret_cast<WiredTigerEventHandler*>(handler);
+    if (type == WT_EVENT_CONN_READY) {
+        wtHandler->setWtConnReadyStatus(true);
+    } else if (type == WT_EVENT_CONN_CLOSE) {
+        wtHandler->setWtConnReadyStatus(false);
+    }
     if (type != WT_EVENT_COMPACT_CHECK || session == nullptr || session->app_private == nullptr) {
         return 0;
     }
@@ -909,7 +950,15 @@ int WiredTigerUtil::verifyTable(WiredTigerRecoveryUnit& ru,
     // Open a new session with custom error handlers.
     WT_CONNECTION* conn = ru.getSessionCache()->conn();
     WT_SESSION* session;
-    invariantWTOK(conn->open_session(conn, &eventHandler, nullptr, &session), nullptr);
+
+    if (gFeatureFlagPrefetch.isEnabled(
+            serverGlobalParams.featureCompatibility.acquireFCVSnapshot())) {
+        invariantWTOK(conn->open_session(conn, &eventHandler, "prefetch=(enabled=true)", &session),
+                      nullptr);
+    } else {
+        invariantWTOK(conn->open_session(conn, &eventHandler, nullptr, &session), nullptr);
+    }
+
     ON_BLOCK_EXIT([&] { session->close(session, ""); });
 
     // Do the verify. Weird parens prevent treating "verify" as a macro.
@@ -953,7 +1002,7 @@ void WiredTigerUtil::validateTableLogging(WiredTigerRecoveryUnit& ru,
     }
 }
 
-void WiredTigerUtil::notifyStartupComplete() {
+void WiredTigerUtil::notifyStorageStartupRecoveryComplete() {
     removeTableChecksFile();
 }
 
@@ -1080,7 +1129,7 @@ Status WiredTigerUtil::exportTableToBSON(WT_SESSION* session,
     invariant(c);
     ON_BLOCK_EXIT([&] { c->close(c); });
 
-    StringMap<BSONObjBuilder*> subs;
+    std::map<string, BSONObjBuilder*> subs;
     const char* desc;
     uint64_t value;
     while (c->next(c) == 0 && c->get_value(c, &desc, nullptr, &value) == 0) {
@@ -1115,22 +1164,23 @@ Status WiredTigerUtil::exportTableToBSON(WT_SESSION* session,
                 continue;
             }
 
-            BSONObjBuilder*& sub = subs[prefix];
+            BSONObjBuilder*& sub = subs[prefix.toString()];
             if (!sub)
                 sub = new BSONObjBuilder();
-            sub->appendNumber(str::ltrim(suffix), v);
+            sub->appendNumber(str::ltrim(suffix.toString()), v);
         }
     }
 
-    for (const auto& kvp : subs) {
-        const std::string& s = kvp.first;
-        bob->append(s, kvp.second->obj());
-        delete kvp.second;
+    for (std::map<string, BSONObjBuilder*>::const_iterator it = subs.begin(); it != subs.end();
+         ++it) {
+        const std::string& s = it->first;
+        bob->append(s, it->second->obj());
+        delete it->second;
     }
     return Status::OK();
 }
 
-StatusWith<std::string> WiredTigerUtil::generateImportString(const StringData& ident,
+StatusWith<std::string> WiredTigerUtil::generateImportString(StringData ident,
                                                              const BSONObj& storageMetadata,
                                                              const ImportOptions& importOptions) {
     if (!storageMetadata.hasField(ident)) {
@@ -1339,5 +1389,27 @@ BSONObj WiredTigerUtil::getSanitizedStorageOptionsForSecondaryReplication(const 
 
     return options;
 }
+
+Status WiredTigerUtil::canRunAutoCompact(OperationContext* opCtx, bool isEphemeral) {
+    if (!gFeatureFlagAutoCompact.isEnabled(
+            serverGlobalParams.featureCompatibility.acquireFCVSnapshot())) {
+        return Status(ErrorCodes::IllegalOperation,
+                      "autoCompact() requires its feature flag to be enabled");
+    }
+    if (isEphemeral) {
+        return Status(ErrorCodes::IllegalOperation,
+                      "autoCompact() cannot be executed for in-memory configurations");
+    }
+    if (!opCtx->getServiceContext()->userWritesAllowed()) {
+        return Status(ErrorCodes::IllegalOperation,
+                      "autoCompact() can only be executed when writes are allowed");
+    }
+    if (storageGlobalParams.syncdelay == 0) {
+        return Status(ErrorCodes::IllegalOperation,
+                      "autoCompact() can only be executed when checkpoints are enabled");
+    }
+    return Status::OK();
+}
+
 
 }  // namespace mongo

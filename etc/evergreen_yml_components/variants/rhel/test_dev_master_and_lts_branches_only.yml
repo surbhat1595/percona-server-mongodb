@@ -1,12 +1,13 @@
-# RHEL build variants for testing development environments that should run
-# only on master and LTS release (7.0, 6.0 etc.) branch projects
+# RHEL build variants for testing development environments
+#
+# After the branching variants in this file
+# should continue to run ONLY on a new LTS release (v7.0, v6.0 etc.) branch projects
+# and should NOT run on a new rapid release (v7.1, v7.2 etc.) branch projects
 
 buildvariants:
 - name: enterprise-rhel-80-64-bit-inmem
   display_name: Enterprise RHEL 8.0 (inMemory)
   cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
-  modules:
-  - enterprise
   run_on:
   - rhel80-small
   expansions:
@@ -21,6 +22,7 @@ buildvariants:
       MONGO_DISTMOD=rhel80
       -j$(grep -c ^processor /proc/cpuinfo)
       --variables-files=etc/scons/mongodbtoolchain_stable_gcc.vars
+      --use-diagnostic-latches=on
     multiversion_platform: rhel80
     multiversion_edition: enterprise
     scons_cache_scope: shared
@@ -42,13 +44,13 @@ buildvariants:
   - name: .change_streams
   - name: .change_stream_fuzzer
   - name: .misc_js
-  - name: .concurrency !.no_txns !.kill_terminate !.requires_wt
+  - name: .concurrency !.no_txns !.kill_terminate !.requires_wt !.feature_flag_guarded
     distros:
     - rhel80-medium  # Some workloads require a lot of memory, use a bigger machine for this suite.
   - name: initial_sync_fuzzer_gen
   - name: .jscore .common !.decimal
   - name: jsCore_txns_large_txns_format
-  - name: .jstestfuzz !.initsync
+  - name: .jstestfuzz !.initsync !.feature_flag_guarded
   - name: .multi_shard .common
   - name: multi_stmt_txn_jscore_passthrough_with_migration_gen
   - name: .read_write_concern !.durable_history
@@ -56,7 +58,7 @@ buildvariants:
   - name: .replica_sets .common
   - name: .replica_sets .multi_oplog !.encrypt
   - name: replica_sets_max_mirroring_large_txns_format_gen
-  - name: replica_sets_multi_stmt_txn_jscore_passthrough
+  - name: replica_sets_multi_stmt_txn_jscore_passthrough_gen
   - name: replica_sets_multi_stmt_txn_stepdown_jscore_passthrough_gen
     distros:
     - rhel80-medium
@@ -66,11 +68,11 @@ buildvariants:
   - name: sasl
   - name: secondary_reads_passthrough_gen
   - name: session_jscore_passthrough
-  - name: sharded_multi_stmt_txn_jscore_passthrough
+  - name: sharded_multi_stmt_txn_jscore_passthrough_gen
     distros:
     - rhel80-medium
-  - name: .sharding .jscore !.wo_snapshot !.multi_stmt
-  - name: .sharding .common !.multiversion !.csrs !.encrypt
+  - name: .sharding .jscore !.wo_snapshot !.multi_stmt !.feature_flag_guarded
+  - name: .sharding .common !.multiversion !.csrs !.encrypt !.feature_flag_guarded
   - name: sharding_max_mirroring_opportunistic_secondary_targeting_gen
   - name: .ssl
   - name: .updatefuzzer

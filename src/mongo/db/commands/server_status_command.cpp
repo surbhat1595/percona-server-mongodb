@@ -45,6 +45,7 @@
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/bsontypes.h"
+#include "mongo/db/admission/execution_admission_context.h"
 #include "mongo/db/auth/action_type.h"
 #include "mongo/db/auth/authorization_session.h"
 #include "mongo/db/auth/resource_pattern.h"
@@ -126,14 +127,15 @@ public:
         const auto runStart = clock->now();
         BSONObjBuilder timeBuilder(256);
 
-        shard_role_details::getLocker(opCtx)->setAdmissionPriority(
-            AdmissionContext::Priority::kImmediate);
+        ScopedAdmissionPriority<ExecutionAdmissionContext> admissionPriority(
+            opCtx, AdmissionContext::Priority::kExempt);
 
         // --- basic fields that are global
 
-        result.append("host", prettyHostName());
+        result.append("host", prettyHostName(opCtx->getClient()->getLocalPort()));
         result.append("version", VersionInfoInterface::instance().version());
         result.append("process", serverGlobalParams.binaryName);
+        result.append("service", toBSON(opCtx->getService()->role()));
         result.append("pid", ProcessId::getCurrent().asLongLong());
         result.append("uptime", (double)(time(nullptr) - serverGlobalParams.started));
         auto uptime = clock->now() - _started;
@@ -150,9 +152,9 @@ public:
         bool includeAllSections = allElem.type() ? allElem.trueValue() : false;
 
         // --- all sections
-        auto registry = ServerStatusSectionRegistry::get();
+        auto registry = ServerStatusSectionRegistry::instance();
         for (auto i = registry->begin(); i != registry->end(); ++i) {
-            ServerStatusSection* section = i->second;
+            auto& section = i->second;
 
             if (!section->checkAuthForOperation(opCtx).isOK()) {
                 continue;
@@ -175,14 +177,19 @@ public:
         }
 
         // --- counters
-        MetricTree& metricTree = getGlobalMetricTree();
         auto metricsEl = cmdObj["metrics"_sd];
         if (metricsEl.eoo() || metricsEl.trueValue()) {
-            if (metricsEl.type() == BSONType::Object) {
-                metricTree.appendTo(result, BSON("metrics" << metricsEl.embeddedObject()));
-            } else {
-                metricTree.appendTo(result);
-            }
+            // Always gather the role-agnostic metrics. If `opCtx` has a role,
+            // additionally merge that role's associated metrics.
+            std::vector<const MetricTree*> metricTrees;
+            auto& treeSet = globalMetricTreeSet();
+            metricTrees.push_back(&treeSet[ClusterRole::None]);
+            if (auto svc = opCtx->getService())
+                metricTrees.push_back(&treeSet[svc->role()]);
+            BSONObj excludePaths;
+            if (metricsEl.type() == BSONType::Object)
+                excludePaths = BSON("metrics" << metricsEl.embeddedObject());
+            appendMergedTrees(metricTrees, result, excludePaths);
         }
 
         // --- some hard coded global things hard to pull out
@@ -215,7 +222,8 @@ MONGO_REGISTER_COMMAND(CmdServerStatus).forRouter().forShard();
 
 }  // namespace
 
-OpCounterServerStatusSection globalOpCounterServerStatusSection("opcounters", &globalOpCounters);
+auto& globalOpCounterServerStatusSection =
+    *ServerStatusSectionBuilder<OpCounterServerStatusSection>("opcounters").bind(&globalOpCounters);
 
 namespace {
 
@@ -223,7 +231,7 @@ namespace {
 
 class ExtraInfo : public ServerStatusSection {
 public:
-    ExtraInfo() : ServerStatusSection("extra_info") {}
+    using ServerStatusSection::ServerStatusSection;
 
     bool includeByDefault() const override {
         return true;
@@ -239,12 +247,12 @@ public:
 
         return bb.obj();
     }
-
-} extraInfo;
+};
+auto extraInfo = *ServerStatusSectionBuilder<ExtraInfo>("extra_info");
 
 class Asserts : public ServerStatusSection {
 public:
-    Asserts() : ServerStatusSection("asserts") {}
+    using ServerStatusSection::ServerStatusSection;
 
     bool includeByDefault() const override {
         return true;
@@ -261,14 +269,13 @@ public:
         asserts.append("rollovers", assertionCount.rollovers.loadRelaxed());
         return asserts.obj();
     }
+};
+auto asserts = *ServerStatusSectionBuilder<Asserts>("asserts");
 
-} asserts;
-
-class MemBase : public ServerStatusMetric {
-public:
-    void appendTo(BSONObjBuilder& bob, StringData leafName) const override {
+struct MemBaseMetricPolicy {
+    void appendTo(BSONObjBuilder& bob, StringData leafName) const {
         BSONObjBuilder b{bob.subobjStart(leafName)};
-        b.append("bits", sizeof(int*) == 4 ? 32 : 64);
+        b.append("bits", static_cast<int>(sizeof(void*) * CHAR_BIT));
 
         ProcessInfo p;
         if (p.supported()) {
@@ -287,12 +294,11 @@ public:
                        static_cast<int>(gSecureAllocCountInfo().getSecureAllocBytesInPages()));
     }
 };
-
-MemBase& memBase = addMetricToTree(".mem", std::make_unique<MemBase>());
+auto& memBase = *CustomMetricBuilder<MemBaseMetricPolicy>{".mem"};
 
 class HttpClientServerStatus : public ServerStatusSection {
 public:
-    HttpClientServerStatus() : ServerStatusSection("http_client") {}
+    using ServerStatusSection::ServerStatusSection;
 
     bool includeByDefault() const final {
         return false;
@@ -301,7 +307,8 @@ public:
     BSONObj generateSection(OperationContext*, const BSONElement& configElement) const final {
         return HttpClient::getServerStatus();
     }
-} httpClientServerStatus;
+};
+auto httpClientServerStatus = *ServerStatusSectionBuilder<HttpClientServerStatus>("http_client");
 
 }  // namespace
 

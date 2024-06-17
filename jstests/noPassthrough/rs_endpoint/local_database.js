@@ -2,7 +2,11 @@
  * Tests that commands against the "local" database work correctly when the replica set endpoint is
  * used.
  *
- * @tags: [requires_fcv_73, featureFlagEmbeddedRouter, requires_persistence]
+ * @tags: [
+ *    requires_fcv_80,
+ *    featureFlagRouterPort,
+ *    requires_persistence,
+ * ]
  */
 
 import {extractUUIDFromObject} from "jstests/libs/uuid_util.js";
@@ -78,10 +82,19 @@ function runTests(shard0Primary, shard0Secondary, tearDownFunc, isMultitenant) {
     assert.commandWorked(
         shard0Primary.adminCommand({addShard: shard1Rst.getURL(), name: shard1Name}));
 
-    const shard0URL = getReplicaSetURL(shard0Primary);
-    // TODO (SERVER-83380): Connect to the router port on a shardsvr mongod instead.
-    const mongos = MongoRunner.runMongos({configdb: shard0URL});
-    const mongosLocalDB = mongos.getDB(localDbName);
+    const {router, mongos} = (() => {
+        if (shard0Primary.routerHost) {
+            const router = new Mongo(shard0Primary.routerHost);
+            return {
+                router
+            }
+        }
+        const shard0URL = getReplicaSetURL(shard0Primary);
+        const mongos = MongoRunner.runMongos({configdb: shard0URL});
+        return {router: mongos, mongos};
+    })();
+    jsTest.log("Using " + tojsononeline({router, mongos}));
+    const mongosLocalDB = router.getDB(localDbName);
     const mongosStartupColl = mongosLocalDB.getCollection(startUpLogCollName);
     const mongosTestColl = mongosLocalDB.getCollection(testCollName);
 
@@ -114,7 +127,7 @@ function runTests(shard0Primary, shard0Secondary, tearDownFunc, isMultitenant) {
     assert.commandFailedWithCode(shard0Primary.adminCommand({removeShard: shard1Name}),
                                  ErrorCodes.CommandNotFound);
     assert.soon(() => {
-        const res = assert.commandWorked(mongos.adminCommand({removeShard: shard1Name}));
+        const res = assert.commandWorked(router.adminCommand({removeShard: shard1Name}));
         return res.state == "completed";
     });
 
@@ -125,8 +138,8 @@ function runTests(shard0Primary, shard0Secondary, tearDownFunc, isMultitenant) {
     assert.neq(shard0PrimaryTestColl.findOne({_id: shard0PrimaryDocId}), null);
 
     // Add the second shard back but convert the config shard to dedicated config server.
-    assert.commandWorked(mongos.adminCommand({addShard: shard1Rst.getURL(), name: shard1Name}));
-    assert.commandWorked(mongos.adminCommand({transitionToDedicatedConfigServer: 1}));
+    assert.commandWorked(router.adminCommand({addShard: shard1Rst.getURL(), name: shard1Name}));
+    assert.commandWorked(router.adminCommand({transitionToDedicatedConfigServer: 1}));
 
     jsTest.log("Running tests for " + shard0Primary.host +
                " while the cluster contains one shard (regular shard)");
@@ -143,7 +156,9 @@ function runTests(shard0Primary, shard0Secondary, tearDownFunc, isMultitenant) {
 
     tearDownFunc();
     shard1Rst.stopSet();
-    MongoRunner.stopMongos(mongos);
+    if (mongos) {
+        MongoRunner.stopMongos(mongos);
+    }
 }
 
 {

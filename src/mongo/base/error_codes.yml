@@ -360,11 +360,6 @@ error_codes:
     - {code: 302,name: OCSPCertificateStatusUnknown}
     - {code: 303,name: SplitHorizonChange,categories: [CloseConnectionError]}
 
-    # This code should only be used upon finding that a shard has been marked stale in the sharding
-    # catalog cache, and as such does not belong in the StaleShardVersionError or
-    # NeedRetargettingError categories.
-    - {code: 304,name: ShardInvalidatedForTargeting,extra: ShardInvalidatedForTargetingInfo}
-
     - {code: 306,name: ReadThroughCacheLookupCanceled,categories: [InternalOnly]}
 
     - {code: 307,name: RangeDeletionAbandonedBecauseTaskDocumentDoesNotExist}
@@ -533,6 +528,18 @@ error_codes:
     - {code: 405, name: CannotCreateChunkDistribution}
 
     - {code: 406, name: MigrationBlockingOperationCoordinatorCleaningUp}
+    
+    - {code: 407,name: PooledConnectionAcquisitionExceededTimeLimit,categories: [ExceededTimeLimitError,RetriableError]}
+
+    - {code: 408, name: TimeseriesBucketCompressionFailed, extra: 'timeseries::BucketCompressionFailure'}
+
+    - {code: 409, name: CannotInsertTimeseriesBucketsWithMixedSchema}
+
+    - {code: 410, name: TimeseriesBucketFrozen, categories: [InternalOnly]}
+
+    - {code: 411, name: QueryRejectedBySettings}
+
+    - {code: 412, name: UpdatesStillPending, categories: [RetriableError]}
 
     # Error codes 4000-8999 are reserved.
 

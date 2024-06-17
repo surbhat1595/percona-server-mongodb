@@ -46,8 +46,6 @@
 namespace mongo {
 namespace {
 
-const auto kWriteConcern = "writeConcern"_sd;
-
 template <class T>
 BatchedCommandRequest constructBatchedCommandRequest(const OpMsgRequest& request) {
     auto batchRequest = BatchedCommandRequest{T::parse(request)};
@@ -59,11 +57,6 @@ BatchedCommandRequest constructBatchedCommandRequest(const OpMsgRequest& request
             batchRequest.setDbVersion(DatabaseVersion(request.body));
         }
         batchRequest.setShardVersion(shardVersion);
-    }
-
-    auto writeConcernField = request.body[kWriteConcern];
-    if (!writeConcernField.eoo()) {
-        batchRequest.setWriteConcern(writeConcernField.Obj());
     }
 
     // The 'isTimeseriesNamespace' is an internal parameter used for communication between mongos
@@ -239,10 +232,6 @@ void BatchedCommandRequest::serialize(BSONObjBuilder* builder) const {
     if (_dbVersion) {
         builder->append("databaseVersion", _dbVersion->toBSON());
     }
-
-    if (_writeConcern) {
-        builder->append(kWriteConcern, *_writeConcern);
-    }
 }
 
 BSONObj BatchedCommandRequest::toBSON() const {
@@ -383,6 +372,7 @@ int BatchItemRef::getSizeForBatchWriteBytes() const {
                 update.getUpsertSupplied().has_value(),
                 update.getCollation(),
                 update.getArrayFilters(),
+                update.getSort(),
                 update.getHint(),
                 update.getSampleId(),
                 update.getAllowShardKeyUpdatesWithoutFullShardKeyInQuery().has_value());
@@ -430,6 +420,7 @@ int BatchItemRef::getSizeForBulkWriteBytes() const {
                                                           updateOp.getUpsertSupplied().has_value(),
                                                           updateOp.getCollation(),
                                                           updateOp.getArrayFilters(),
+                                                          updateOp.getSort(),
                                                           updateOp.getHint(),
                                                           updateOp.getSampleId());
             // When running a debug build, verify that estSize is at least the BSON serialization

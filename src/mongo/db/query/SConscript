@@ -20,7 +20,6 @@ env.SConscript(
         'query_shape',
         'search',
         'stats',
-        'vector_search',
     ],
     exports=[
         'env',
@@ -28,9 +27,9 @@ env.SConscript(
 )
 
 env.Library(
-    target='query_decorations',
+    target='query_knob_configuration',
     source=[
-        'query_decorations.cpp',
+        'query_knob_configuration.cpp',
     ],
     LIBDEPS_PRIVATE=[
         '$BUILD_DIR/mongo/db/mongohasher',
@@ -58,7 +57,6 @@ env.Library(
         'collation/collator_factory_interface',
         'collation/collator_interface',
         'projection_ast',
-        'query_decorations',
         'sort_pattern',
     ],
     LIBDEPS_PRIVATE=[
@@ -74,7 +72,9 @@ env.Library(
         'index_bounds_builder.cpp',
         'interval_evaluation_tree.cpp',
         'plan_cache_indexability.cpp',
-        'plan_enumerator.cpp',
+        'plan_enumerator/enumerator_memo.cpp',
+        'plan_enumerator/memo_prune.cpp',
+        'plan_enumerator/plan_enumerator.cpp',
         'planner_access.cpp',
         'planner_analysis.cpp',
         'planner_ixselect.cpp',
@@ -453,6 +453,8 @@ env.CppUnitTest(
         'canonical_query_test.cpp',
         'canonical_query_test_util.cpp',
         'ce_mode_parameter_test.cpp',
+        'classic_runtime_planner_for_sbe/classic_runtime_planner_for_sbe_test.cpp',
+        'classic_runtime_planner_for_sbe/classic_runtime_planner_for_sbe_test_util.cpp',
         'classic_stage_builder_test.cpp',
         'collection_query_info_test.cpp',
         'count_command_test.cpp',
@@ -530,6 +532,7 @@ env.CppUnitTest(
         'shard_filterer_factory_mock.cpp',
         'sort_pattern_test.cpp',
         'util/deferred_test.cpp',
+        'util/hash_roaring_set_test.cpp',
         'util/memory_util_test.cpp',
         'view_response_formatter_test.cpp',
     ],
@@ -540,6 +543,7 @@ env.CppUnitTest(
         '$BUILD_DIR/mongo/db/exec/document_value/document_value_test_util',
         '$BUILD_DIR/mongo/db/exec/sbe/sbe_plan_stage_test',
         '$BUILD_DIR/mongo/db/multitenancy',
+        '$BUILD_DIR/mongo/db/pipeline/abt_translation',
         '$BUILD_DIR/mongo/db/pipeline/aggregation_request_helper',
         '$BUILD_DIR/mongo/db/pipeline/document_source_mock',
         '$BUILD_DIR/mongo/db/query_exec',
@@ -586,6 +590,16 @@ env.Benchmark(
 )
 
 env.Benchmark(
+    target='canonical_query_bm',
+    source=['canonical_query_bm.cpp'],
+    LIBDEPS=[
+        '$BUILD_DIR/mongo/db/matcher/expressions_mongod_only',
+        '$BUILD_DIR/mongo/db/query/canonical_query',
+        '$BUILD_DIR/mongo/db/query/query_test_service_context',
+    ],
+)
+
+env.Benchmark(
     target='plan_cache_key_encoding_bm',
     source=[
         'plan_cache_key_encoding_agg_bm.cpp',
@@ -601,5 +615,16 @@ env.Benchmark(
         '$BUILD_DIR/mongo/db/query_exec',
         '$BUILD_DIR/mongo/db/query_expressions',
         '$BUILD_DIR/mongo/db/service_context_non_d',
+    ],
+)
+
+env.Benchmark(
+    target='query_planner_bm',
+    source=[
+        'query_planner_bm.cpp',
+    ],
+    LIBDEPS=[
+        'query_planner',
+        'query_test_service_context',
     ],
 )

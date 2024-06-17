@@ -164,157 +164,6 @@ Status _insertOplogBSON(OperationContext* opCtx, const CollectionPtr& coll, Reco
     return collection_internal::insertDocument(opCtx, coll, InsertStatement(obj, id), nullptr);
 }
 
-TEST_F(CappedCollectionTest, SeekNear) {
-    NamespaceString nss = NamespaceString::createNamespaceString_forTest("local.non.oplog");
-    makeCapped(nss);
-
-    {
-        auto opCtx = newOperationContext();
-        ASSERT_OK(insertBSON(opCtx.get(), nss, RecordId(1)));
-        ASSERT_OK(insertBSON(opCtx.get(), nss, RecordId(2)));
-        ASSERT_OK(insertBSON(opCtx.get(), nss, RecordId(3)));
-        ASSERT_OK(insertBSON(opCtx.get(), nss, RecordId(4)));
-    }
-
-    {
-        // Delete the first and third so that we have some gaps to use for inexact seeks.
-        auto opCtx(newOperationContext());
-        AutoGetCollection ac(opCtx.get(), nss, MODE_IX);
-        const CollectionPtr& coll = ac.getCollection();
-        WriteUnitOfWork wuow(opCtx.get());
-        collection_internal::deleteDocument(
-            opCtx.get(), coll, kUninitializedStmtId, RecordId(1), nullptr);
-        collection_internal::deleteDocument(
-            opCtx.get(), coll, kUninitializedStmtId, RecordId(3), nullptr);
-        wuow.commit();
-    }
-
-    // Forward cursor seeks
-    {
-        // Seek to a non-existent record and expect to land on the first record because no previous
-        // record exists.
-        auto opCtx(newOperationContext());
-        AutoGetCollection ac(opCtx.get(), nss, MODE_IX);
-        const CollectionPtr& coll = ac.getCollection();
-        WriteUnitOfWork wuow(opCtx.get());
-        auto cur = coll->getCursor(opCtx.get());
-        auto rec = cur->seekNear(RecordId(1));
-        ASSERT(rec);
-        ASSERT_EQ(rec->id, RecordId(2));
-    }
-
-    {
-        // Seek to a non-existent record and expect to land on the logically previous record.
-        auto opCtx(newOperationContext());
-        AutoGetCollection ac(opCtx.get(), nss, MODE_IX);
-        const CollectionPtr& coll = ac.getCollection();
-        WriteUnitOfWork wuow(opCtx.get());
-        auto cur = coll->getCursor(opCtx.get());
-        auto rec = cur->seekNear(RecordId(3));
-        ASSERT(rec);
-        ASSERT_EQ(rec->id, RecordId(2));
-    }
-
-    {
-        // Seek exactly.
-        auto opCtx(newOperationContext());
-        AutoGetCollection ac(opCtx.get(), nss, MODE_IX);
-        const CollectionPtr& coll = ac.getCollection();
-        WriteUnitOfWork wuow(opCtx.get());
-        auto cur = coll->getCursor(opCtx.get());
-        auto rec = cur->seekNear(RecordId(4));
-        ASSERT(rec);
-        ASSERT_EQ(rec->id, RecordId(4));
-    }
-
-    {
-        // Seek to a non-existent record and expect to land on the logically-previous record, which
-        // is the last record.
-        auto opCtx(newOperationContext());
-        AutoGetCollection ac(opCtx.get(), nss, MODE_IX);
-        const CollectionPtr& coll = ac.getCollection();
-        WriteUnitOfWork wuow(opCtx.get());
-        auto cur = coll->getCursor(opCtx.get());
-        auto rec = cur->seekNear(RecordId(5));
-        ASSERT(rec);
-        ASSERT_EQ(rec->id, RecordId(4));
-    }
-
-    // Reverse cursor seeks
-    {
-        // Seek to a non-existent record and expect to land on the logically-previous record, which
-        // is the first record.
-        auto opCtx(newOperationContext());
-        AutoGetCollection ac(opCtx.get(), nss, MODE_IX);
-        const CollectionPtr& coll = ac.getCollection();
-        WriteUnitOfWork wuow(opCtx.get());
-        auto cur = coll->getCursor(opCtx.get(), false /* forward */);
-        auto rec = cur->seekNear(RecordId(1));
-        ASSERT(rec);
-        ASSERT_EQ(rec->id, RecordId(2));
-    }
-
-    {
-        // Seek exactly.
-        auto opCtx(newOperationContext());
-        AutoGetCollection ac(opCtx.get(), nss, MODE_IX);
-        const CollectionPtr& coll = ac.getCollection();
-        WriteUnitOfWork wuow(opCtx.get());
-        auto cur = coll->getCursor(opCtx.get(), false /* forward */);
-        auto rec = cur->seekNear(RecordId(2));
-        ASSERT(rec);
-        ASSERT_EQ(rec->id, RecordId(2));
-    }
-
-    {
-        // Seek to a non-existent record and expect to land on the logically previous record.
-        auto opCtx(newOperationContext());
-        AutoGetCollection ac(opCtx.get(), nss, MODE_IX);
-        const CollectionPtr& coll = ac.getCollection();
-        WriteUnitOfWork wuow(opCtx.get());
-        auto cur = coll->getCursor(opCtx.get(), false /* forward */);
-        auto rec = cur->seekNear(RecordId(3));
-        ASSERT(rec);
-        ASSERT_EQ(rec->id, RecordId(4));
-    }
-
-    {
-        auto opCtx(newOperationContext());
-        AutoGetCollection ac(opCtx.get(), nss, MODE_IX);
-        const CollectionPtr& coll = ac.getCollection();
-        WriteUnitOfWork wuow(opCtx.get());
-        auto cur = coll->getCursor(opCtx.get(), false /* forward */);
-        auto rec = cur->seekNear(RecordId(5));
-        ASSERT(rec);
-        ASSERT_EQ(rec->id, RecordId(4));
-    }
-
-
-    {
-        // Delete the remaining records.
-        auto opCtx(newOperationContext());
-        AutoGetCollection ac(opCtx.get(), nss, MODE_IX);
-        const CollectionPtr& coll = ac.getCollection();
-        WriteUnitOfWork wuow(opCtx.get());
-        collection_internal::deleteDocument(
-            opCtx.get(), coll, kUninitializedStmtId, RecordId(2), nullptr);
-        collection_internal::deleteDocument(
-            opCtx.get(), coll, kUninitializedStmtId, RecordId(4), nullptr);
-        wuow.commit();
-    }
-
-    {
-        auto opCtx(newOperationContext());
-        AutoGetCollection ac(opCtx.get(), nss, MODE_IX);
-        const CollectionPtr& coll = ac.getCollection();
-        auto cur = coll->getCursor(opCtx.get());
-        auto rec = cur->seekNear(RecordId(2));
-        ASSERT_FALSE(rec);
-        rec = cur->seekNear(RecordId(4));
-        ASSERT_FALSE(rec);
-    }
-}
-
 TEST_F(CappedCollectionTest, InsertOutOfOrder) {
     NamespaceString nss = NamespaceString::createNamespaceString_forTest("local.non.oplog");
     makeCapped(nss);
@@ -365,10 +214,9 @@ TEST_F(CappedCollectionTest, OplogOrder) {
         AutoGetCollectionForRead ac(opCtx.get(), nss);
         const CollectionPtr& coll = ac.getCollection();
         auto cursor = coll->getCursor(opCtx.get());
-        auto record = cursor->seekNear(RecordId(id1.getLong() + 1));
-        ASSERT(record);
-        ASSERT_EQ(id1, record->id);
-        ASSERT(!cursor->next());
+        auto record = cursor->seek(RecordId(id1.getLong() + 1),
+                                   SeekableRecordCursor::BoundInclusion::kInclude);
+        ASSERT_FALSE(record);
     }
 
     {
@@ -422,20 +270,16 @@ TEST_F(CappedCollectionTest, OplogOrder) {
             auto [c2, t2] = makeClientAndCtx("t2");
             AutoGetCollectionForRead ac2(t2.get(), nss);
             auto cursor = coll->getCursor(t2.get());
-            auto record = cursor->seekNear(id2);
-            ASSERT(record);
-            ASSERT_EQ(id1, record->id);
-            ASSERT(!cursor->next());
+            auto record = cursor->seek(id2, SeekableRecordCursor::BoundInclusion::kInclude);
+            ASSERT_FALSE(record);
         }
 
         {
             auto [c2, t2] = makeClientAndCtx("t2");
             AutoGetCollectionForRead ac2(t2.get(), nss);
             auto cursor = coll->getCursor(t2.get());
-            auto record = cursor->seekNear(id3);
-            ASSERT(record);
-            ASSERT_EQ(id1, record->id);
-            ASSERT(!cursor->next());
+            auto record = cursor->seek(id3, SeekableRecordCursor::BoundInclusion::kInclude);
+            ASSERT_FALSE(record);
         }
 
         w1.commit();
@@ -512,20 +356,16 @@ TEST_F(CappedCollectionTest, OplogOrder) {
             auto [c2, t2] = makeClientAndCtx("t2");
             AutoGetCollectionForRead ac2(t2.get(), nss);
             auto cursor = coll->getCursor(t2.get());
-            auto record = cursor->seekNear(id2);
-            ASSERT(record);
-            ASSERT_EQ(id1, record->id);
-            ASSERT(!cursor->next());
+            auto record = cursor->seek(id2, SeekableRecordCursor::BoundInclusion::kInclude);
+            ASSERT_FALSE(record);
         }
 
         {
             auto [c2, t2] = makeClientAndCtx("t2");
             AutoGetCollectionForRead ac2(t2.get(), nss);
             auto cursor = coll->getCursor(t2.get());
-            auto record = cursor->seekNear(id3);
-            ASSERT(record);
-            ASSERT_EQ(id1, record->id);
-            ASSERT(!cursor->next());
+            auto record = cursor->seek(id3, SeekableRecordCursor::BoundInclusion::kInclude);
+            ASSERT_FALSE(record);
         }
 
         w1.commit();
@@ -627,7 +467,7 @@ TEST_F(CappedCollectionTest, VisibilityAfterRestart) {
     }
 }
 
-TEST_F(CappedCollectionTest, SeekNearOplogWithReadTimestamp) {
+TEST_F(CappedCollectionTest, SeekOplogWithReadTimestamp) {
     NamespaceString nss = NamespaceString::kRsOplogNamespace;
     const auto oneSec = Timestamp(1, 0).asULL();
     {
@@ -641,11 +481,25 @@ TEST_F(CappedCollectionTest, SeekNearOplogWithReadTimestamp) {
         ASSERT_OK(_insertOplogBSON(t1.get(), oplog, RecordId(oneSec + 8)));
         wuow.commit();
     }
-#define checkSeekNear(cursor, recordNum, expectedRecordNum)           \
-    do {                                                              \
-        auto record = cursor->seekNear(RecordId(oneSec + recordNum)); \
-        ASSERT(record);                                               \
-        ASSERT_EQ(expectedRecordNum, record->id.getLong() - oneSec);  \
+
+#define checkSeek(cursor, recordNum, expectedInclusiveNum, expectedExclusiveNum)    \
+    do {                                                                            \
+        auto record = cursor->seek(RecordId(oneSec + recordNum),                    \
+                                   SeekableRecordCursor::BoundInclusion::kInclude); \
+        if (expectedInclusiveNum > 0) {                                             \
+            ASSERT(record);                                                         \
+            ASSERT_EQ(expectedInclusiveNum, record->id.getLong() - oneSec);         \
+        } else {                                                                    \
+            ASSERT(!record);                                                        \
+        }                                                                           \
+        record = cursor->seek(RecordId(oneSec + recordNum),                         \
+                              SeekableRecordCursor::BoundInclusion::kExclude);      \
+        if (expectedExclusiveNum > 0) {                                             \
+            ASSERT(record);                                                         \
+            ASSERT_EQ(expectedExclusiveNum, record->id.getLong() - oneSec);         \
+        } else {                                                                    \
+            ASSERT(!record);                                                        \
+        }                                                                           \
     } while (0);
 
     // Forward, no read timestamp.
@@ -654,32 +508,32 @@ TEST_F(CappedCollectionTest, SeekNearOplogWithReadTimestamp) {
         AutoGetCollectionForReadLockFree acr(t2.get(), nss);
         shard_role_details::getRecoveryUnit(t2.get())->setOplogVisibilityTs(boost::none);
         auto cursor = acr.getCollection()->getCursor(t2.get());
-        checkSeekNear(cursor, 1, 2);
-        checkSeekNear(cursor, 2, 2);
-        checkSeekNear(cursor, 3, 2);
-        checkSeekNear(cursor, 4, 4);
-        checkSeekNear(cursor, 5, 4);
-        checkSeekNear(cursor, 6, 6);
-        checkSeekNear(cursor, 7, 6);
-        checkSeekNear(cursor, 8, 8);
-        checkSeekNear(cursor, 9, 8);
+        checkSeek(cursor, 1, 2, 2);
+        checkSeek(cursor, 2, 2, 4);
+        checkSeek(cursor, 3, 4, 4);
+        checkSeek(cursor, 4, 4, 6);
+        checkSeek(cursor, 5, 6, 6);
+        checkSeek(cursor, 6, 6, 8);
+        checkSeek(cursor, 7, 8, 8);
+        checkSeek(cursor, 8, 8, -1);
+        checkSeek(cursor, 9, -1, -1);
     }
     // Backward, no read timestamp.
     {
         auto [c2, t2] = makeClientAndCtx("t2");
         AutoGetCollectionForReadLockFree acr(t2.get(), nss);
         auto cursor = acr.getCollection()->getCursor(t2.get(), false);
-        checkSeekNear(cursor, 1, 2);
-        checkSeekNear(cursor, 2, 2);
-        checkSeekNear(cursor, 3, 4);
-        checkSeekNear(cursor, 4, 4);
-        checkSeekNear(cursor, 5, 6);
-        checkSeekNear(cursor, 6, 6);
-        checkSeekNear(cursor, 7, 8);
-        checkSeekNear(cursor, 8, 8);
-        checkSeekNear(cursor, 9, 8);
+        checkSeek(cursor, 1, -1, -1);
+        checkSeek(cursor, 2, 2, -1);
+        checkSeek(cursor, 3, 2, 2);
+        checkSeek(cursor, 4, 4, 2);
+        checkSeek(cursor, 5, 4, 4);
+        checkSeek(cursor, 6, 6, 4);
+        checkSeek(cursor, 7, 6, 6);
+        checkSeek(cursor, 8, 8, 6);
+        checkSeek(cursor, 9, 8, 8);
     }
-    // Forward, existing read timestamp.
+    // Forward, with read timestamp.
     {
         auto [c2, t2] = makeClientAndCtx("t2");
         shard_role_details::getRecoveryUnit(t2.get())->setTimestampReadSource(
@@ -687,67 +541,32 @@ TEST_F(CappedCollectionTest, SeekNearOplogWithReadTimestamp) {
         AutoGetCollectionForReadLockFree acr(t2.get(), nss);
         shard_role_details::getRecoveryUnit(t2.get())->setOplogVisibilityTs(boost::none);
         auto cursor = acr.getCollection()->getCursor(t2.get());
-        checkSeekNear(cursor, 1, 2);
-        checkSeekNear(cursor, 2, 2);
-        checkSeekNear(cursor, 3, 2);
-        checkSeekNear(cursor, 4, 4);
-        checkSeekNear(cursor, 5, 4);
-        checkSeekNear(cursor, 6, 6);
-        checkSeekNear(cursor, 7, 6);
-        checkSeekNear(cursor, 8, 6);
-        checkSeekNear(cursor, 9, 6);
+        checkSeek(cursor, 1, 2, 2);
+        checkSeek(cursor, 2, 2, 4);
+        checkSeek(cursor, 3, 4, 4);
+        checkSeek(cursor, 4, 4, 6);
+        checkSeek(cursor, 5, 6, 6);
+        checkSeek(cursor, 6, 6, -1);
+        checkSeek(cursor, 7, -1, -1);
+        checkSeek(cursor, 8, -1, -1);
+        checkSeek(cursor, 9, -1, -1);
     }
-    // Backward, existing read timestamp.
+    // Backward, with read timestamp.
     {
         auto [c2, t2] = makeClientAndCtx("t2");
         shard_role_details::getRecoveryUnit(t2.get())->setTimestampReadSource(
             RecoveryUnit::ReadSource::kProvided, Timestamp(1, 6));
         AutoGetCollectionForReadLockFree acr(t2.get(), nss);
         auto cursor = acr.getCollection()->getCursor(t2.get(), false);
-        checkSeekNear(cursor, 1, 2);
-        checkSeekNear(cursor, 2, 2);
-        checkSeekNear(cursor, 3, 4);
-        checkSeekNear(cursor, 4, 4);
-        checkSeekNear(cursor, 5, 6);
-        checkSeekNear(cursor, 6, 6);
-        checkSeekNear(cursor, 7, 6);
-        checkSeekNear(cursor, 8, 6);
-        checkSeekNear(cursor, 9, 6);
-    }
-    // Forward, non-existing read timestamp.
-    {
-        auto [c2, t2] = makeClientAndCtx("t2");
-        shard_role_details::getRecoveryUnit(t2.get())->setTimestampReadSource(
-            RecoveryUnit::ReadSource::kProvided, Timestamp(1, 7));
-        AutoGetCollectionForReadLockFree acr(t2.get(), nss);
-        shard_role_details::getRecoveryUnit(t2.get())->setOplogVisibilityTs(boost::none);
-        auto cursor = acr.getCollection()->getCursor(t2.get());
-        checkSeekNear(cursor, 1, 2);
-        checkSeekNear(cursor, 2, 2);
-        checkSeekNear(cursor, 3, 2);
-        checkSeekNear(cursor, 4, 4);
-        checkSeekNear(cursor, 5, 4);
-        checkSeekNear(cursor, 6, 6);
-        checkSeekNear(cursor, 7, 6);
-        checkSeekNear(cursor, 8, 6);
-        checkSeekNear(cursor, 9, 6);
-    }
-    // Backward, non-existing read timestamp.
-    {
-        auto [c2, t2] = makeClientAndCtx("t2");
-        shard_role_details::getRecoveryUnit(t2.get())->setTimestampReadSource(
-            RecoveryUnit::ReadSource::kProvided, Timestamp(1, 7));
-        AutoGetCollectionForReadLockFree acr(t2.get(), nss);
-        auto cursor = acr.getCollection()->getCursor(t2.get(), false);
-        checkSeekNear(cursor, 1, 2);
-        checkSeekNear(cursor, 2, 2);
-        checkSeekNear(cursor, 3, 4);
-        checkSeekNear(cursor, 4, 4);
-        checkSeekNear(cursor, 5, 6);
-        checkSeekNear(cursor, 6, 6);
-        checkSeekNear(cursor, 7, 6);
-        checkSeekNear(cursor, 8, 6);
-        checkSeekNear(cursor, 9, 6);
+        checkSeek(cursor, 1, -1, -1);
+        checkSeek(cursor, 2, 2, -1);
+        checkSeek(cursor, 3, 2, 2);
+        checkSeek(cursor, 4, 4, 2);
+        checkSeek(cursor, 5, 4, 4);
+        checkSeek(cursor, 6, 6, 4);
+        checkSeek(cursor, 7, 6, 6);
+        checkSeek(cursor, 8, 6, 6);
+        checkSeek(cursor, 9, 6, 6);
     }
 }
 

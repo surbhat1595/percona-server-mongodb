@@ -39,6 +39,7 @@
 #include "mongo/db/catalog/collection_options.h"
 #include "mongo/db/catalog/import_options.h"
 #include "mongo/db/storage/column_store.h"
+#include "mongo/db/storage/compact_options.h"
 #include "mongo/db/storage/durable_catalog.h"
 #include "mongo/db/storage/engine_extension.h"
 #include "mongo/db/storage/record_store.h"
@@ -67,7 +68,18 @@ public:
      * When all of the storage startup tasks are completed as a whole, then this function is called
      * by the external force managing the startup process.
      */
-    virtual void notifyStartupComplete(OperationContext* opCtx) {}
+    virtual void notifyStorageStartupRecoveryComplete() {}
+
+    /**
+     * Perform any operations in the storage layer that are unblocked now that the server has exited
+     * recovery and considers itself stable.
+     *
+     * This will be called during a node's transition to steady state replication.
+     *
+     * This function may race with shutdown. As a result, any steps within this function that should
+     * not race with shutdown should obtain the global lock.
+     */
+    virtual void notifyReplStartupRecoveryComplete(OperationContext* opCtx) {}
 
     virtual RecoveryUnit* newRecoveryUnit() = 0;
 
@@ -492,8 +504,7 @@ public:
     /**
      * See StorageEngine::autoCompact for details
      */
-    virtual Status autoCompact(OperationContext* opCtx,
-                               const StorageEngine::AutoCompactOptions& options) {
+    virtual Status autoCompact(OperationContext* opCtx, const AutoCompactOptions& options) {
         return Status(ErrorCodes::CommandNotSupported,
                       "The current storage engine doesn't support auto compact");
     }

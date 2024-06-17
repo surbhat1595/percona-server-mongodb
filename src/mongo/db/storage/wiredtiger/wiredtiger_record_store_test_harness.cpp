@@ -68,7 +68,7 @@ std::string _testLoggingSettings(std::string extraStrings) {
 
 WiredTigerHarnessHelper::WiredTigerHarnessHelper(Options options, StringData extraStrings)
     : _dbpath("wt_test"),
-      _engine(kWiredTigerEngineName,
+      _engine(std::string{kWiredTigerEngineName},
               _dbpath.path(),
               &_cs,
               _testLoggingSettings(extraStrings.toString()),
@@ -82,8 +82,7 @@ WiredTigerHarnessHelper::WiredTigerHarnessHelper(Options options, StringData ext
             ? std::make_unique<repl::ReplicationCoordinatorMock>(serviceContext())
             : std::make_unique<repl::ReplicationCoordinatorMock>(serviceContext(),
                                                                  repl::ReplSettings()));
-    auto opCtx = Client::getCurrent()->makeOperationContext();
-    _engine.notifyStartupComplete(opCtx.get());
+    _engine.notifyStorageStartupRecoveryComplete();
 }
 
 std::unique_ptr<RecordStore> WiredTigerHarnessHelper::newRecordStore(
@@ -96,7 +95,7 @@ std::unique_ptr<RecordStore> WiredTigerHarnessHelper::newRecordStore(
     NamespaceString nss = NamespaceString::createNamespaceString_forTest(ns);
 
     StatusWith<std::string> result = WiredTigerRecordStore::generateCreateString(
-        kWiredTigerEngineName,
+        std::string{kWiredTigerEngineName},
         NamespaceString::createNamespaceString_forTest(ns),
         ident,
         collOptions,
@@ -116,7 +115,7 @@ std::unique_ptr<RecordStore> WiredTigerHarnessHelper::newRecordStore(
     WiredTigerRecordStore::Params params;
     params.nss = nss;
     params.ident = ident.toString();
-    params.engineName = kWiredTigerEngineName;
+    params.engineName = std::string{kWiredTigerEngineName};
     params.isCapped = collOptions.capped ? true : false;
     params.keyFormat = collOptions.clusteredIndex ? KeyFormat::String : KeyFormat::Long;
     params.overwrite = collOptions.clusteredIndex ? false : true;
@@ -126,7 +125,7 @@ std::unique_ptr<RecordStore> WiredTigerHarnessHelper::newRecordStore(
     params.tracksSizeAdjustments = true;
     params.forceUpdateWithFullDocument = collOptions.timeseries != boost::none;
 
-    auto ret = std::make_unique<StandardWiredTigerRecordStore>(&_engine, opCtx.get(), params);
+    auto ret = std::make_unique<WiredTigerRecordStore>(&_engine, opCtx.get(), params);
     ret->postConstructorInit(opCtx.get(), nss);
     return std::move(ret);
 }
@@ -134,6 +133,7 @@ std::unique_ptr<RecordStore> WiredTigerHarnessHelper::newRecordStore(
 std::unique_ptr<RecordStore> WiredTigerHarnessHelper::newOplogRecordStore() {
     auto ret = newOplogRecordStoreNoInit();
     ServiceContext::UniqueOperationContext opCtx(newOperationContext());
+    Lock::GlobalLock lk(opCtx.get(), MODE_X);
     dynamic_cast<WiredTigerRecordStore*>(ret.get())->postConstructorInit(
         opCtx.get(), NamespaceString::kRsOplogNamespace);
     return ret;
@@ -141,9 +141,10 @@ std::unique_ptr<RecordStore> WiredTigerHarnessHelper::newOplogRecordStore() {
 
 std::unique_ptr<RecordStore> WiredTigerHarnessHelper::newOplogRecordStoreNoInit() {
     ServiceContext::UniqueOperationContext opCtx(newOperationContext());
+    Lock::GlobalLock lk(opCtx.get(), MODE_X);
     WiredTigerRecoveryUnit* ru =
         checked_cast<WiredTigerRecoveryUnit*>(shard_role_details::getRecoveryUnit(opCtx.get()));
-    std::string ident = NamespaceString::kRsOplogNamespace.ns().toString();
+    std::string ident = redactTenant(NamespaceString::kRsOplogNamespace).toString();
     std::string uri = WiredTigerKVEngine::kTableUriPrefix + ident;
 
     CollectionOptions options;
@@ -151,7 +152,7 @@ std::unique_ptr<RecordStore> WiredTigerHarnessHelper::newOplogRecordStoreNoInit(
 
     const NamespaceString oplogNss = NamespaceString::kRsOplogNamespace;
     StatusWith<std::string> result =
-        WiredTigerRecordStore::generateCreateString(kWiredTigerEngineName,
+        WiredTigerRecordStore::generateCreateString(std::string{kWiredTigerEngineName},
                                                     oplogNss,
                                                     ident,
                                                     options,
@@ -171,7 +172,7 @@ std::unique_ptr<RecordStore> WiredTigerHarnessHelper::newOplogRecordStoreNoInit(
     WiredTigerRecordStore::Params params;
     params.nss = oplogNss;
     params.ident = ident;
-    params.engineName = kWiredTigerEngineName;
+    params.engineName = std::string{kWiredTigerEngineName};
     params.isCapped = true;
     params.keyFormat = KeyFormat::Long;
     params.overwrite = true;
@@ -182,7 +183,7 @@ std::unique_ptr<RecordStore> WiredTigerHarnessHelper::newOplogRecordStoreNoInit(
     params.sizeStorer = nullptr;
     params.tracksSizeAdjustments = true;
     params.forceUpdateWithFullDocument = false;
-    return std::make_unique<StandardWiredTigerRecordStore>(&_engine, opCtx.get(), params);
+    return std::make_unique<WiredTigerRecordStore>(&_engine, opCtx.get(), params);
 }
 
 std::unique_ptr<RecoveryUnit> WiredTigerHarnessHelper::newRecoveryUnit() {

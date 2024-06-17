@@ -101,8 +101,10 @@ template <typename Request>
 Status doRunCommand(OperationContext* opCtx, const DatabaseName& dbname, const Request& request) {
     DBDirectClient client(opCtx);
     BSONObj cmd = request.toBSON(kMajorityWriteConcern);
-    auto reply =
-        client.runCommand(OpMsgRequestBuilder::create(dbname, std::move(cmd)))->getCommandReply();
+    auto reply = client
+                     .runCommand(OpMsgRequestBuilder::create(
+                         auth::ValidatedTenancyScope::kNotRequired, dbname, std::move(cmd)))
+                     ->getCommandReply();
     return getStatusFromCommandResult(reply);
 }
 
@@ -281,7 +283,7 @@ bool doRenameOperation(const CleanupStructuredEncryptionDataState& state,
         cmd.setDropTarget(false);
         cmd.setCollectionUUID(state.getEcocUuid().value());
 
-        uassertStatusOK(doRunCommand(opCtx.get(), ecocNss.dbName(), cmd));
+        uassertStatusOK(doRunCommand(opCtx.get(), DatabaseName::kAdmin, cmd));
         *newEcocRenameUuid = state.getEcocUuid();
     }
 

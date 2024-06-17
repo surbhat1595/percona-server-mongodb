@@ -182,6 +182,9 @@ kv_database::clear_nolock()
 {
     /* Requires: tables lock, transactions lock. */
 
+    /* Reset the database's stable timestamp. */
+    _stable_timestamp = k_timestamp_none;
+
     /*
      * Roll back all active transactions. We cannot just clear the table of active transactions, as
      * that would result in a memory leak due to circular dependencies between updates and
@@ -245,7 +248,7 @@ kv_database::rollback_to_stable(timestamp_t timestamp, kv_transaction_snapshot_p
     std::lock_guard lock_guard1(_tables_lock);
     std::lock_guard lock_guard2(_transactions_lock);
 
-    rollback_to_stable_nolock(timestamp, snapshot);
+    rollback_to_stable_nolock(timestamp, std::move(snapshot));
 }
 
 /*
@@ -280,8 +283,11 @@ kv_database::start_nolock()
     /* Otherwise recover using rollback to stable using the checkpoint. */
     kv_checkpoint_ptr ckpt = i->second;
 
-    /* If the checkpoint does not have a stable timestamp, do not use it during RTS. */
+    /* Restore the database's stable timestamp. */
     timestamp_t t = ckpt->stable_timestamp();
+    _stable_timestamp = t;
+
+    /* If the checkpoint does not have a stable timestamp, do not use it during RTS. */
     if (t == k_timestamp_none)
         t = k_timestamp_latest;
 

@@ -139,7 +139,7 @@ public:
                      PlanYieldPolicy::YieldPolicy yieldPolicy,
                      boost::optional<size_t> cachedPlanHash = boost::none);
 
-    virtual ~PlanExecutorImpl();
+    ~PlanExecutorImpl() override;
     CanonicalQuery* getCanonicalQuery() const final;
     const NamespaceString& nss() const final;
     const std::vector<NamespaceStringOrUUID>& getSecondaryNamespaces() const final;
@@ -168,7 +168,7 @@ public:
     LockPolicy lockPolicy() const final;
     const PlanExplainer& getPlanExplainer() const final;
 
-    PlanExecutor::QueryFramework getQueryFramework() const override final {
+    PlanExecutor::QueryFramework getQueryFramework() const final {
         return PlanExecutor::QueryFramework::kClassicOnly;
     }
 
@@ -191,11 +191,11 @@ public:
         return false;
     }
 
-    void setReturnOwnedData(bool returnOwnedData) override final {
+    void setReturnOwnedData(bool returnOwnedData) final {
         _mustReturnOwnedBson = returnOwnedData;
     }
 
-    bool usesCollectionAcquisitions() const override final;
+    bool usesCollectionAcquisitions() const final;
 
 private:
     /**
@@ -206,21 +206,6 @@ private:
      *  the result of a count or update) rather than returning a set of resulting documents.
      */
     void _executePlan();
-
-    /**
-     * Called on construction in order to ensure that when callers receive a new instance of a
-     * 'PlanExecutorImpl', plan selection has already been completed.
-     *
-     * If the tree contains plan selection stages, such as MultiPlanStage or SubplanStage,
-     * this calls into their underlying plan selection facilities. Otherwise, does nothing.
-     *
-     * If a YIELD_AUTO policy is set then locks are yielded during plan selection.
-     *
-     * Returns a non-OK status if query planning fails. In particular, this function returns
-     * ErrorCodes::QueryPlanKilled if plan execution cannot proceed due to a concurrent write or
-     * catalog operation.
-     */
-    Status _pickBestPlan();
 
     ExecState _getNextImpl(Snapshotted<Document>* objOut, RecordId* dlOut);
 

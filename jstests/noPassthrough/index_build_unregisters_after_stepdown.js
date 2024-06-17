@@ -32,8 +32,7 @@ let awaitIndexBuild = IndexBuildTest.startIndexBuild(
 // this point yet.
 hangFp.wait();
 
-assert.commandWorked(secondary.adminCommand({replSetStepUp: 1}));
-rst.waitForState(secondary, ReplSetTest.State.PRIMARY);
+rst.stepUp(secondary);
 
 awaitIndexBuild();
 

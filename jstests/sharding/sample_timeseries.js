@@ -9,6 +9,7 @@
  */
 import {documentEq} from "jstests/aggregation/extras/utils.js";
 import {planHasStage} from "jstests/libs/analyze_plan.js";
+import {FeatureFlagUtil} from "jstests/libs/feature_flag_util.js";
 
 // Test deliberately inserts orphans.
 TestData.skipCheckOrphans = true;

@@ -36,6 +36,7 @@
 #include "mongo/base/error_codes.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
+#include "mongo/db/admission/execution_admission_context.h"
 #include "mongo/db/basic_types.h"
 #include "mongo/db/exec/document_value/document.h"
 #include "mongo/db/pipeline/process_interface/mongo_process_interface.h"
@@ -100,8 +101,8 @@ BSONObj DocumentSourceCollStats::makeStatsForNs(
     const boost::optional<BSONObj>& filterObj) {
     // The $collStats stage is critical to observability and diagnosability, categorize as immediate
     // priority.
-    ScopedAdmissionPriorityForLock skipAdmissionControl(
-        shard_role_details::getLocker(expCtx->opCtx), AdmissionContext::Priority::kImmediate);
+    ScopedAdmissionPriority<ExecutionAdmissionContext> skipAdmissionControl(
+        expCtx->opCtx, AdmissionContext::Priority::kExempt);
 
     BSONObjBuilder builder;
 
@@ -118,7 +119,7 @@ BSONObj DocumentSourceCollStats::makeStatsForNs(
         builder.append("shard", shardName);
     }
 
-    builder.append("host", getHostNameCachedAndPort());
+    builder.append("host", prettyHostNameAndPort(expCtx->opCtx->getClient()->getLocalPort()));
     builder.appendDate("localTime", jsTime());
 
     if (auto latencyStatsSpec = spec.getLatencyStats()) {

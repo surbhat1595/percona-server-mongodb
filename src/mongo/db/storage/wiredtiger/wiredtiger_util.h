@@ -49,6 +49,8 @@
 #include "mongo/db/storage/durable_catalog.h"
 #include "mongo/db/storage/wiredtiger/wiredtiger_recovery_unit.h"
 #include "mongo/platform/compiler.h"
+#include "mongo/platform/mutex.h"
+#include "mongo/stdx/condition_variable.h"
 #include "mongo/util/assert_util.h"
 
 namespace mongo {
@@ -162,9 +164,53 @@ public:
         _wtIncompatible = true;
     }
 
+    /**
+     * If WT is setting _wtConnReady to true or WT is idle (one of the readers is not generating
+     * sections), the following function returns immediately. Otherwise (if WT is active and
+     * WT_CONN_CLOSE event is trying to set it _wtConnReady to false), this function waits until WT
+     * is idle and WT Connection is allowed to be closed.
+     */
+    void setWtConnReadyStatus(bool status);
+
+    /**
+     * If WT connection is ready and it is not shutting down, WT
+     * WiredTigerServerStatusSection::generateSection acitivity is permitted. When this function
+     * returns true, the caller may safely collect metrics, but this blocks storage engine shutdown.
+     * The caller *must* make a subsequent call to `releaseSectionActivityPermit` to allow the
+     * storage engine to shut down.
+     */
+    bool getSectionActivityPermit();
+
+    /**
+     * The following call releases section generation activity permits. When there is no section
+     * generation activity, WT connection is allowed to shut down cleanly.
+     */
+    void releaseSectionActivityPermit();
+
+    /**
+     * Each successful ongoing WiredTigerServerStatusSection::generateSection call is counted as a
+     * single active section. The number of current active sections are returned by this call.
+     */
+    int32_t getActiveSections() {
+        stdx::lock_guard<mongo::Mutex> lock(_mutex);
+        return _activeSections;
+    }
+
+    /**
+     * If WT connection is made and there is no outstanding shutdown, WT Connection Ready Status is
+     * true. This function should only be used for tests.
+     */
+    bool getWtConnReadyStatus() {
+        return _wtConnReady;
+    }
+
 private:
     bool _startupSuccessful = false;
     bool _wtIncompatible = false;
+    mongo::Mutex _mutex = MONGO_MAKE_LATCH("mongo::WiredTigerEventHandler::_mutex");
+    bool _wtConnReady = false;
+    stdx::condition_variable _idleCondition;
+    int32_t _activeSections{0};
 };
 
 class WiredTigerUtil {
@@ -207,7 +253,7 @@ public:
      *
      * Returns the FailedToParse status if the storage engine metadata object is malformed.
      */
-    static StatusWith<std::string> generateImportString(const StringData& ident,
+    static StatusWith<std::string> generateImportString(StringData ident,
                                                         const BSONObj& storageMetadata,
                                                         const ImportOptions& importOptions);
 
@@ -301,6 +347,11 @@ public:
      */
     static int64_t getIdentReuseSize(WT_SESSION* s, const std::string& uri);
 
+    /**
+     * Returns the bytes compaction may reclaim for an ident. This is the amount of allocated space
+     * on disk that can be potentially reclaimed.
+     */
+    static int64_t getIdentCompactRewrittenExpectedSize(WT_SESSION* s, const std::string& uri);
 
     /**
      * Return amount of memory to use for the WiredTiger cache based on either the startup
@@ -346,7 +397,7 @@ public:
                                      std::vector<std::string>& errors,
                                      std::vector<std::string>& warnings);
 
-    static void notifyStartupComplete();
+    static void notifyStorageStartupRecoveryComplete();
 
     static bool useTableLogging(const NamespaceString& nss);
 
@@ -379,6 +430,15 @@ public:
      * TODO(SERVER-81069): Remove this since it's intrinsically tied to encryption options only.
      */
     static BSONObj getSanitizedStorageOptionsForSecondaryReplication(const BSONObj& options);
+
+    /**
+     * Background compaction should not be executed if:
+     * - the feature flag is disabled or,
+     * - it is an in-memory configuration,
+     * - checkpoints are disabled or,
+     * - user writes are not allowed.
+     */
+    static Status canRunAutoCompact(OperationContext* opCtx, bool isEphemeral);
 
 private:
     /**

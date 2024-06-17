@@ -219,7 +219,6 @@ void ClusterExplain::buildPlannerInfo(OperationContext* opCtx,
                                       BSONObjBuilder* out) {
     BSONObjBuilder queryPlannerBob(out->subobjStart("queryPlanner"));
 
-    queryPlannerBob.appendNumber("mongosPlannerVersion", kPlannerVersion);
     BSONObjBuilder winningPlanBob(queryPlannerBob.subobjStart("winningPlan"));
 
     winningPlanBob.append("stage", mongosStageName);
@@ -232,6 +231,7 @@ void ClusterExplain::buildPlannerInfo(OperationContext* opCtx,
         BSONObj queryPlanner = responseData["queryPlanner"].Obj();
         BSONObj serverInfo = responseData["serverInfo"].Obj();
 
+        singleShardBob.append("explainVersion", responseData["explainVersion"].valueStringData());
         singleShardBob.append("shardName", shardResponses[i].shardId.toString());
         {
             const auto shard = uassertStatusOK(
@@ -352,7 +352,6 @@ void ClusterExplain::buildEOFExplainResult(OperationContext* opCtx,
                                            BSONObjBuilder* out) {
 
     BSONObjBuilder queryPlannerBob(out->subobjStart("queryPlanner"));
-    queryPlannerBob.appendNumber("mongosPlannerVersion", kPlannerVersion);
     queryPlannerBob.append(
         "namespace",
         NamespaceStringUtil::serialize(cq->nss(), SerializationContext::stateDefault()));
@@ -371,13 +370,13 @@ void ClusterExplain::buildEOFExplainResult(OperationContext* opCtx,
     queryPlannerBob.doneFast();
 
     explain_common::generateServerInfo(out);
-    explain_common::generateServerParameters(opCtx, out);
+    explain_common::generateServerParameters(cq->getExpCtx(), out);
     appendIfRoom(out, command, "command");
 }
 
 // static
 Status ClusterExplain::buildExplainResult(
-    OperationContext* opCtx,
+    const boost::intrusive_ptr<ExpressionContext>& expCtx,
     const vector<AsyncRequestsSender::Response>& shardResponses,
     const char* mongosStageName,
     long long millisElapsed,
@@ -390,10 +389,10 @@ Status ClusterExplain::buildExplainResult(
         return ex.toStatus();
     }
 
-    buildPlannerInfo(opCtx, shardResponses, mongosStageName, out);
+    buildPlannerInfo(expCtx->opCtx, shardResponses, mongosStageName, out);
     buildExecStats(shardResponses, mongosStageName, millisElapsed, out);
     explain_common::generateServerInfo(out);
-    explain_common::generateServerParameters(opCtx, out);
+    explain_common::generateServerParameters(expCtx, out);
     appendIfRoom(out, command, "command");
 
     return Status::OK();

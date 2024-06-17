@@ -416,6 +416,7 @@ TEST(RecordStoreTestHarness, Cursor1) {
     {
         int x = 0;
         ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
+        Lock::GlobalLock globalLock(opCtx.get(), MODE_IS);
         auto cursor = rs->getCursor(opCtx.get());
         while (auto record = cursor->next()) {
             std::string s = str::stream() << "eliot" << x++;
@@ -428,6 +429,7 @@ TEST(RecordStoreTestHarness, Cursor1) {
     {
         int x = N;
         ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
+        Lock::GlobalLock globalLock(opCtx.get(), MODE_IS);
         auto cursor = rs->getCursor(opCtx.get(), false);
         while (auto record = cursor->next()) {
             std::string s = str::stream() << "eliot" << --x;
@@ -444,6 +446,9 @@ TEST(RecordStoreTestHarness, CursorRestoreForward) {
 
     auto rs = harnessHelper->newRecordStore(ns, {});
     ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
+
+    Lock::GlobalLock globalLock(opCtx.get(), MODE_IX);
+
     {
         WriteUnitOfWork uow(opCtx.get());
         std::string s = "test";
@@ -486,6 +491,8 @@ TEST(RecordStoreTestHarness, CursorRestoreReverse) {
 
     auto rs = harnessHelper->newRecordStore(ns, {});
     ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
+    Lock::GlobalLock globalLock(opCtx.get(), MODE_IX);
+
     {
         WriteUnitOfWork uow(opCtx.get());
         std::string s = "test";
@@ -528,6 +535,9 @@ TEST(RecordStoreTestHarness, CursorRestoreDeletedDoc) {
 
     auto rs = harnessHelper->newRecordStore(ns, {});
     ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
+
+    Lock::GlobalLock globalLock(opCtx.get(), MODE_IX);
+
     {
         WriteUnitOfWork uow(opCtx.get());
         std::string s = "test";
@@ -592,6 +602,8 @@ TEST(RecordStoreTestHarness, CursorSaveRestoreSeek) {
 
     auto rs = harnessHelper->newRecordStore(ns, {});
     ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
+    Lock::GlobalLock globalLock(opCtx.get(), MODE_IX);
+
     {
         WriteUnitOfWork uow(opCtx.get());
         std::string s = "test";
@@ -626,6 +638,9 @@ TEST(RecordStoreTestHarness, CursorSaveUnpositionedRestoreSeek) {
 
     auto rs = harnessHelper->newRecordStore(ns, {});
     ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
+
+    Lock::GlobalLock globalLock(opCtx.get(), MODE_IX);
+
     {
         WriteUnitOfWork uow(opCtx.get());
         std::string s = "test";
@@ -772,10 +787,11 @@ TEST(RecordStoreTestHarness, ClusteredCappedRecordStoreCreation) {
     invariant(rs->keyFormat() == KeyFormat::String);
 }
 
-TEST(RecordStoreTestHarness, ClusteredRecordStoreSeekNear) {
+TEST(RecordStoreTestHarness, ClusteredCappedRecordStoreSeek) {
     const auto harnessHelper = newRecordStoreHarnessHelper();
     const std::string ns = "test.system.buckets.a";
     CollectionOptions options;
+    options.capped = true;
     options.clusteredIndex = clustered_util::makeCanonicalClusteredInfoForLegacyFormat();
     std::unique_ptr<RecordStore> rs = harnessHelper->newRecordStore(ns, options, KeyFormat::String);
     invariant(rs->keyFormat() == KeyFormat::String);
@@ -811,7 +827,7 @@ TEST(RecordStoreTestHarness, ClusteredRecordStoreSeekNear) {
         records.push_back(record);
     }
 
-    for (int i = 0; i < numRecords; i++) {
+    for (int i = 0; i < numRecords - 1; i++) {
         // Generate an OID RecordId with a timestamp part and high bits elsewhere such that it
         // always compares greater than or equal to the OIDs we inserted.
 
@@ -821,12 +837,12 @@ TEST(RecordStoreTestHarness, ClusteredRecordStoreSeekNear) {
 
         auto rid = record_id_helpers::keyForOID(oid);
         auto cur = rs->getCursor(opCtx.get());
-        auto rec = cur->seekNear(rid);
+        auto rec = cur->seek(rid, SeekableRecordCursor::BoundInclusion::kInclude);
         ASSERT(rec);
-        ASSERT_EQ(records[i].id, rec->id);
+        ASSERT_GT(rec->id, rid);
     }
 
-    for (int i = 0; i < numRecords; i++) {
+    for (int i = 1; i < numRecords; i++) {
         // Generate an OID RecordId with only a timestamp part and zeroes elsewhere such that it
         // always compares less than or equal to the OIDs we inserted.
 
@@ -835,9 +851,9 @@ TEST(RecordStoreTestHarness, ClusteredRecordStoreSeekNear) {
 
         auto rid = record_id_helpers::keyForOID(oid);
         auto cur = rs->getCursor(opCtx.get(), false /* forward */);
-        auto rec = cur->seekNear(rid);
+        auto rec = cur->seek(rid, SeekableRecordCursor::BoundInclusion::kInclude);
         ASSERT(rec);
-        ASSERT_EQ(records[i].id, rec->id);
+        ASSERT_LT(rec->id, rid);
     }
 }
 

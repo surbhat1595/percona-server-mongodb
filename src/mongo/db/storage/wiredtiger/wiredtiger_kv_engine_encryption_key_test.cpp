@@ -365,7 +365,7 @@ protected:
             false,
             false,
             FakeMasterKeyProviderFactory(_vaultServer, _kmipServer));
-        engine->notifyStartupComplete(opCtx.get());
+        engine->notifyStorageStartupRecoveryComplete();
         return engine;
     }
 

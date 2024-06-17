@@ -110,8 +110,9 @@ void DDLLockManager::_lock(OperationContext* opCtx,
         }
 
         tassert(7742100,
-                "None hierarchy lock (Global/DB/Coll) must be hold when acquiring a DDL lock",
-                !locker->isLocked());
+                "No hierarchy lock (Global/DB/Coll) must be held when acquiring a DDL lock outside"
+                "a transaction (transactions hold at least the global lock in IX mode)",
+                opCtx->inMultiDocumentTransaction() || !locker->isLocked());
 
         _registerResourceName(lock, resId, ns);
     }
@@ -127,6 +128,24 @@ void DDLLockManager::_lock(OperationContext* opCtx,
 
     try {
         locker->lock(opCtx, resId, mode, deadline);
+
+        const auto state = [this]() {
+            stdx::unique_lock<Latch> lock(_mutex);
+            return _state;
+        }();
+        if (state != State::kPrimaryAndRecovered && waitForRecovery) {
+            // We must fail if the node has become secondary while we were waiting for the lock
+            // acquisition. It is not allowed to acquire a DDL lock once `_state` has changed from
+            // `kPrimaryAndRecovered` as we may be in the middle of a DDL operation that was
+            // interrupted during a step-down, leading to undefined behavior. Note that once a DDL
+            // operation takes a DDL lock, no one else should acquire that DDL lock until the
+            // operation completes.
+            locker->unlock(resId);
+            uasserted(
+                ErrorCodes::InterruptedDueToReplStateChange,
+                "Failed to acquire DDL lock for namespace '{}' in mode {} with reason {} "
+                "because this is not the primary anymore."_format(ns, modeName(mode), reason));
+        }
     } catch (const ExceptionFor<ErrorCodes::LockTimeout>&) {
 
         std::vector<std::string> lockHoldersArr;
@@ -200,7 +219,8 @@ DDLLockManager::ScopedDatabaseDDLLock::ScopedDatabaseDDLLock(OperationContext* o
     : _dbLock{
           opCtx, shard_role_details::getLocker(opCtx), db, reason, mode, true /*waitForRecovery*/} {
     // Check under the DDL dbLock if this is the primary shard for the database
-    Lock::DBLock dbLock(opCtx, db, MODE_IS);
+    const auto lockMode = opCtx->inMultiDocumentTransaction() ? MODE_IX : MODE_IS;
+    Lock::DBLock dbLock(opCtx, db, lockMode);
     const auto scopedDss = DatabaseShardingState::assertDbLockedAndAcquireShared(opCtx, db);
     scopedDss->assertIsPrimaryShardForDb(opCtx);
 }
@@ -219,7 +239,8 @@ DDLLockManager::ScopedCollectionDDLLock::ScopedCollectionDDLLock(OperationContex
 
     // Check under the DDL db lock if this is the primary shard for the database
     {
-        Lock::DBLock dbLock(opCtx, ns.dbName(), MODE_IS);
+        const auto lockMode = opCtx->inMultiDocumentTransaction() ? MODE_IX : MODE_IS;
+        Lock::DBLock dbLock(opCtx, ns.dbName(), lockMode);
         const auto scopedDss =
             DatabaseShardingState::assertDbLockedAndAcquireShared(opCtx, ns.dbName());
         scopedDss->assertIsPrimaryShardForDb(opCtx);

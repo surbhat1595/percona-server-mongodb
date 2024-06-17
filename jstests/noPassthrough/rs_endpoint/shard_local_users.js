@@ -5,10 +5,10 @@
  * serverless so the cluster cannot become multi-shard.
  *
  * @tags: [
- *   requires_fcv_73,
- *   featureFlagEmbeddedRouter,
- *   featureFlagCheckForDirectShardOperations,
- *   requires_persistence
+ *   requires_fcv_80,
+ *   featureFlagRouterPort,
+ *   featureFlagFailOnDirectShardOperations,
+ *   requires_persistence,
  * ]
  */
 
@@ -17,6 +17,9 @@ import {
     getReplicaSetURL,
     waitForAutoBootstrap
 } from "jstests/noPassthrough/rs_endpoint/lib/util.js";
+import {
+    moveDatabaseAndUnshardedColls
+} from "jstests/sharding/libs/move_database_and_unsharded_coll_helper.js";
 
 const keyFile = "jstests/libs/key1";
 
@@ -65,22 +68,25 @@ function runTests(shard0Primary, tearDownFunc) {
 
     // Add a second shard to the cluster.
     const shard1Name = "shard1-" + extractUUIDFromObject(UUID());
-    const shard1Rst = new ReplSetTest({
-        name: shard1Name,
-        nodes: 2,
-        keyFile,
-        nodeOptions:
-            {setParameter: {'failpoint.enforceDirectShardOperationsCheck': "{'mode':'alwaysOn'}"}}
-    });
+    const shard1Rst = new ReplSetTest({name: shard1Name, nodes: 2, keyFile});
     shard1Rst.startSet({shardsvr: ""});
     shard1Rst.initiate();
     const shard1Primary = shard1Rst.getPrimary();
     const shard1AuthDB = shard1Primary.getDB(authDbName);
     const shard1TestColl = shard1AuthDB.getSiblingDB(dbName).getCollection(collName);
 
-    // TODO (SERVER-83380): Connect to the router port on a shardsvr mongod instead.
-    const mongos = MongoRunner.runMongos({configdb: shard0URL, keyFile});
-    const mongosAuthDB = mongos.getDB(authDbName);
+    const {router, mongos} = (() => {
+        if (shard0Primary.routerHost) {
+            const router = new Mongo(shard0Primary.routerHost);
+            return {
+                router
+            }
+        }
+        const mongos = MongoRunner.runMongos({configdb: shard0URL, keyFile});
+        return {router: mongos, mongos};
+    })();
+    jsTest.log("Using " + tojsononeline({router, mongos}));
+    const mongosAuthDB = router.getDB(authDbName);
     const mongosTestColl = mongosAuthDB.getSiblingDB(dbName).getCollection(collName);
     assert(mongosAuthDB.auth(adminUser.userName, adminUser.password));
     // Insert documents now so shard0 is the primary shard for the test database.
@@ -184,7 +190,9 @@ function runTests(shard0Primary, tearDownFunc) {
     assert(mongosAuthDB.auth(adminUser.userName, adminUser.password));
     assert.commandWorked(
         mongosAuthDB.adminCommand({addShard: shard1Rst.getURL(), name: shard1Name}));
-    assert.commandWorked(mongosAuthDB.adminCommand({movePrimary: dbName, to: shard1Name}));
+
+    moveDatabaseAndUnshardedColls(router.getDB(dbName), shard1Name);
+
     assert.commandWorked(mongosAuthDB.adminCommand({transitionToDedicatedConfigServer: 1}));
     assert(mongosAuthDB.logout());
 
@@ -209,7 +217,9 @@ function runTests(shard0Primary, tearDownFunc) {
 
     tearDownFunc();
     shard1Rst.stopSet();
-    MongoRunner.stopMongos(mongos);
+    if (mongos) {
+        MongoRunner.stopMongos(mongos);
+    }
 }
 
 {
@@ -218,7 +228,6 @@ function runTests(shard0Primary, tearDownFunc) {
         setParameter: {
             featureFlagAllMongodsAreSharded: true,
             featureFlagReplicaSetEndpoint: true,
-            'failpoint.enforceDirectShardOperationsCheck': "{'mode':'alwaysOn'}"
         },
         keyFile
     });
@@ -236,7 +245,6 @@ function runTests(shard0Primary, tearDownFunc) {
             setParameter: {
                 featureFlagAllMongodsAreSharded: true,
                 featureFlagReplicaSetEndpoint: true,
-                'failpoint.enforceDirectShardOperationsCheck': "{'mode':'alwaysOn'}"
             }
         },
         useAutoBootstrapProcedure: true,
@@ -259,7 +267,6 @@ function runTests(shard0Primary, tearDownFunc) {
             nodes: 2,
             setParameter: {
                 featureFlagReplicaSetEndpoint: true,
-                'failpoint.enforceDirectShardOperationsCheck': "{'mode':'alwaysOn'}"
             }
         },
         configShard: true,

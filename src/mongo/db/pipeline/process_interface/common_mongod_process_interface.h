@@ -88,7 +88,7 @@ class CommonMongodProcessInterface : public CommonProcessInterface {
 public:
     using CommonProcessInterface::CommonProcessInterface;
 
-    virtual ~CommonMongodProcessInterface() = default;
+    ~CommonMongodProcessInterface() override = default;
 
     std::unique_ptr<TransactionHistoryIteratorBase> createTransactionHistoryIterator(
         repl::OpTime time) const final;
@@ -118,7 +118,7 @@ public:
                              BSONObjBuilder* builder) const final;
     Status appendQueryExecStats(OperationContext* opCtx,
                                 const NamespaceString& nss,
-                                BSONObjBuilder* builder) const final override;
+                                BSONObjBuilder* builder) const final;
     BSONObj getCollectionOptions(OperationContext* opCtx, const NamespaceString& nss) override;
     std::unique_ptr<Pipeline, PipelineDeleter> attachCursorSourceToPipelineForLocalRead(
         Pipeline* pipeline,
@@ -145,8 +145,6 @@ public:
     bool fieldsHaveSupportingUniqueIndex(const boost::intrusive_ptr<ExpressionContext>& expCtx,
                                          const NamespaceString& nss,
                                          const std::set<FieldPath>& fieldPaths) const override;
-
-    std::unique_ptr<ResourceYielder> getResourceYielder(StringData cmdName) const final;
 
     std::pair<std::set<FieldPath>, boost::optional<ChunkVersion>>
     ensureFieldsUniqueOrResolveDocumentKey(

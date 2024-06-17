@@ -44,6 +44,7 @@
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/pipeline/document_source_cursor.h"
 #include "mongo/db/pipeline/document_source_limit.h"
+#include "mongo/db/pipeline/initialize_auto_get_helper.h"
 #include "mongo/db/query/collection_query_info.h"
 #include "mongo/db/query/explain.h"
 #include "mongo/db/query/explain_options.h"
@@ -64,7 +65,6 @@
 #include "mongo/util/uuid.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kQuery
-
 
 namespace mongo {
 
@@ -200,8 +200,13 @@ void DocumentSourceCursor::loadBatch() {
             bool batchCountFull = _batchSizeCount != 0 && _currentBatch.count() >= _batchSizeCount;
             if (batchCountFull || _currentBatch.memUsageBytes() > _batchSizeBytes ||
                 awaitDataState(pExpCtx->opCtx).shouldWaitForInserts) {
-                // End this batch and prepare PlanExecutor for yielding.
-                _exec->saveState();
+                // At any given time only one operation can own the entirety of resources used by a
+                // multi-document transaction. As we can perform a remote call during the query
+                // execution we will check in the session to avoid deadlocks. If we don't release
+                // the storage engine resources used here then we could have two operations
+                // interacting with resources of a session at the same time. This will leave the
+                // plan in the saved state as a side-effect.
+                _exec->releaseAllAcquiredResources();
                 // Double the size for next batch when batch is full.
                 if (batchCountFull && overflow::mul(_batchSizeCount, 2, &_batchSizeCount)) {
                     _batchSizeCount = 0;  // Go unlimited if we overflow.
@@ -217,7 +222,13 @@ void DocumentSourceCursor::loadBatch() {
         // since we will need to retrieve the resume information the executor observed before
         // hitting EOF.
         if (_resumeTrackingType != ResumeTrackingType::kNone || pExpCtx->isTailableAwaitData()) {
-            _exec->saveState();
+            // At any given time only one operation can own the entirety of resources used by a
+            // multi-document transaction. As we can perform a remote call during the query
+            // execution we will check in the session to avoid deadlocks. If we don't release the
+            // storage engine resources used here then we could have two operations interacting with
+            // resources of a session at the same time. This will leave the plan in the saved state
+            // as a side-effect.
+            _exec->releaseAllAcquiredResources();
             return;
         }
     } catch (...) {
@@ -281,17 +292,24 @@ Value DocumentSourceCursor::serialize(const SerializationOptions& opts) const {
     {
         auto opCtx = pExpCtx->opCtx;
         auto secondaryNssList = _exec->getSecondaryNamespaces();
-        AutoGetCollectionForReadMaybeLockFree readLock(
-            opCtx,
-            _exec->nss(),
-            AutoGetCollection::Options{}.secondaryNssOrUUIDs(secondaryNssList.cbegin(),
-                                                             secondaryNssList.cend()));
+        boost::optional<AutoGetCollectionForReadMaybeLockFree> readLock = boost::none;
+        auto initAutoGetFn = [&]() {
+            readLock.emplace(pExpCtx->opCtx,
+                             _exec->nss(),
+                             AutoGetCollection::Options{}.secondaryNssOrUUIDs(
+                                 secondaryNssList.cbegin(), secondaryNssList.cend()));
+        };
+        bool isAnySecondaryCollectionNotLocal =
+            intializeAutoGet(opCtx, _exec->nss(), secondaryNssList, initAutoGetFn);
+        tassert(8322003,
+                "Should have initialized AutoGet* after calling 'initializeAutoGet'",
+                readLock.has_value());
         MultipleCollectionAccessor collections(opCtx,
-                                               &readLock.getCollection(),
-                                               readLock.getNss(),
-                                               readLock.isAnySecondaryNamespaceAViewOrSharded(),
+                                               &readLock->getCollection(),
+                                               readLock->getNss(),
+                                               readLock->isAnySecondaryNamespaceAView() ||
+                                                   isAnySecondaryCollectionNotLocal,
                                                secondaryNssList);
-
         Explain::explainStages(_exec.get(),
                                collections,
                                verbosity.value(),

@@ -136,9 +136,15 @@ public:
      */
     const QuerySolution* pickBestPlan(CanonicalQuery* cq) {
         AutoGetCollectionForReadCommand collection(&_opCtx, nss);
-
-        QueryPlannerParams plannerParams;
-        fillOutPlannerParams(&_opCtx, collection.getCollection(), cq, &plannerParams);
+        MultipleCollectionAccessor collectionsAccessor(collection.getCollection());
+        QueryPlannerParams plannerParams{
+            QueryPlannerParams::ArgsForSingleCollectionQuery{
+                .opCtx = &_opCtx,
+                .canonicalQuery = *cq,
+                .collections = collectionsAccessor,
+                .plannerOptions = QueryPlannerParams::DEFAULT,
+            },
+        };
 
         // Plan.
         auto statusWithMultiPlanSolns = QueryPlanner::plan(*cq, plannerParams);
@@ -225,7 +231,7 @@ public:
         internalQueryPlanEvaluationMaxResults.store(100);
     }
 
-    ~PlanRankingPreferNonFailed() {
+    ~PlanRankingPreferNonFailed() override {
         internalQueryMaxBlockingSortMemoryUsageBytes.store(
             _internalQueryMaxBlockingSortMemoryUsageBytes);
         internalQueryPlanEvaluationMaxResults.store(_internalQueryPlanEvaluationMaxResults);
@@ -714,7 +720,7 @@ class All : public unittest::OldStyleSuiteSpecification {
 public:
     All() : OldStyleSuiteSpecification("query_plan_ranking") {}
 
-    void setupTests() {
+    void setupTests() override {
         add<PlanRankingIntersectOverride>();
         add<PlanRankingIntersectWithBackup>();
         add<PlanRankingPreferCovered>();

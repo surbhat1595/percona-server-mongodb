@@ -112,7 +112,7 @@ ShardRegistry::ShardRegistry(ServiceContext* service,
       }()),
       _cache(std::make_unique<Cache>(
           _cacheMutex,
-          _service,
+          _service->getService(),
           _threadPool,
           [this](OperationContext* opCtx,
                  const Singleton& key,
@@ -493,12 +493,12 @@ SharedSemiFuture<ShardRegistry::Cache::ValueHandle> ShardRegistry::_reloadAsync(
 }
 
 void ShardRegistry::scheduleReplicaSetUpdateOnConfigServerIfNeeded(
-    OperationContext* opCtx, const std::function<bool()>& isPrimaryFn) noexcept {
+    const std::function<bool()>& isPrimaryFn) noexcept {
     if (!isPrimaryFn()) {
         return;
     }
 
-    auto executor = Grid::get(opCtx)->getExecutorPool()->getFixedExecutor();
+    auto executor = Grid::get(getGlobalServiceContext())->getExecutorPool()->getFixedExecutor();
     AsyncTry([] {
         ThreadClient tc("UpdateReplicaSetOnConfigServer",
                         getGlobalServiceContext()->getService(ClusterRole::ShardServer));
@@ -664,7 +664,7 @@ std::pair<ShardRegistryData, Timestamp> ShardRegistryData::createFromCatalogClie
     auto const catalogClient = Grid::get(opCtx)->catalogClient();
 
     auto shardsAndOpTime = uassertStatusOKWithContext(
-        catalogClient->getAllShards(opCtx, repl::ReadConcernLevel::kMajorityReadConcern),
+        catalogClient->getAllShards(opCtx, repl::ReadConcernLevel::kSnapshotReadConcern),
         "could not get updated shard list from config server");
 
     auto shards = std::move(shardsAndOpTime.value);

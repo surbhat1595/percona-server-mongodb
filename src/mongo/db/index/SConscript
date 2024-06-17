@@ -9,6 +9,8 @@ env.Benchmark(
     source='key_gen_bm.cpp',
     LIBDEPS=[
         '$BUILD_DIR/mongo/base',
+        '$BUILD_DIR/mongo/db/query/query_test_service_context',
+        '$BUILD_DIR/mongo/db/query/sort_pattern',
         'index_access_method',
     ],
 )
@@ -51,7 +53,6 @@ iamEnv.Library(
         'index_descriptor.cpp',
         'multikey_paths.cpp',
         's2_access_method.cpp',
-        's2_bucket_access_method.cpp',
         'skipped_record_tracker.cpp',
         'sort_key_generator.cpp',
         'wildcard_access_method.cpp',
@@ -79,7 +80,7 @@ iamEnv.Library(
         '$BUILD_DIR/mongo/db/resumable_index_builds_idl',
         '$BUILD_DIR/mongo/db/server_base',
         '$BUILD_DIR/mongo/db/service_context',
-        '$BUILD_DIR/mongo/db/shard_role_api_stor_ex',
+        '$BUILD_DIR/mongo/db/shard_role_api',
         '$BUILD_DIR/mongo/db/sorter/sorter_base',
         '$BUILD_DIR/mongo/db/sorter/sorter_stats',
         '$BUILD_DIR/mongo/db/storage/encryption_hooks',
@@ -88,6 +89,7 @@ iamEnv.Library(
         '$BUILD_DIR/mongo/db/storage/key_string',
         '$BUILD_DIR/mongo/db/storage/record_store_base',
         '$BUILD_DIR/mongo/db/storage/storage_options',
+        '$BUILD_DIR/mongo/db/storage/write_unit_of_work',
         '$BUILD_DIR/mongo/db/timeseries/timeseries_conversion_util',
         '$BUILD_DIR/mongo/util/concurrency/spin_lock',
         '$BUILD_DIR/mongo/util/progress_meter',

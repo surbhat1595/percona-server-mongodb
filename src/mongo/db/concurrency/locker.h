@@ -36,7 +36,7 @@
 #include <string>
 #include <vector>
 
-#include "mongo/base/error_codes.h"
+#include "mongo/db/admission/execution_admission_context.h"
 #include "mongo/db/concurrency/cond_var_lock_grant_notification.h"
 #include "mongo/db/concurrency/fast_map_noalloc.h"
 #include "mongo/db/concurrency/flow_control_ticketholder.h"
@@ -58,7 +58,9 @@
 namespace mongo {
 
 class OperationContext;
+namespace admission {
 class TicketHolderManager;
+}
 
 /**
  * Interface for acquiring locks. One of those objects will have to be instantiated for each
@@ -97,7 +99,7 @@ public:
     void unsetThreadId();
 
     std::string getDebugInfo() const;
-    void setDebugInfo(const std::string& info);
+    void setDebugInfo(std::string info);
 
     /**
      * State for reporting the number of active and queued reader and writer clients.
@@ -110,19 +112,9 @@ public:
      */
     ClientState getClientState() const;
 
-    /**
-     * This will set the admission priority for the ticket mechanism.
-     */
-    void setAdmissionPriority(AdmissionContext::Priority priority) {
-        _admCtx.setPriority(priority);
-    }
-
-    AdmissionContext::Priority getAdmissionPriority() const {
-        return _admCtx.getPriority();
-    }
-
-    bool shouldWaitForTicket() const {
-        return _admCtx.getPriority() != AdmissionContext::Priority::kImmediate;
+    bool shouldWaitForTicket(OperationContext* opCtx) const {
+        return ExecutionAdmissionContext::get(opCtx).getPriority() !=
+            AdmissionContext::Priority::kExempt;
     }
 
     /**
@@ -167,6 +159,10 @@ public:
      */
     bool hasWriteTicket() const {
         return _modeForTicket == MODE_IX || _modeForTicket == MODE_X;
+    }
+
+    Microseconds getTimeQueuedForTicketMicros() const {
+        return _timeQueuedForTicketMicros;
     }
 
     /**
@@ -337,13 +333,13 @@ public:
      * lockStatsBase.
      */
     void getLockerInfo(LockerInfo* lockerInfo,
-                       boost::optional<SingleThreadedLockStats> alreadyCountedStats) const;
+                       const boost::optional<SingleThreadedLockStats>& alreadyCountedStats) const;
 
     /**
      * Returns diagnostics information for the locker.
      */
-    boost::optional<LockerInfo> getLockerInfo(
-        boost::optional<SingleThreadedLockStats> alreadyCountedStats) const;
+    LockerInfo getLockerInfo(
+        const boost::optional<SingleThreadedLockStats>& alreadyCountedStats) const;
 
     /**
      * LockSnapshot captures the state of all resources that are locked, what modes they're
@@ -561,6 +557,15 @@ public:
         return getLockMode(resourceIdReplicationStateTransitionLock) == MODE_X;
     }
 
+    void addTicketQueueTime(Milliseconds queueTime) {
+        _timeQueuedForTicketMicros += duration_cast<Microseconds>(queueTime);
+    }
+
+    void addFlowControlTicketQueueTime(Milliseconds queueTime) {
+        _flowControlStats.timeAcquiringMicros +=
+            durationCount<Microseconds>(duration_cast<Microseconds>(queueTime));
+    }
+
     //
     // Below functions are for unit-testing only
     //
@@ -591,7 +596,6 @@ protected:
     friend class UninterruptibleLockGuard;
     friend class InterruptibleLockGuard;
     friend class AllowLockAcquisitionOnTimestampedUnitOfWork;
-    friend class ScopedAdmissionPriorityForLock;
 
     /**
      * Allows for lock requests to be requested in a non-blocking way. There can be only one
@@ -705,7 +709,7 @@ protected:
     LockManager* const _lockManager;
 
     // The global ticketholders of the service context.
-    TicketHolderManager* const _ticketHolderManager;
+    admission::TicketHolderManager* const _ticketHolderManager;
 
     // The only reason we have this spin lock here is for the diagnostic tools, which could iterate
     // through the LockRequestsMap on a separate thread and need it to be stable. Apart from that,
@@ -751,9 +755,6 @@ protected:
     // oplog hole cannot try to acquire subsequent locks.
     bool _shouldAllowLockAcquisitionOnTimestampedUnitOfWork = false;
 
-    // Keeps state and statistics related to admission control.
-    AdmissionContext _admCtx;
-
     /**
      * The number of LockRequests to unlock at the end of this WUOW. This is used for locks
      * participating in two-phase locking.
@@ -784,6 +785,9 @@ protected:
 
     // This will only be valid when holding a ticket.
     boost::optional<Ticket> _ticket;
+
+    // Tracks accumulated time spent waiting for a ticket.
+    Microseconds _timeQueuedForTicketMicros{0};
 
     // Tracks the global lock modes ever acquired in this Locker's life. This value should only ever
     // be accessed from the thread that owns the Locker.
@@ -897,34 +901,6 @@ public:
 private:
     Locker* const _locker;
     bool _originalValue;
-};
-
-/**
- * RAII-style class to set the priority for the ticket admission mechanism when acquiring a global
- * lock.
- */
-class ScopedAdmissionPriorityForLock {
-public:
-    explicit ScopedAdmissionPriorityForLock(Locker* locker, AdmissionContext::Priority priority)
-        : _locker(locker), _originalPriority(_locker->getAdmissionPriority()) {
-        uassert(ErrorCodes::IllegalOperation,
-                "It is illegal for an operation to demote a high priority to a lower priority "
-                "operation",
-                _originalPriority != AdmissionContext::Priority::kImmediate ||
-                    priority == AdmissionContext::Priority::kImmediate);
-        _locker->_admCtx.setPriority(priority);
-    }
-
-    ScopedAdmissionPriorityForLock(const ScopedAdmissionPriorityForLock&) = delete;
-    ScopedAdmissionPriorityForLock& operator=(const ScopedAdmissionPriorityForLock&) = delete;
-
-    ~ScopedAdmissionPriorityForLock() {
-        _locker->_admCtx.setPriority(_originalPriority);
-    }
-
-private:
-    Locker* const _locker;
-    AdmissionContext::Priority _originalPriority;
 };
 
 }  // namespace mongo

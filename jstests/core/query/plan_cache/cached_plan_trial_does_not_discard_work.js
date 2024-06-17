@@ -15,16 +15,16 @@
 //   # The SBE plan cache was first enabled in 6.3.
 //   requires_fcv_63,
 //   requires_profiling,
-//   # Plan cache state is node-local and will not get migrated alongside tenant data.
+//   # Plan cache state is node-local and will not get migrated alongside user data.
 //   tenant_migration_incompatible,
-//   # TODO SERVER-67607: Test plan cache with CQF enabled.
-//   cqf_experimental_incompatible,
+//   assumes_balancer_off,
 //   featureFlagSbeFull,
 // ]
 import {getLatestProfilerEntry} from "jstests/libs/profiler.js";
 
 const testDb = db.getSiblingDB(jsTestName());
 assert.commandWorked(testDb.dropDatabase());
+
 const coll = testDb.getCollection('test');
 
 const queryPlanEvaluationMaxResults = (() => {

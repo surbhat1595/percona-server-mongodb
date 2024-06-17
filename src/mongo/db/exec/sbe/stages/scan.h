@@ -40,6 +40,7 @@
 
 #include "mongo/base/string_data.h"
 #include "mongo/config.h"  // IWYU pragma: keep
+#include "mongo/db/admission/execution_admission_context.h"
 #include "mongo/db/catalog/collection.h"
 #include "mongo/db/catalog/index_catalog_entry.h"
 #include "mongo/db/exec/field_name_bloom_filter.h"
@@ -52,7 +53,6 @@
 #include "mongo/db/exec/sbe/util/debug_print.h"
 #include "mongo/db/exec/sbe/values/bson.h"
 #include "mongo/db/exec/sbe/values/slot.h"
-#include "mongo/db/exec/trial_run_tracker.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/query/plan_yield_policy.h"
 #include "mongo/db/query/stage_types.h"
@@ -253,9 +253,6 @@ protected:
     void doRestoreState(bool relinquishCursor) override;
     void doDetachFromOperationContext() override;
     void doAttachToOperationContext(OperationContext* opCtx) override;
-    void doDetachFromTrialRunTracker() override;
-    TrialRunTrackerAttachResultMask doAttachToTrialRunTracker(
-        TrialRunTracker* tracker, TrialRunTrackerAttachResultMask childrenAttachResult) override;
 
 private:
     // Returns the primary cursor or the random cursor depending on whether _useRandomCursor is set.
@@ -344,10 +341,6 @@ private:
 
     CollectionRef _coll;
 
-    // If provided, used during a trial run to accumulate certain execution stats. Once the trial
-    // run is complete, this pointer is reset to nullptr.
-    TrialRunTracker* _tracker{nullptr};
-
     bool _open{false};
     std::unique_ptr<SeekableRecordCursor> _cursor;
 
@@ -359,7 +352,7 @@ private:
 
     // Whether the scan should have low storage admission priority.
     bool _lowPriority;
-    boost::optional<ScopedAdmissionPriorityForLock> _priority;
+    boost::optional<ScopedAdmissionPriority<ExecutionAdmissionContext>> _priority;
 
     ScanStats _specificStats;
 

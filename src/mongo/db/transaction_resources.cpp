@@ -99,6 +99,14 @@ WriteUnitOfWork::RecoveryUnitState setRecoveryUnit(OperationContext* opCtx,
     return opCtx->setRecoveryUnit_DO_NOT_USE(std::move(unit), state);
 }
 
+WriteUnitOfWork* getWriteUnitOfWork(OperationContext* opCtx) {
+    return opCtx->getWriteUnitOfWork_DO_NOT_USE();
+}
+
+void setWriteUnitOfWork(OperationContext* opCtx, std::unique_ptr<WriteUnitOfWork> writeUnitOfWork) {
+    opCtx->setWriteUnitOfWork_DO_NOT_USE(std::move(writeUnitOfWork));
+}
+
 TransactionResources::TransactionResources() = default;
 
 TransactionResources::~TransactionResources() {

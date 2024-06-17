@@ -3,6 +3,7 @@
  *
  * @tags: [
  *   featureFlagTimeseriesAlwaysUseCompressedBuckets,
+ *   requires_fcv_80,
  * ]
  */
 
@@ -64,11 +65,11 @@ const runTest = function(write, numExpectedDocs) {
     assert.commandWorked(write(coll));
     assert.eq(coll.find().itcount(), numExpectedDocs);
     assert.eq(bucketsColl.find().itcount(), 1);
-    assert.eq(bucketsColl.find().toArray()[0].control.version,
-              TimeseriesTest.BucketVersion.kCompressed);
+    assert(TimeseriesTest.isBucketCompressed(bucketsColl.find().toArray()[0].control.version));
 };
 
-runTest((coll) => coll.insert({t: time, m: 0, a: 2}), 3);
+runTest((coll) => coll.insert({t: time, m: 0, a: 2}, {ordered: false}), 3);
+runTest((coll) => coll.insert({t: time, m: 0, a: 2}, {ordered: true}), 3);
 // TODO (SERVER-68058): Remove this condition.
 if (FeatureFlagUtil.isPresentAndEnabled(db, "TimeseriesUpdatesSupport")) {
     runTest((coll) => coll.update({}, {$set: {m: 1}}, {multi: true}), 2);

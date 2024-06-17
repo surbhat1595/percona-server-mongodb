@@ -32,7 +32,6 @@ selector:
   - jstests/core/**/long_index_rename.js # renameCollection.
   # The following tests fail because mongos behaves differently from mongod when testing certain
   # functionality. The differences are in a comment next to the failing test.
-  - jstests/core/**/explain_missing_database.js  # Behavior with no db different on mongos, SERVER-18047.
   - jstests/core/**/geo_2d_explain.js  # executionSuccess in different spot in explain().
   - jstests/core/**/geo_s2explain.js  # inputStage in different spot in explain().
   - jstests/core/**/geo_s2sparse.js  # keysPerIndex in different spot in validate().
@@ -182,13 +181,6 @@ selector:
   # command cannot be used on a sharded collection.
   - jstests/core/**/mr_sort.js
 
-  # This test expects a function stored in the system.js collection to be available for an operation
-  # which may not be the case if it is implicitly sharded in a passthrough.
-  - jstests/core/**/mr_stored.js
-  - jstests/core/**/where_system_js.js
-  - jstests/core/**/system_js_access.js
-  - jstests/core/**/system_js_drop.js
-
   # Test expects failure, but two phase write protocol exits early with OK status if there are no
   # matching documents.
   - jstests/core/**/rename_operator.js
@@ -241,7 +233,7 @@ selector:
   - jstests/core/txns/transactions_profiling_with_drops.js
 
   # Implicitly creates a database through a collection rename, which does not work in a sharded
-  # cluster.
+  # cluster. TODO SERVER-84330
   - jstests/core/txns/transactions_block_ddl.js
 
   # Set the transactionLifetimeLimitSeconds parameter, which is not on mongos.
@@ -285,6 +277,9 @@ selector:
   - requires_capped
   # Prepare is not a command on mongos.
   - uses_prepare_transaction
+  # Tests with this tag use system.js stored functions and expect that collection to be available
+  # for an operation, which may not be the case if it is implicitly sharded in a passthrough.
+  - requires_system_dot_js_stored_functions
 
 executor:
   archive:

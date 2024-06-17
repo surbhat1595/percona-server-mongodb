@@ -103,6 +103,9 @@ public:
     OpTime getHeartbeatAppliedOpTime() const {
         return _lastResponse.getAppliedOpTime();
     }
+    OpTime getHeartbeatWrittenOpTime() const {
+        return _lastResponse.getWrittenOpTime();
+    }
     OpTime getHeartbeatDurableOpTime() const {
         return _lastResponse.hasDurableOpTime() ? _lastResponse.getDurableOpTime() : OpTime();
     }
@@ -240,6 +243,14 @@ public:
      * durable opTime. Should only be used on the current node.
      */
     void setLastDurableOpTimeAndWallTime(OpTimeAndWallTime opTime, Date_t now);
+
+    /**
+     * Sets the lastWritten op time iff the new optime is later than the current optime, and updates
+     * the lastUpdate time.  Returns true if the optime was advanced.
+     * Performs advanceLastWrittenOpTime and also sets the wall clock time corresponding to the last
+     * written opTime. Should only be used on the current node.
+     */
+    bool advanceLastWrittenOpTimeAndWallTime(OpTimeAndWallTime opTime, Date_t now);
 
     /**
      * Sets the last applied op time (not the heartbeat applied op time) iff the new optime is

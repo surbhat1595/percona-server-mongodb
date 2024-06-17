@@ -38,6 +38,7 @@
 #include "mongo/base/status_with.h"
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobjbuilder.h"
+#include "mongo/db/admission/execution_admission_context.h"
 #include "mongo/db/concurrency/exception_util.h"
 #include "mongo/db/dbdirectclient.h"
 #include "mongo/db/dbhelpers.h"
@@ -134,11 +135,10 @@ StatusWith<int> deleteNextBatch(OperationContext* opCtx,
     }
 
     const auto rangeDeleterPriority = rangeDeleterHighPriority.load()
-        ? AdmissionContext::Priority::kImmediate
+        ? AdmissionContext::Priority::kExempt
         : AdmissionContext::Priority::kLow;
 
-    ScopedAdmissionPriorityForLock priority{shard_role_details::getLocker(opCtx),
-                                            rangeDeleterPriority};
+    ScopedAdmissionPriority<ExecutionAdmissionContext> priority{opCtx, rangeDeleterPriority};
 
     // Extend bounds to match the index we found
     const KeyPattern indexKeyPattern(shardKeyIdx->keyPattern());

@@ -121,8 +121,6 @@ void mergeChunks(OperationContext* opCtx,
     // Check that the preconditions for merge chunks are met and throw StaleShardVersion otherwise.
     const auto metadataBeforeMerge = [&]() {
         onCollectionPlacementVersionMismatch(opCtx, nss, boost::none);
-        OperationShardingState::unsetShardRoleForLegacyDDLOperationsSentWithShardVersionIfNeeded(
-            opCtx, nss);
         const auto [metadata, indexInfo] =
             checkCollectionIdentity(opCtx, nss, expectedEpoch, expectedTimestamp);
         checkShardKeyPattern(opCtx, nss, metadata, indexInfo, chunkRange);
@@ -227,8 +225,8 @@ public:
             return false;
         }
 
-        if (SimpleBSONObjComparator::kInstance.evaluate(minKey > maxKey)) {
-            errmsg = "the specified min bound is greater then the specified max bound";
+        if (SimpleBSONObjComparator::kInstance.evaluate(minKey >= maxKey)) {
+            errmsg = "the specified max bound must be greater than the specified min bound";
             return false;
         }
 

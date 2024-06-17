@@ -79,8 +79,8 @@ struct UniversalKeyComponents {
                            query_shape::CollectionType collectionType,
                            bool maxTimeMS);
     /**
-     * Returns a copy of the read concern object. If there is an "afterClusterTime" component, the
-     * timestamp is shapified according to 'opts'.
+     * Returns a copy of the read concern object. If there is an "afterClusterTime" or
+     * "atClusterTime" component, the timestamp is shapified according to 'opts'.
      */
     static BSONObj shapifyReadConcern(
         const BSONObj& readConcern,
@@ -98,10 +98,11 @@ struct UniversalKeyComponents {
     BSONObj _clientMetaData;  // Preserve this value.
     BSONObj _commentObj;      // Shapify this value.
     BSONObj _hintObj;         // Preserve this value.
-    BSONObj _readPreference;  // Preserve this value.
     BSONObj _writeConcern;    // Preserve this value.
 
-    // Preserved literal except afterClusterTime is shapified.
+    // Preserved literal except value of 'tags' field is sorted.
+    BSONObj _shapifiedReadPreference;
+    // Preserved literal except 'afterClusterTime' and 'atClusterTime' are shapified.
     BSONObj _shapifiedReadConcern;
 
     // Separate the possibly-enormous BSONObj from the remaining members
@@ -120,6 +121,10 @@ struct UniversalKeyComponents {
     // is not set through that code path.
     query_shape::CollectionType _collectionType;
 
+    // The tenant id associated with the collection targeted by the query if '_hasField.tenantId' is
+    // set.
+    const TenantId _tenantId;
+
     // This anonymous struct represents the presence of the member variables as C++ bit fields.
     // In doing so, each of these boolean values takes up 1 bit instead of 1 byte.
     struct HasField {
@@ -130,6 +135,7 @@ struct UniversalKeyComponents {
         bool writeConcern : 1 = false;
         bool readConcern : 1 = false;
         bool maxTimeMS : 1 = false;
+        bool tenantId : 1 = false;
     } _hasField;
 };
 
@@ -173,7 +179,7 @@ H AbslHashValue(H h, const UniversalKeyComponents& components) {
                       // Note we use the comment's type in the hash function.
                       components._comment.type(),
                       simpleHash(components._hintObj),
-                      simpleHash(components._readPreference),
+                      simpleHash(components._shapifiedReadPreference),
                       simpleHash(components._writeConcern),
                       simpleHash(components._shapifiedReadConcern),
                       components._apiParams ? APIParameters::Hash{}(*components._apiParams) : 0,
@@ -190,7 +196,8 @@ H AbslHashValue(H h, const UniversalKeyComponents::HasField& hasField) {
                       hasField.readPreference,
                       hasField.writeConcern,
                       hasField.readConcern,
-                      hasField.maxTimeMS);
+                      hasField.maxTimeMS,
+                      hasField.tenantId);
 }
 
 

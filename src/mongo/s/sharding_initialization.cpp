@@ -84,6 +84,7 @@
 #include "mongo/s/query/cluster_cursor_manager.h"
 #include "mongo/s/query_analysis_client.h"
 #include "mongo/s/query_analysis_sampler.h"
+#include "mongo/s/routing_table_cache_gossip_metadata_hook.h"
 #include "mongo/s/sharding_initialization.h"
 #include "mongo/s/sharding_task_executor.h"
 #include "mongo/s/sharding_task_executor_pool_controller.h"
@@ -185,6 +186,7 @@ std::unique_ptr<rpc::EgressMetadataHookList> makeShardingEgressHooksList(Service
     auto hookList = std::make_unique<rpc::EgressMetadataHookList>();
     hookList->addHook(std::make_unique<rpc::VectorClockMetadataHook>(service));
     hookList->addHook(std::make_unique<rpc::ClientMetadataPropagationEgressHook>());
+    hookList->addHook(std::make_unique<rpc::RoutingTableCacheGossipMetadataHook>(service));
 
     return hookList;
 }
@@ -274,7 +276,7 @@ Status loadGlobalSettingsFromConfigServer(OperationContext* opCtx,
             // Cluster wide read/write concern in a sharded cluster lives on the config server, so a
             // config server node's local cache will be correct and explicitly checking for a
             // default write concern via remote command is unnecessary.
-            if (serverGlobalParams.clusterRole.hasExclusively(ClusterRole::ShardServer)) {
+            if (serverGlobalParams.clusterRole.isShardOnly()) {
                 // Assert will be raised on failure to talk to config server.
                 repl::ReplicationCoordinator::get(opCtx)->recordIfCWWCIsSetOnConfigServerOnStartup(
                     opCtx);

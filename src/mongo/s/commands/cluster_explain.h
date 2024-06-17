@@ -81,7 +81,7 @@ public:
      * On success, the output is added to the BSONObj builder 'out'.
      */
     static Status buildExplainResult(
-        OperationContext* opCtx,
+        const boost::intrusive_ptr<ExpressionContext>& expCtx,
         const std::vector<AsyncRequestsSender::Response>& shardResponses,
         const char* mongosStageName,
         long long millisElapsed,
@@ -97,8 +97,6 @@ public:
     static const char* kMergeFromShards;
     static const char* kMergeSortFromShards;
     static const char* kWriteOnShards;
-
-    static constexpr int kPlannerVersion = 1;
 
 private:
     /**

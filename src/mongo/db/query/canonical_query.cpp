@@ -51,7 +51,7 @@
 #include "mongo/db/query/parsed_find_command.h"
 #include "mongo/db/query/projection_ast_util.h"
 #include "mongo/db/query/projection_parser.h"
-#include "mongo/db/query/query_decorations.h"
+#include "mongo/db/query/query_knob_configuration.h"
 #include "mongo/db/query/query_knobs_gen.h"
 #include "mongo/db/query/query_planner_common.h"
 #include "mongo/db/server_parameter.h"
@@ -77,8 +77,10 @@ boost::optional<size_t> loadMaxMatchExpressionParams() {
 
 }  // namespace
 
-boost::intrusive_ptr<ExpressionContext> makeExpressionContext(OperationContext* opCtx,
-                                                              FindCommandRequest& findCommand) {
+boost::intrusive_ptr<ExpressionContext> makeExpressionContext(
+    OperationContext* opCtx,
+    FindCommandRequest& findCommand,
+    boost::optional<ExplainOptions::Verbosity> verbosity) {
     auto collator = [&]() -> std::unique_ptr<mongo::CollatorInterface> {
         if (findCommand.getCollation().isEmpty()) {
             return nullptr;
@@ -88,7 +90,7 @@ boost::intrusive_ptr<ExpressionContext> makeExpressionContext(OperationContext* 
                                           "unable to parse collation");
     }();
     return make_intrusive<ExpressionContext>(
-        opCtx, findCommand, std::move(collator), true /* mayDbProfile */);
+        opCtx, findCommand, std::move(collator), true /* mayDbProfile */, std::move(verbosity));
 }
 
 // static
@@ -172,10 +174,6 @@ void CanonicalQuery::initCq(boost::intrusive_ptr<ExpressionContext> expCtx,
 
     _findCommand = std::move(parsedFind->findCommandRequest);
 
-    const auto frameworkControl =
-        QueryKnobConfiguration::decoration(expCtx->opCtx).getInternalQueryFrameworkControlForOp();
-    _forceClassicEngine = frameworkControl == QueryFrameworkControlEnum::kForceClassicEngine;
-
     if (optimizeMatchExpression) {
         _primaryMatchExpression =
             MatchExpression::normalize(std::move(parsedFind->filter),
@@ -185,6 +183,12 @@ void CanonicalQuery::initCq(boost::intrusive_ptr<ExpressionContext> expCtx,
     }
 
     if (parsedFind->proj) {
+        // The projection will be optimized only if the query is not compatible with SBE or there's
+        // no user-specified "let" variable. This is to prevent the user-defined variable being
+        // optimized out. We will optimize the projection later after we are certain that the query
+        // is ineligible for SBE.
+        bool shouldOptimizeProj =
+            expCtx->sbeCompatibility == SbeCompatibility::notCompatible || !_findCommand->getLet();
         if (parsedFind->proj->requiresMatchDetails()) {
             // Sadly, in some cases the match details cannot be generated from the unoptimized
             // MatchExpression. For example, a rooted-$or of equalities won't work to produce the
@@ -197,14 +201,32 @@ void CanonicalQuery::initCq(boost::intrusive_ptr<ExpressionContext> expCtx,
                                                           _primaryMatchExpression.get(),
                                                           _findCommand->getFilter(),
                                                           *parsedFind->savedProjectionPolicies,
-                                                          true /* optimize */));
+                                                          shouldOptimizeProj));
         } else {
             _proj.emplace(std::move(*parsedFind->proj));
-            _proj->optimize();
+            if (shouldOptimizeProj) {
+                _proj->optimize();
+            }
         }
+
+        _metadataDeps = _proj->metadataDeps();
+        uassert(ErrorCodes::BadValue,
+                "cannot use sortKey $meta projection without a sort",
+                !(_proj->metadataDeps()[DocumentMetadataFields::kSortKey] &&
+                  _findCommand->getSort().isEmpty()));
     }
+
     if (parsedFind->sort) {
         _sortPattern = std::move(parsedFind->sort);
+
+        // Be sure to track and add any metadata dependencies from the sort (e.g. text score).
+        _metadataDeps |= _sortPattern->metadataDeps(parsedFind->unavailableMetadata);
+
+        // If the results of this query might have to be merged on a remote node, then that node
+        // might need the sort key metadata. Request that the plan generates this metadata.
+        if (_expCtx->needsMerge) {
+            _metadataDeps.set(DocumentMetadataFields::kSortKey);
+        }
     }
     _cqPipeline = std::move(cqPipeline);
     _isCountLike = isCountLike;
@@ -231,25 +253,6 @@ void CanonicalQuery::initCq(boost::intrusive_ptr<ExpressionContext> expCtx,
     dassert(parsed_find_command::isValid(_primaryMatchExpression.get(), *_findCommand).isOK());
     if (auto status = isValidNormalized(_primaryMatchExpression.get()); !status.isOK()) {
         uasserted(status.code(), status.reason());
-    }
-
-    if (_proj) {
-        _metadataDeps = _proj->metadataDeps();
-        uassert(ErrorCodes::BadValue,
-                "cannot use sortKey $meta projection without a sort",
-                !(_proj->metadataDeps()[DocumentMetadataFields::kSortKey] &&
-                  _findCommand->getSort().isEmpty()));
-    }
-
-    if (_sortPattern) {
-        // Be sure to track and add any metadata dependencies from the sort (e.g. text score).
-        _metadataDeps |= _sortPattern->metadataDeps(parsedFind->unavailableMetadata);
-
-        // If the results of this query might have to be merged on a remote node, then that node
-        // might need the sort key metadata. Request that the plan generates this metadata.
-        if (_expCtx->needsMerge) {
-            _metadataDeps.set(DocumentMetadataFields::kSortKey);
-        }
     }
 
     // If the 'returnKey' option is set, then the plan should produce index key metadata.
@@ -406,7 +409,8 @@ std::string CanonicalQuery::toStringShort(bool forErrMsg) const {
 }
 
 CanonicalQuery::QueryShapeString CanonicalQuery::encodeKey() const {
-    return (!_forceClassicEngine && _sbeCompatible)
+    return (!getExpCtx()->getQueryKnobConfiguration().isForceClassicEngineEnabled() &&
+            _sbeCompatible)
         ? canonical_query_encoder::encodeSBE(*this,
                                              canonical_query_encoder::Optimizer::kSbeStageBuilders)
         : canonical_query_encoder::encodeClassic(*this);

@@ -51,7 +51,7 @@ class RangeDeleterServiceOpObserver final : public OpObserverNoop {
 
 public:
     RangeDeleterServiceOpObserver();
-    ~RangeDeleterServiceOpObserver();
+    ~RangeDeleterServiceOpObserver() override;
 
     NamespaceFilters getNamespaceFilters() const final {
         return {NamespaceFilter::kConfig, NamespaceFilter::kConfig};
@@ -61,6 +61,7 @@ public:
                    const CollectionPtr& coll,
                    std::vector<InsertStatement>::const_iterator begin,
                    std::vector<InsertStatement>::const_iterator end,
+                   const std::vector<RecordId>& recordIds,
                    std::vector<bool> fromMigrate,
                    bool defaultFromMigrate,
                    OpStateAccumulator* opAccumulator = nullptr) override;

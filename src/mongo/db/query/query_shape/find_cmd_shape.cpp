@@ -250,20 +250,28 @@ void FindCmdShape::appendLetCmdSpecificShapeComponents(
 }
 
 QueryShapeHash FindCmdShape::sha256Hash(OperationContext*, const SerializationContext&) const {
-    auto optionalArgsEncoding = components.optionalArgumentsEncoding();
-    return SHA256Block::computeHash({
-        ConstDataRange(FindCommandRequest::kCommandName.data(),
-                       FindCommandRequest::kCommandName.size()),
-        nssOrUUID.asDataRange(),
-        components.filter.asDataRange(),
-        components.projection.asDataRange(),
-        components.sort.asDataRange(),
-        components.min.asDataRange(),
-        components.max.asDataRange(),
-        ConstDataRange(reinterpret_cast<char*>(&optionalArgsEncoding), sizeof(uint32_t)),
-        _let.shapifiedLet.asDataRange(),
-        collation.asDataRange(),
-    });
-}
+    // Allocate a buffer on the stack for serialization of parts of the "find" command shape.
+    constexpr std::size_t bufferSizeOnStack = 256;
+    StackBufBuilderBase<bufferSizeOnStack> findCommandShapeBuffer;
 
+    // Write small or typically empty "find" command shape parts to the buffer.
+    findCommandShapeBuffer.appendStr(FindCommandRequest::kCommandName, false /*includeEndingNull*/);
+
+    // Append bits corresponding to the optional command parameter values and a one bit indicator
+    // whether the command specification includes a namespace or a UUID of a collection.
+    findCommandShapeBuffer.appendNum(components.optionalArgumentsEncoding() << 1 |
+                                     (nssOrUUID.isNamespaceString() ? 1 : 0));
+    auto nssDataRange = nssOrUUID.asDataRange();
+    findCommandShapeBuffer.appendBuf(nssDataRange.data(), nssDataRange.length());
+    findCommandShapeBuffer.appendBuf(components.min.objdata(), components.min.objsize());
+    findCommandShapeBuffer.appendBuf(components.max.objdata(), components.max.objsize());
+    findCommandShapeBuffer.appendBuf(components.sort.objdata(), components.sort.objsize());
+    findCommandShapeBuffer.appendBuf(collation.objdata(), collation.objsize());
+    findCommandShapeBuffer.appendBuf(_let.shapifiedLet.objdata(), _let.shapifiedLet.objsize());
+    return SHA256Block::computeHash(
+        {ConstDataRange{findCommandShapeBuffer.buf(),
+                        static_cast<std::size_t>(findCommandShapeBuffer.len())},
+         components.filter.asDataRange(),
+         components.projection.asDataRange()});
+}
 }  // namespace mongo::query_shape

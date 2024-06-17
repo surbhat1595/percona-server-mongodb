@@ -586,6 +586,7 @@ std::vector<repl::OpTime> _logInsertOps(OperationContext* opCtx,
                                         MutableOplogEntry* oplogEntryTemplate,
                                         std::vector<InsertStatement>::const_iterator begin,
                                         std::vector<InsertStatement>::const_iterator end,
+                                        const std::vector<RecordId>& recordIds,
                                         const std::vector<bool>& fromMigrate,
                                         const ShardingWriteRouter& shardingWriteRouter,
                                         const CollectionPtr& collectionPtr,
@@ -614,9 +615,14 @@ std::vector<repl::OpTime> _logInsertOps(OperationContext* opCtx,
     }
 
     const size_t count = end - begin;
+    // Either no recordIds were passed in, or the number passed in is equal to the number
+    // of inserts that happened.
+    invariant(recordIds.empty() || recordIds.size() == count,
+              str::stream() << "recordIds' size: " << recordIds.size()
+                            << ", is non-empty but not equal to count: " << count);
 
     // Use OplogAccessMode::kLogOp to avoid recursive locking.
-    AutoGetOplog oplogWrite(opCtx, OplogAccessMode::kLogOp);
+    AutoGetOplogFastPath oplogWrite(opCtx, OplogAccessMode::kLogOp);
 
     WriteUnitOfWork wuow(opCtx);
 
@@ -634,6 +640,9 @@ std::vector<repl::OpTime> _logInsertOps(OperationContext* opCtx,
             insertStatementOplogSlot = operationLogger->getNextOpTimes(opCtx, 1U)[0];
         }
         const auto docKey = getDocumentKey(collectionPtr, begin[i].doc).getShardKeyAndId();
+        if (!recordIds.empty()) {
+            oplogEntry.setRecordId(recordIds[i]);
+        }
         oplogEntry.setObject(begin[i].doc);
         oplogEntry.setObject2(docKey);
         oplogEntry.setOpTime(insertStatementOplogSlot);
@@ -716,6 +725,7 @@ void OpObserverImpl::onInserts(OperationContext* opCtx,
                                const CollectionPtr& coll,
                                std::vector<InsertStatement>::const_iterator first,
                                std::vector<InsertStatement>::const_iterator last,
+                               const std::vector<RecordId>& recordIds,
                                std::vector<bool> fromMigrate,
                                bool defaultFromMigrate,
                                OpStateAccumulator* opAccumulator) {
@@ -741,8 +751,12 @@ void OpObserverImpl::onInserts(OperationContext* opCtx,
     auto shardingWriteRouter = std::make_unique<ShardingWriteRouter>(opCtx, nss);
 
     if (inBatchedWrite) {
-        invariant(!defaultFromMigrate);
+        dassert(!defaultFromMigrate ||
+                std::all_of(
+                    fromMigrate.begin(), fromMigrate.end(), [](bool migrate) { return migrate; }));
+        batchedWriteContext.setDefaultFromMigrate(defaultFromMigrate);
 
+        size_t i = 0;
         for (auto iter = first; iter != last; iter++) {
             const auto docKey = getDocumentKey(coll, iter->doc).getShardKeyAndId();
             auto operation = MutableOplogEntry::makeInsertOperation(nss, uuid, iter->doc, docKey);
@@ -750,7 +764,10 @@ void OpObserverImpl::onInserts(OperationContext* opCtx,
                 shardingWriteRouter->getReshardingDestinedRecipient(iter->doc));
 
             operation.setFromMigrateIfTrue(fromMigrate[std::distance(first, iter)]);
-
+            if (!recordIds.empty()) {
+                operation.setRecordId(recordIds[i++]);
+            }
+            operation.setInitializedStatementIds(iter->stmtIds);
             batchedWriteContext.addBatchedOperation(opCtx, operation);
         }
     } else if (inMultiDocumentTransaction) {
@@ -759,7 +776,7 @@ void OpObserverImpl::onInserts(OperationContext* opCtx,
         // Do not add writes to the profile collection to the list of transaction operations, since
         // these are done outside the transaction. There is no top-level WriteUnitOfWork when we are
         // in a SideTransactionBlock.
-        if (!opCtx->getWriteUnitOfWork()) {
+        if (!shard_role_details::getWriteUnitOfWork(opCtx)) {
             invariant(nss.isSystemDotProfile());
             return;
         }
@@ -767,9 +784,13 @@ void OpObserverImpl::onInserts(OperationContext* opCtx,
         const bool inRetryableInternalTransaction =
             isInternalSessionForRetryableWrite(*opCtx->getLogicalSessionId());
 
+        size_t i = 0;
         for (auto iter = first; iter != last; iter++) {
             const auto docKey = getDocumentKey(coll, iter->doc).getShardKeyAndId();
             auto operation = MutableOplogEntry::makeInsertOperation(nss, uuid, iter->doc, docKey);
+            if (!recordIds.empty()) {
+                operation.setRecordId(recordIds[i++]);
+            }
             if (inRetryableInternalTransaction) {
                 operation.setInitializedStatementIds(iter->stmtIds);
             }
@@ -797,6 +818,7 @@ void OpObserverImpl::onInserts(OperationContext* opCtx,
                                    &oplogEntryTemplate,
                                    first,
                                    last,
+                                   recordIds,
                                    std::move(fromMigrate),
                                    *shardingWriteRouter,
                                    coll,
@@ -917,6 +939,9 @@ void OpObserverImpl::onUpdate(OperationContext* opCtx,
         if (args.updateArgs->mustCheckExistenceForInsertOperations) {
             operation.setCheckExistenceForDiffInsert(true);
         }
+        if (!args.updateArgs->replicatedRecordId.isNull()) {
+            operation.setRecordId(args.updateArgs->replicatedRecordId);
+        }
         batchedWriteContext.addBatchedOperation(opCtx, operation);
     } else if (inMultiDocumentTransaction) {
         const bool inRetryableInternalTransaction =
@@ -955,6 +980,10 @@ void OpObserverImpl::onUpdate(OperationContext* opCtx,
                     operation.setNeedsRetryImage(repl::RetryImageEnum::kPostImage);
                 }
             }
+        }
+
+        if (!args.updateArgs->replicatedRecordId.isNull()) {
+            operation.setRecordId(args.updateArgs->replicatedRecordId);
         }
 
         if (args.updateArgs->changeStreamPreAndPostImagesEnabledForCollection) {
@@ -997,6 +1026,10 @@ void OpObserverImpl::onUpdate(OperationContext* opCtx,
                 // Or if we're storing a postImage.
                 oplogEntry.setNeedsRetryImage({repl::RetryImageEnum::kPostImage});
             }
+        }
+
+        if (!args.updateArgs->replicatedRecordId.isNull()) {
+            oplogEntry.setRecordId(args.updateArgs->replicatedRecordId);
         }
 
         opTime = replLogUpdate(opCtx, args, &oplogEntry, _operationLogger.get());
@@ -1074,6 +1107,11 @@ void OpObserverImpl::onDelete(OperationContext* opCtx,
             MutableOplogEntry::makeDeleteOperation(nss, uuid, documentKey.getShardKeyAndId());
         operation.setDestinedRecipient(destinedRecipientDecoration(args));
         operation.setFromMigrateIfTrue(args.fromMigrate);
+
+        if (!args.replicatedRecordId.isNull()) {
+            operation.setRecordId(args.replicatedRecordId);
+        }
+
         batchedWriteContext.addBatchedOperation(opCtx, operation);
     } else if (inMultiDocumentTransaction) {
         const bool inRetryableInternalTransaction =
@@ -1087,6 +1125,10 @@ void OpObserverImpl::onDelete(OperationContext* opCtx,
 
         auto operation =
             MutableOplogEntry::makeDeleteOperation(nss, uuid, documentKey.getShardKeyAndId());
+
+        if (!args.replicatedRecordId.isNull()) {
+            operation.setRecordId(args.replicatedRecordId);
+        }
 
         if (inRetryableInternalTransaction) {
             operation.setInitializedStatementIds({stmtId});
@@ -1125,6 +1167,10 @@ void OpObserverImpl::onDelete(OperationContext* opCtx,
             if (!args.retryableFindAndModifyOplogSlots.empty()) {
                 oplogEntry.setOpTime(args.retryableFindAndModifyOplogSlots.back());
             }
+        }
+
+        if (!args.replicatedRecordId.isNull()) {
+            oplogEntry.setRecordId(args.replicatedRecordId);
         }
 
         opTime = replLogDelete(opCtx,
@@ -1539,25 +1585,44 @@ std::size_t getMaxSizeOfBatchedOperationsInSingleOplogEntryBytes() {
 // Returns the optime of the written oplog entry.
 repl::OpTime logApplyOps(OperationContext* opCtx,
                          MutableOplogEntry* oplogEntry,
-                         DurableTxnStateEnum txnState,
+                         boost::optional<DurableTxnStateEnum> txnState,
                          boost::optional<repl::OpTime> startOpTime,
                          std::vector<StmtId> stmtIdsWritten,
                          const bool updateTxnTable,
+                         WriteUnitOfWork::OplogEntryGroupType oplogGroupingFormat,
                          OperationLogger* operationLogger) {
-    if (!stmtIdsWritten.empty()) {
-        invariant(isInternalSessionForRetryableWrite(*opCtx->getLogicalSessionId()));
-    }
 
     const auto txnRetryCounter = opCtx->getTxnRetryCounter();
+    if (oplogGroupingFormat == WriteUnitOfWork::kGroupForPossiblyRetryableOperations) {
+        // If these operations have statement IDs, the applyOps is part of a retryable write so
+        // we can use the normal oplog entry chain info call for it.
+        if (!stmtIdsWritten.empty()) {
+            repl::OplogLink oplogLink;
+            oplogLink.prevOpTime =
+                oplogEntry->getPrevWriteOpTimeInTransaction().value_or(repl::OpTime());
+            oplogLink.multiOpType = repl::MultiOplogEntryType::kApplyOpsAppliedSeparately;
+            operationLogger->appendOplogEntryChainInfo(
+                opCtx, oplogEntry, &oplogLink, stmtIdsWritten);
+        } else {
+            // No statement IDs; don't set prevWriteOpTimeInTransaction.
+            oplogEntry->setPrevWriteOpTimeInTransaction(boost::none);
+        }
+    } else {
+        if (!stmtIdsWritten.empty()) {
+            invariant(isInternalSessionForRetryableWrite(*opCtx->getLogicalSessionId()));
+        }
 
-    invariant(bool(txnRetryCounter) == bool(TransactionParticipant::get(opCtx)));
+        invariant(bool(txnRetryCounter) == bool(TransactionParticipant::get(opCtx)));
 
-    // Batched writes (that is, WUOWs with 'groupOplogEntries') are not associated with a txnNumber,
-    // so do not emit an lsid either.
-    oplogEntry->setSessionId(opCtx->getTxnNumber() ? opCtx->getLogicalSessionId() : boost::none);
-    oplogEntry->setTxnNumber(opCtx->getTxnNumber());
-    if (txnRetryCounter && !isDefaultTxnRetryCounter(*txnRetryCounter)) {
-        oplogEntry->getOperationSessionInfo().setTxnRetryCounter(*txnRetryCounter);
+        // Batched writes (that is, WUOWs with 'oplogGroupingFormat ==
+        // WriteUnitOfWork::kGroupForTransaction') are not associated with a txnNumber, so do not
+        // emit an lsid either.
+        oplogEntry->setSessionId(opCtx->getTxnNumber() ? opCtx->getLogicalSessionId()
+                                                       : boost::none);
+        oplogEntry->setTxnNumber(opCtx->getTxnNumber());
+        if (txnRetryCounter && !isDefaultTxnRetryCounter(*txnRetryCounter)) {
+            oplogEntry->getOperationSessionInfo().setTxnRetryCounter(*txnRetryCounter);
+        }
     }
 
     try {
@@ -1699,7 +1764,8 @@ void OpObserverImpl::onUnpreparedTransactionCommit(
             repl::MutableOplogEntry* oplogEntry,
             bool firstOp,
             bool lastOp,
-            std::vector<StmtId> stmtIdsWritten) {
+            std::vector<StmtId> stmtIdsWritten,
+            WriteUnitOfWork::OplogEntryGroupType oplogGroupingFormat) {
             return logApplyOps(
                 opCtx,
                 oplogEntry,
@@ -1708,6 +1774,7 @@ void OpObserverImpl::onUnpreparedTransactionCommit(
                 /*startOpTime=*/boost::make_optional(!lastOp, oplogSlots.front()),
                 std::move(stmtIdsWritten),
                 /*updateTxnTable=*/(firstOp || lastOp),
+                oplogGroupingFormat,
                 operationLogger);
         };
 
@@ -1717,6 +1784,7 @@ void OpObserverImpl::onUnpreparedTransactionCommit(
         transactionOperations.logOplogEntries(oplogSlots,
                                               applyOpsOplogSlotAndOperationAssignment,
                                               wallClockTime,
+                                              WriteUnitOfWork::kDontGroup,
                                               logApplyOpsForUnpreparedTransaction,
                                               &imageToWrite);
     invariant(numOplogEntries > 0);
@@ -1735,13 +1803,28 @@ void OpObserverImpl::onBatchedWriteStart(OperationContext* opCtx) {
     batchedWriteContext.setWritesAreBatched(true);
 }
 
-void OpObserverImpl::onBatchedWriteCommit(OperationContext* opCtx) {
+void OpObserverImpl::onBatchedWriteCommit(OperationContext* opCtx,
+                                          WriteUnitOfWork::OplogEntryGroupType oplogGroupingFormat,
+                                          OpStateAccumulator* opAccumulator) {
     if (!repl::ReplicationCoordinator::get(opCtx)->getSettings().isReplSet() ||
         !opCtx->writesAreReplicated()) {
         return;
     }
 
+    // A batched write with oplogGroupingFormat kGroupForTransaction is a one-shot non-retryable
+    // transaction without a transaction number, which is forbidden in retryable writes and
+    // multi-document transactions.
+    dassert(oplogGroupingFormat != WriteUnitOfWork::kGroupForTransaction || !opCtx->getTxnNumber());
+
     auto& batchedWriteContext = BatchedWriteContext::get(opCtx);
+    // After the commit, make sure the batch is clear so we don't attempt to commit the same
+    // operations twice.  The BatchedWriteContext is attached to the operation context, so multiple
+    // sequential WriteUnitOfWork blocks can use the same batch context.
+    ON_BLOCK_EXIT([&] {
+        batchedWriteContext.clearBatchedOperations(opCtx);
+        batchedWriteContext.setWritesAreBatched(false);
+    });
+
     auto* batchedOps = batchedWriteContext.getBatchedOperations(opCtx);
 
     if (batchedOps->isEmpty()) {
@@ -1811,10 +1894,14 @@ void OpObserverImpl::onBatchedWriteCommit(OperationContext* opCtx) {
               "batched writes must not contain pre/post images to store in image collection");
 
     auto logApplyOpsForBatchedWrite =
-        [opCtx, operationLogger = _operationLogger.get()](repl::MutableOplogEntry* oplogEntry,
-                                                          bool firstOp,
-                                                          bool lastOp,
-                                                          std::vector<StmtId> stmtIdsWritten) {
+        [opCtx,
+         defaultFromMigrate = batchedWriteContext.getDefaultFromMigrate(),
+         operationLogger =
+             _operationLogger.get()](repl::MutableOplogEntry* oplogEntry,
+                                     bool firstOp,
+                                     bool lastOp,
+                                     std::vector<StmtId> stmtIdsWritten,
+                                     WriteUnitOfWork::OplogEntryGroupType oplogGroupingFormat) {
             // Remove 'prevOpTime' when replicating as a single applyOps oplog entry.
             // This preserves backwards compatibility with the legacy atomic applyOps oplog
             // entry format that we use to replicate batched writes.
@@ -1826,12 +1913,16 @@ void OpObserverImpl::onBatchedWriteCommit(OperationContext* opCtx) {
             if (firstOp && lastOp) {
                 oplogEntry->setPrevWriteOpTimeInTransaction(boost::none);
             }
+            oplogEntry->setFromMigrateIfTrue(defaultFromMigrate);
+            const bool updateTxnTable =
+                oplogGroupingFormat == WriteUnitOfWork::kGroupForPossiblyRetryableOperations;
             return logApplyOps(opCtx,
                                oplogEntry,
-                               /*txnState=*/DurableTxnStateEnum::kCommitted,  // unused
+                               /*txnState=*/boost::none,
                                /*startOpTime=*/boost::none,
                                std::move(stmtIdsWritten),
-                               /*updateTxnTable=*/false,
+                               updateTxnTable,
+                               oplogGroupingFormat,
                                operationLogger);
         };
 
@@ -1841,8 +1932,24 @@ void OpObserverImpl::onBatchedWriteCommit(OperationContext* opCtx) {
     (void)batchedOps->logOplogEntries(oplogSlots,
                                       applyOpsOplogSlotAndOperationAssignment,
                                       wallClockTime,
+                                      oplogGroupingFormat,
                                       logApplyOpsForBatchedWrite,
                                       &noPrePostImage);
+
+    // Ensure the transactionParticipant properly tracks the namespaces affected by a
+    // retryable batched write.
+    auto txnParticipant = TransactionParticipant::get(opCtx);
+    if (txnParticipant) {
+        for (const auto& statement : statements) {
+            txnParticipant.addToAffectedNamespaces(opCtx, statement.getNss());
+        }
+    }
+
+    if (opAccumulator) {
+        for (const auto& entry : applyOpsOplogSlotAndOperationAssignment.applyOpsEntries) {
+            opAccumulator->insertOpTimes.emplace_back(entry.oplogSlot);
+        }
+    }
 }
 
 void OpObserverImpl::onBatchedWriteAbort(OperationContext* opCtx) {
@@ -1932,22 +2039,24 @@ void OpObserverImpl::onTransactionPrepare(
             ? reservedSlots.back()
             : reservedSlots.front();
 
-        auto logApplyOpsForPreparedTransaction = [opCtx,
-                                                  operationLogger = _operationLogger.get(),
-                                                  startOpTime](repl::MutableOplogEntry* oplogEntry,
-                                                               bool firstOp,
-                                                               bool lastOp,
-                                                               std::vector<StmtId> stmtIdsWritten) {
-            return logApplyOps(
-                opCtx,
-                oplogEntry,
-                /*txnState=*/
-                (lastOp ? DurableTxnStateEnum::kPrepared : DurableTxnStateEnum::kInProgress),
-                startOpTime,
-                std::move(stmtIdsWritten),
-                /*updateTxnTable=*/(firstOp || lastOp),
-                operationLogger);
-        };
+        auto logApplyOpsForPreparedTransaction =
+            [opCtx, operationLogger = _operationLogger.get(), startOpTime](
+                repl::MutableOplogEntry* oplogEntry,
+                bool firstOp,
+                bool lastOp,
+                std::vector<StmtId> stmtIdsWritten,
+                WriteUnitOfWork::OplogEntryGroupType oplogGroupingFormat) {
+                return logApplyOps(
+                    opCtx,
+                    oplogEntry,
+                    /*txnState=*/
+                    (lastOp ? DurableTxnStateEnum::kPrepared : DurableTxnStateEnum::kInProgress),
+                    startOpTime,
+                    std::move(stmtIdsWritten),
+                    /*updateTxnTable=*/(firstOp || lastOp),
+                    oplogGroupingFormat,
+                    operationLogger);
+            };
 
         // We had reserved enough oplog slots for the worst case where each operation
         // produced one oplog entry.  When operations are smaller and can be packed, we
@@ -1959,6 +2068,7 @@ void OpObserverImpl::onTransactionPrepare(
         (void)transactionOperations.logOplogEntries(reservedSlots,
                                                     applyOpsOperationAssignment,
                                                     wallClockTime,
+                                                    WriteUnitOfWork::kDontGroup,
                                                     logApplyOpsForPreparedTransaction,
                                                     &imageToWrite);
         if (opAccumulator) {
@@ -1990,6 +2100,7 @@ void OpObserverImpl::onTransactionPrepare(
                     /*startOpTime=*/oplogSlot,
                     /*stmtIdsWritten=*/{},
                     /*updateTxnTable=*/true,
+                    WriteUnitOfWork::kDontGroup,
                     _operationLogger.get());
     }
 }

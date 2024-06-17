@@ -7,14 +7,16 @@
  *   is dropped.
  *
  * @tags: [
- *   requires_fcv_73,
- *   featureFlagEmbeddedRouter,
- *   featureFlagTrackUnshardedCollectionsOnShardingCatalog,
+ *   requires_fcv_80,
+ *   featureFlagRouterPort,
+ *   featureFlagTrackUnshardedCollectionsUponCreation,
  *   featureFlagSecurityToken,
- *   requires_persistence
+ *   requires_persistence,
  * ]
  */
 
+import {FeatureFlagUtil} from "jstests/libs/feature_flag_util.js";
+import {runCommandWithSecurityToken} from "jstests/libs/multitenancy_utils.js";
 import {extractUUIDFromObject} from "jstests/libs/uuid_util.js";
 import {
     assertShardingMetadataForUnshardedCollectionDoesNotExist,
@@ -71,22 +73,39 @@ function makeDatabaseNameForTest() {
 
 function runTest(shard0Primary, execCtxType, expectShardingMetadata) {
     // Test implicit database and collection creation.
-    const dbName0 = makeDatabaseNameForTest();
-    const collName0 = "testColl";
-    testImplicitCreateCollection(
-        shard0Primary, execCtxType, dbName0, collName0, "insert", expectShardingMetadata);
 
+    // TODO SERVER-85366 remove this check once retryable write can create unsplittable collections
+    // after an insert
+    if (execCtxType == execCtxTypes.kRetryableWrite) {
+        const dbName0 = makeDatabaseNameForTest();
+        const collName0 = "testColl";
+        testImplicitCreateCollection(
+            shard0Primary, execCtxType, dbName0, collName0, "insert", false);
+    } else {
+        const dbName0 = makeDatabaseNameForTest();
+        const collName0 = "testColl";
+        testImplicitCreateCollection(
+            shard0Primary, execCtxType, dbName0, collName0, "insert", expectShardingMetadata);
+    }
+
+    // Test implicit collection creation.
     const dbName1 = makeDatabaseNameForTest();
     const collName1 = "testColl";
     testImplicitCreateCollection(
         shard0Primary, execCtxType, dbName1, collName1, "createIndex", expectShardingMetadata);
 
-    // Test implicit collection creation.
     const dbName2 = makeDatabaseNameForTest();
     const collName2 = "testColl0";
     assert.commandWorked(shard0Primary.getDB(dbName2).createCollection("testColl1"));
-    testImplicitCreateCollection(
-        shard0Primary, execCtxType, dbName2, collName2, "insert", expectShardingMetadata);
+    // TODO SERVER-85366 remove this check once retryable write can create unsplittable collections
+    // after an insert
+    if (execCtxType == execCtxTypes.kRetryableWrite) {
+        testImplicitCreateCollection(
+            shard0Primary, execCtxType, dbName2, collName2, "insert", false);
+    } else {
+        testImplicitCreateCollection(
+            shard0Primary, execCtxType, dbName2, collName2, "insert", expectShardingMetadata);
+    }
 
     const dbName3 = makeDatabaseNameForTest();
     const collName3 = "testColl0";
@@ -108,16 +127,16 @@ function runTests(getShard0PrimaryFunc,
     jsTest.log("Running tests for " + shard0Primary.host +
                " while the cluster contains one shard (config shard)");
 
-    // The cluster now contains only one shard (shard0) which acts as also the config server so the
-    // commands against shard0 should go through the router code paths.
-    // TODO (PM-3364): Uncomment once we start tracking unsharded collections.
-    const expectShardingMetadata0 = false;
     // Currently, sharding isn't supported in serverless.
-    // const expectShardingMetadata0 = !isMultitenant;
+    const expectShardingMetadata0 = !isMultitenant &&
+        FeatureFlagUtil.isPresentAndEnabled(shard0Primary.getDB('admin'),
+                                            "TrackUnshardedCollectionsUponCreation")
     runTest(shard0Primary, execCtxTypes.kNoSession, expectShardingMetadata0);
     runTest(shard0Primary, execCtxTypes.kNonRetryableWrite, expectShardingMetadata0);
     runTest(shard0Primary, execCtxTypes.kRetryableWrite, expectShardingMetadata0);
-    runTest(shard0Primary, execCtxTypes.kTransaction, expectShardingMetadata0);
+    // TODO SERVER-81937 once transaction track unsharded collection, replace false with
+    // expectShardingMetadata
+    runTest(shard0Primary, execCtxTypes.kTransaction, false);
 
     if (!skipMaintenanceMode) {
         jsTest.log("Restarting shard0 in maintenance mode");
@@ -159,13 +178,16 @@ function runTests(getShard0PrimaryFunc,
     jsTest.log("Running tests for " + shard0Primary.host + " while the cluster contains one " +
                "shard (config shard) after restarting the shard in default mode");
 
-    const expectShardingMetadata2 = false;
     // Currently, sharding isn't supported in serverless.
-    // const expectShardingMetadata2 = !isMultitenant;
+    const expectShardingMetadata2 = !isMultitenant &&
+        FeatureFlagUtil.isPresentAndEnabled(getShard0PrimaryFunc().getDB('admin'),
+                                            "TrackUnshardedCollectionsUponCreation")
     runTest(shard0Primary, execCtxTypes.kNoSession, expectShardingMetadata2);
     runTest(shard0Primary, execCtxTypes.kNonRetryableWrite, expectShardingMetadata2);
     runTest(shard0Primary, execCtxTypes.kRetryableWrite, expectShardingMetadata2);
-    runTest(shard0Primary, execCtxTypes.kTransaction, expectShardingMetadata2);
+    // TODO SERVER-81937 once transaction track unsharded collection, replace false with
+    // expectShardingMetadata
+    runTest(shard0Primary, execCtxTypes.kTransaction, false);
 
     if (isMultitenant) {
         // Currently, sharding isn't supported in serverless. So the cluster cannot become
@@ -203,17 +225,25 @@ function runTests(getShard0PrimaryFunc,
     runTest(shard0Primary, execCtxTypes.kRetryableWrite, expectShardingMetadata3);
     runTest(shard0Primary, execCtxTypes.kTransaction, expectShardingMetadata3);
 
-    const shard0URL = getReplicaSetURL(shard0Primary);
-    // TODO (SERVER-83380): Connect to the router port on a shardsvr mongod instead.
-    const mongos = MongoRunner.runMongos({configdb: shard0URL});
-    assert.commandWorked(mongos.adminCommand({transitionToDedicatedConfigServer: 1}));
+    const {router, mongos} = (() => {
+        if (shard0Primary.routerHost) {
+            const router = new Mongo(shard0Primary.routerHost);
+            return {
+                router
+            }
+        }
+        const shard0URL = getReplicaSetURL(shard0Primary);
+        const mongos = MongoRunner.runMongos({configdb: shard0URL});
+        return {router: mongos, mongos};
+    })();
+    jsTest.log("Using " + tojsononeline({router, mongos}));
+    assert.commandWorked(router.adminCommand({transitionToDedicatedConfigServer: 1}));
 
     jsTest.log("Running tests for " + shard0Primary.host +
                " while the cluster contains one shard (regular shard)");
 
-    // The cluster now contains only one shard (shard1) but it is not the config server so
-    // commands against shard0 (config server) or shard1 should not go through the router code
-    // paths.
+    // The cluster now contains only one shard (shard1) but it is not the config server so commands
+    // against shard0 (config server) or shard1 should not go through the router code paths.
     const expectShardingMetadata4 = false;
     runTest(shard0Primary, execCtxTypes.kNoSession, expectShardingMetadata4);
     runTest(shard0Primary, execCtxTypes.kNonRetryableWrite, expectShardingMetadata4);
@@ -226,7 +256,9 @@ function runTests(getShard0PrimaryFunc,
 
     tearDownFunc();
     shard1Rst.stopSet();
-    MongoRunner.stopMongos(mongos);
+    if (mongos) {
+        MongoRunner.stopMongos(mongos);
+    }
 }
 
 function getStandaloneRestartOptions(maintenanceMode, port, setParameterOpts) {
@@ -339,7 +371,7 @@ function getReplicaSetRestartOptions(maintenanceMode, setParameterOpts) {
 
 {
     jsTest.log("Running tests for a serverless replica set bootstrapped as a single-shard cluster");
-    // For serverless, commands against user collections require the "$tenant" field and auth.
+    // For serverless, commands against user collections require the unsigned token and auth.
     const keyFile = "jstests/libs/key1";
     const tenantId = ObjectId();
     const vtsKey = "secret";
@@ -371,20 +403,21 @@ function getReplicaSetRestartOptions(maintenanceMode, setParameterOpts) {
     const testRole = {
         name: "testRole",
         roles: ["readWriteAnyDatabase"],
-        privileges: [{resource: {db: "config", collection: ""}, actions: ["find"]}],
-        tenantId
+        privileges: [{resource: {db: "config", collection: ""}, actions: ["find"]}]
     };
     const testUser =
         {userName: "testUser", password: "testUserPwd", roles: [testRole.name], tenantId};
-    testUser.securityToken =
-        _createSecurityToken({user: testUser.userName, db: authDbName, tenant: tenantId}, vtsKey);
-    assert.commandWorked(adminDB.runCommand(makeCreateRoleCmdObj(testRole)));
-    assert.commandWorked(adminDB.runCommand(makeCreateUserCmdObj(testUser)));
+    const unsignedToken = _createTenantToken({tenant: tenantId});
+    assert.commandWorked(
+        runCommandWithSecurityToken(unsignedToken, adminDB, makeCreateRoleCmdObj(testRole)));
+    assert.commandWorked(
+        runCommandWithSecurityToken(unsignedToken, adminDB, makeCreateUserCmdObj(testUser)));
     adminDB.logout();
 
     const getShard0PrimaryFunc = () => {
         const primary = rst.getPrimary();
-        primary._setSecurityToken(testUser.securityToken);
+        primary._setSecurityToken(_createSecurityToken(
+            {user: testUser.userName, db: authDbName, tenant: tenantId}, vtsKey));
         return primary;
     };
     const restartFunc = (maintenanceMode) => {

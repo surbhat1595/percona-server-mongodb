@@ -395,7 +395,7 @@ const BSONObj& ClientMetadata::getDocument() const {
 }
 
 unsigned long ClientMetadata::hashWithoutMongosInfo() const {
-    return _hashWithoutMongos.get(documentWithoutMongosInfo());
+    return static_cast<unsigned long>(_hashWithoutMongos.get(documentWithoutMongosInfo()));
 }
 
 const BSONObj& ClientMetadata::documentWithoutMongosInfo() const {
@@ -484,7 +484,7 @@ void ClientMetadata::setAndFinalize(Client* client, boost::optional<ClientMetada
     state.meta = std::move(meta);
 }
 
-void ClientMetadata::setFromMetadataForOperation(OperationContext* opCtx, BSONElement& elem) {
+void ClientMetadata::setFromMetadataForOperation(OperationContext* opCtx, const BSONElement& elem) {
     if (MONGO_unlikely(elem.eoo())) {
         return;
     }
@@ -525,7 +525,7 @@ void ClientMetadata::setFromMetadata(Client* client, BSONElement& elem, bool isI
 
     if (meta && serverGlobalParams.clusterRole.hasExclusively(ClusterRole::RouterServer)) {
         // If we had a full ClientMetadata and we're on mongos, attach some additional client data.
-        meta->setMongoSMetadata(getHostNameCachedAndPort(),
+        meta->setMongoSMetadata(prettyHostNameAndPort(client->getLocalPort()),
                                 client->clientAddress(true),
                                 VersionInfoInterface::instance().version());
     }
@@ -534,7 +534,7 @@ void ClientMetadata::setFromMetadata(Client* client, BSONElement& elem, bool isI
     state.meta = std::move(meta);
 }
 
-boost::optional<ClientMetadata> ClientMetadata::readFromMetadata(BSONElement& element) {
+boost::optional<ClientMetadata> ClientMetadata::readFromMetadata(const BSONElement& element) {
     return uassertStatusOK(ClientMetadata::parse(element));
 }
 

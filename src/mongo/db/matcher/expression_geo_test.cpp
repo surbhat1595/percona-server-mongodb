@@ -92,6 +92,10 @@ std::unique_ptr<GeoNearMatchExpression> makeGeoNearMatchExpression(const BSONObj
     return gne;
 }
 
+void assertGeoNearParseReturnsError(const BSONObj& locQuery) {
+    std::unique_ptr<GeoNearExpression> nq(new GeoNearExpression);
+    ASSERT_EQUALS(ErrorCodes::BadValue, nq->parseFrom(locQuery));
+}
 
 /**
  * A bunch of cases in which a geo expression is equivalent() to both itself or to another
@@ -489,6 +493,10 @@ TEST(ExpressionGeoTest, RoundTripSerializeGeoExpressions) {
         fromjson("{$nearSphere: [0,0], $minDistance: 2, $maxDistance: 4 }"),
         fromjson("{$nearSphere: [1,1], $minDistance: 1, $maxDistance: 1 }"));
 
+    assertRepresentativeGeoNearShapeIsStable(
+        fromjson("{$minDistance: 2, $maxDistance: 4, $nearSphere: [0,0]}"),
+        fromjson("{$minDistance: 1, $maxDistance: 1, $nearSphere: [1,1]}"));
+
     assertRepresentativeGeoNearShapeIsStable(fromjson("{$near: [0, 0, 1]}"),
                                              fromjson("{$near: [1, 1]}"));
 
@@ -505,10 +513,25 @@ TEST(ExpressionGeoTest, RoundTripSerializeGeoExpressions) {
         fromjson("{$geoNear: { $geometry: {coordinates: [0, 10]}}}"),
         fromjson("{$geoNear: { $geometry: {coordinates: [1, 1]}}}"));
 
-    // Test scenario with new $geometry query specifying invalid type.
+    // $geometry operator in $geoNear should accept only Point type.
     assertRepresentativeGeoNearShapeIsStable(
-        fromjson("{$geoNear: { $geometry: { type: 'b.c', coordinates: [0, 10]}}}"),
-        fromjson("{$geoNear: { $geometry: {type: 'b.c', coordinates: [1, 1]}}}"));
+        fromjson(R"({$geoNear: { $geometry: {"type": "Point", "coordinates": [0, 10]}}})"),
+        fromjson(R"({$geoNear: { $geometry: {"type": "Point", coordinates: [1, 1]}}})"));
+    assertGeoNearParseReturnsError(
+        fromjson(R"({$geoNear: { $geometry: {"type": "LineString", "coordinates": [0, 10]}}})"));
+    assertGeoNearParseReturnsError(fromjson(
+        R"({$geoNear: { $geometry: {"type": "LineString", "coordinates": [[1, 2], [3, 4]]}}})"));
+    assertGeoNearParseReturnsError(fromjson(
+        R"({$geoNear: { $geometry: {"type": "MultiPoint", "coordinates": [[0, 0], [1, 1]]}}})"));
+
+    // Test scenario with $nearSphere without $geometry and no type specified
+    assertRepresentativeGeoNearShapeIsStable(fromjson(R"({"$nearSphere":{"coordinates":[0,0]}})"),
+                                             fromjson(R"({"$nearSphere":{"coordinates":[1,1]}})"));
+
+    // Test case with first field of $geometry as numeric field, arbitrary coordinate naming.
+    assertRepresentativeGeoShapeIsStable(
+        fromjson(R"({"$geoIntersects":{"$geometry":{"shardOptions":40,"y":5}}})"),
+        fromjson(R"({"$geoIntersects":{"$geometry":{"shardOptions":1,"y":1}}})"));
 
     assertRepresentativeGeoShapeIsStable(fromjson(R"({
                 "$geoIntersects": {

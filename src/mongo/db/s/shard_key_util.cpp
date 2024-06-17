@@ -27,6 +27,8 @@
  *    it in the license file.
  */
 
+#include "mongo/db/s/shard_key_util.h"
+
 #include <absl/container/node_hash_map.h>
 #include <boost/container/small_vector.hpp>
 // IWYU pragma: no_include "boost/intrusive/detail/iterator.hpp"
@@ -61,10 +63,10 @@
 #include "mongo/db/field_ref.h"
 #include "mongo/db/hasher.h"
 #include "mongo/db/index/index_descriptor.h"
+#include "mongo/db/list_indexes_gen.h"
 #include "mongo/db/query/collation/collation_spec.h"
 #include "mongo/db/s/migration_destination_manager.h"
 #include "mongo/db/s/shard_key_index_util.h"
-#include "mongo/db/s/shard_key_util.h"
 #include "mongo/db/timeseries/timeseries_constants.h"
 #include "mongo/db/timeseries/timeseries_index_schema_conversion_functions.h"
 #include "mongo/db/write_concern_options.h"
@@ -302,16 +304,9 @@ bool validateShardKeyIndexExistsOrCreateIfPossible(OperationContext* opCtx,
     // back on the original index created.
     //
     // TODO (SERVER-79304): Remove 'updatedToHandleTimeseriesIndex' once 8.0 becomes last LTS, or
-    //  update the ticket number to when the parameter can be removed.
+    // update the ticket number to when the parameter can be removed.
     auto indexKeyPatternBSON = shardKeyPattern.toBSON();
-    bool isBucketsNss = nss.isTimeseriesBucketsCollection();
-    if (updatedToHandleTimeseriesIndex && isBucketsNss) {
-        tassert(
-            7711201,
-            "If creating a shard key index on a time-series buckets collections, we must pass the "
-            "time-series options.",
-            isBucketsNss == tsOpts.has_value());
-
+    if (updatedToHandleTimeseriesIndex && tsOpts.has_value()) {
         // 'createBucketsShardKeyIndexFromTimeseriesShardKeySpec' expects the shard key to be
         // already "buckets-encoded". For example, shard keys on the timeField should already be
         // changed to use the "control.min.<timeField>". If the shard key is not buckets
@@ -395,23 +390,35 @@ std::vector<BSONObj> ValidationBehaviorsShardCollection::loadIndexes(
 
 void ValidationBehaviorsShardCollection::verifyUsefulNonMultiKeyIndex(
     const NamespaceString& nss, const BSONObj& proposedKey) const {
-    BSONObj res;
-    auto success = _localClient->runCommand(
+    auto res = Shard::CommandResponse::getEffectiveStatus(_dataShard->runCommand(
+        _opCtx,
+        ReadPreferenceSetting(ReadPreference::PrimaryOnly),
         DatabaseName::kAdmin,
         BSON(kCheckShardingIndexCmdName
              << NamespaceStringUtil::serialize(nss, SerializationContext::stateDefault())
              << kKeyPatternField << proposedKey),
-        res);
-    uassert(ErrorCodes::InvalidOptions, res["errmsg"].str(), success);
+        Shard::RetryPolicy::kIdempotent));
+    uassert(ErrorCodes::InvalidOptions, res.reason(), res.isOK());
 }
 
 void ValidationBehaviorsShardCollection::verifyCanCreateShardKeyIndex(const NamespaceString& nss,
                                                                       std::string* errMsg) const {
+    repl::ReadConcernArgs readConcern =
+        repl::ReadConcernArgs(repl::ReadConcernLevel::kLocalReadConcern);
+    FindCommandRequest findCommand(nss);
+    findCommand.setLimit(1);
+    findCommand.setReadConcern(readConcern.toBSONInner());
+    Shard::QueryResponse response = uassertStatusOK(
+        _dataShard->runExhaustiveCursorCommand(_opCtx,
+                                               ReadPreferenceSetting(ReadPreference::PrimaryOnly),
+                                               nss.dbName(),
+                                               findCommand.toBSON(BSONObj()),
+                                               Milliseconds(-1)));
     uassert(ErrorCodes::InvalidOptions,
             str::stream() << "Please create an index that starts with the proposed shard key before"
                              " sharding the collection. "
                           << *errMsg,
-            _localClient->findOne(nss, BSONObj{}).isEmpty());
+            response.docs.empty());
 }
 
 void ValidationBehaviorsShardCollection::createShardKeyIndex(
@@ -544,7 +551,13 @@ ValidationBehaviorsReshardingBulkIndex::ValidationBehaviorsReshardingBulkIndex()
 std::vector<BSONObj> ValidationBehaviorsReshardingBulkIndex::loadIndexes(
     const NamespaceString& nss) const {
     invariant(_opCtx);
-    auto catalogCache = Grid::get(_opCtx)->catalogCache();
+    auto grid = Grid::get(_opCtx);
+    // This is a hack to make this code work in resharding_recipient_service_test. In real
+    // deployment, grid and catalogCache should always exist.
+    if (!grid->isInitialized() || !grid->catalogCache()) {
+        return std::vector<BSONObj>();
+    }
+    auto catalogCache = grid->catalogCache();
     auto cri = catalogCache->getTrackedCollectionRoutingInfo(_opCtx, nss);
     auto [indexSpecs, _] = MigrationDestinationManager::getCollectionIndexes(
         _opCtx, nss, cri.cm.getMinKeyShardIdWithSimpleCollation(), cri, _cloneTimestamp);

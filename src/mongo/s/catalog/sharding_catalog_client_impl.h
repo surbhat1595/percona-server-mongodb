@@ -87,7 +87,7 @@ class ShardingCatalogClientImpl final : public ShardingCatalogClient {
 
 public:
     ShardingCatalogClientImpl(std::shared_ptr<Shard> overrideConfigShard);
-    virtual ~ShardingCatalogClientImpl();
+    ~ShardingCatalogClientImpl() override;
 
     /*
      * Updates (or if "upsert" is true, creates) catalog data for the sharded collection "collNs" by
@@ -303,8 +303,6 @@ private:
 
     /**
      * Queries the config server to retrieve placement data based on the Request object.
-     * TODO (SERVER-73029): Remove the method - and replace its invocations with
-     * runPlacementHistoryAggregation()
      */
     HistoricalPlacement _fetchPlacementMetadata(OperationContext* opCtx,
                                                 ConfigsvrGetHistoricalPlacement&& request);

@@ -1,13 +1,11 @@
 // Tests query settings impact on the queries when 'queryFramework' is set.
 // @tags: [
 //   directly_against_shardsvrs_incompatible,
-//   featureFlagQuerySettings,
 //   simulate_atlas_proxy_incompatible,
-//   cqf_incompatible,
+//   requires_fcv_80,
 // ]
 //
 
-import {getEngine, getPlanStages, getWinningPlanFromExplain} from "jstests/libs/analyze_plan.js";
 import {assertDropAndRecreateCollection} from "jstests/libs/collection_drop_recreate.js";
 import {QuerySettingsUtils} from "jstests/libs/query_settings_utils.js";
 
@@ -30,6 +28,7 @@ const sbeEligibleQuery = {
     filter: {a: {$lt: 2}},
     hint: indexKeyPattern,
 };
+
 const nonSbeEligibleQuery = {
     find: coll.getName(),
     $db: db.getName(),
@@ -37,53 +36,60 @@ const nonSbeEligibleQuery = {
     hint: indexKeyPattern,
 };
 
-function assertHintedIndexWasUsed(explain) {
-    const winningPlan = getWinningPlanFromExplain(explain);
-    const ixscanStage = getPlanStages(winningPlan, "IXSCAN")[0];
-    assert.eq(indexKeyPattern, ixscanStage.keyPattern, winningPlan);
-}
+const sbeRestrictedQuery = qsutils.makeAggregateQueryInstance({
+    pipeline: [{$group: {_id: "$groupID", count: {$sum: 1}}}],
+    hint: indexKeyPattern,
+});
 
-function testQueryFramework({query, settings, expectedEngine}) {
-    // Ensure that query settings cluster parameter is empty.
-    qsutils.assertQueryShapeConfiguration([]);
+const nonSbeRestrictedQuery = qsutils.makeAggregateQueryInstance({
+    pipeline: [{$limit: 1}],
+    hint: indexKeyPattern,
+});
 
-    // Apply the provided settings for the query.
-    assert.commandWorked(db.adminCommand({setQuerySettings: query, settings: settings}));
-
-    // Wait until the settings have taken effect.
-    const expectedConfiguration = [qsutils.makeQueryShapeConfiguration(settings, query)];
-    qsutils.assertQueryShapeConfiguration(expectedConfiguration);
-
-    // Then, check that the query used the appropriate engine and the hinted index.
-    const {$db: _, ...queryWithoutDollarDb} = query;
-    const explain = assert.commandWorked(db.runCommand({explain: queryWithoutDollarDb}));
-    const engine = getEngine(explain)
-    assert.eq(
-        engine, expectedEngine, `Expected engine to be ${expectedEngine} but found ${engine}`);
-    assertHintedIndexWasUsed(explain);
-    qsutils.removeAllQuerySettings();
-}
-
-testQueryFramework({
+qsutils.assertQueryFramework({
     query: sbeEligibleQuery,
     settings: {queryFramework: "classic"},
     expectedEngine: "classic",
 });
 
-testQueryFramework({
+qsutils.assertQueryFramework({
     query: sbeEligibleQuery,
     settings: {queryFramework: "sbe"},
     expectedEngine: "sbe",
 });
 
-testQueryFramework({
+qsutils.assertQueryFramework({
     query: nonSbeEligibleQuery,
     settings: {queryFramework: "classic"},
     expectedEngine: "classic",
 });
 
-testQueryFramework({
+qsutils.assertQueryFramework({
     query: nonSbeEligibleQuery,
     settings: {queryFramework: "sbe"},
     expectedEngine: "classic",
+});
+
+qsutils.assertQueryFramework({
+    query: sbeRestrictedQuery,
+    settings: {queryFramework: "classic"},
+    expectedEngine: "classic",
+});
+
+qsutils.assertQueryFramework({
+    query: sbeRestrictedQuery,
+    settings: {queryFramework: "sbe"},
+    expectedEngine: "sbe",
+});
+
+qsutils.assertQueryFramework({
+    query: nonSbeRestrictedQuery,
+    settings: {queryFramework: "classic"},
+    expectedEngine: "classic",
+});
+
+qsutils.assertQueryFramework({
+    query: nonSbeRestrictedQuery,
+    settings: {queryFramework: "sbe"},
+    expectedEngine: "sbe",
 });

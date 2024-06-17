@@ -2,11 +2,10 @@
  * Tests that resharding ops abort take provenance into account.
  *
  * @tags: [
- *  requires_fcv_72,
+ *  requires_fcv_80,
  *  featureFlagReshardingImprovements,
  *  featureFlagMoveCollection,
  *  featureFlagUnshardCollection,
- *  featureFlagTrackUnshardedCollectionsOnShardingCatalog,
  *  multiversion_incompatible,
  *  assumes_balancer_off,
  * ]

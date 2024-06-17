@@ -27,7 +27,9 @@
  *    it in the license file.
  */
 
+#include "mongo/bson/json.h"
 #include "mongo/bson/util/bsoncolumnbuilder.h"
+#include "mongo/db/exec/sbe/sbe_block_test_helpers.h"
 #include "mongo/db/exec/sbe/sbe_unittest.h"
 #include "mongo/db/exec/sbe/values/block_interface.h"
 #include "mongo/db/exec/sbe/values/bson_block.h"
@@ -60,7 +62,7 @@ TEST_F(SbeValueTest, SbeValueBlockTypeIsCopyable) {
     auto cpy = value::getValueBlock(cpyValue);
 
     auto extracted = cpy->extract();
-    ASSERT_EQ(extracted.count, 1);
+    ASSERT_EQ(extracted.count(), 1);
 }
 
 // Tests that copyValue() behaves correctly when given a TypeTags::valueBlock. Uses MonoBlock as
@@ -76,7 +78,7 @@ TEST_F(SbeValueTest, SbeCellBlockTypeIsCopyable) {
 
     auto& vals = cpy->getValueBlock();
     auto extracted = vals.extract();
-    ASSERT_EQ(extracted.count, 1);
+    ASSERT_EQ(extracted.count(), 1);
 }
 
 namespace {
@@ -84,7 +86,7 @@ namespace {
 struct PathTestCase {
     value::CellBlock::Path path;
     BSONObj filterValues;
-    std::string filterPosInfo;
+    std::vector<int32_t> filterPosInfo;
 
     BSONObj projectValues;
 };
@@ -94,9 +96,9 @@ struct PathTestCase {
 BSONObj blockToBsonArr(value::ValueBlock& block) {
     auto extracted = block.extract();
     BSONArrayBuilder arr;
-    for (size_t i = 0; i < extracted.count; ++i) {
-        auto tag = extracted.tags[i];
-        auto val = extracted.vals[i];
+    for (size_t i = 0; i < extracted.count(); ++i) {
+        auto tag = extracted.tags()[i];
+        auto val = extracted.vals()[i];
 
         BSONObjBuilder tmp;
 
@@ -113,10 +115,11 @@ BSONObj blockToBsonArr(value::ValueBlock& block) {
 }
 
 // Converts a vector of char storing char(1)/char(0) into an ascii string of '1' and '0'.
-std::string posInfoToString(const std::vector<char>& posInfo) {
+std::string posInfoToString(const std::vector<int32_t>& posInfo) {
     std::string out;
     for (auto c : posInfo) {
-        out.push_back(c ? '1' : '0');
+        out += std::to_string(c);
+        out += " ";
     }
     return out;
 }
@@ -143,7 +146,7 @@ public:
         if (useTsImpl) {
             // Shred the bsons here, produce a time series "bucket"-like thing, and pass it to the
             // TS decoding implementation.
-            StringMap<std::unique_ptr<BSONColumnBuilder>> shredMap;
+            StringMap<std::unique_ptr<BSONColumnBuilder<>>> shredMap;
 
             size_t bsonIdx = 0;
             for (auto&& bson : bsons) {
@@ -152,7 +155,7 @@ public:
                 StringDataSet fieldsVisited;
                 for (auto elt : bson) {
                     auto [it, inserted] = shredMap.insert(
-                        std::pair(elt.fieldName(), std::make_unique<BSONColumnBuilder>()));
+                        std::pair(elt.fieldName(), std::make_unique<BSONColumnBuilder<>>()));
 
                     if (inserted) {
                         // Backfill with missing values.
@@ -189,7 +192,8 @@ public:
             // Now call into the time series extractor.
 
             value::TsBucketPathExtractor extractor(paths, "time");
-            return extractor.extractCellBlocks(_bucketStorage);
+            auto [n, storageBlocks, cellBlocks] = extractor.extractCellBlocks(_bucketStorage);
+            return {std::move(storageBlocks), std::move(cellBlocks)};
         } else {
             return std::pair(std::vector<std::unique_ptr<value::TsBlock>>(),
                              value::extractCellBlocksFromBsons(paths, bsons));
@@ -231,8 +235,11 @@ void BsonBlockDecodingTest::testPaths(const std::vector<PathTestCase>& testCases
             << "Incorrect values for filter path " << pathReqs[filterIdx].toString() << " got "
             << numObj << " expected " << tc.filterValues;
 
-        ASSERT_EQ(posInfoToString(cellBlocks[filterIdx]->filterPositionInfo()), tc.filterPosInfo)
-            << "Incorrect position info for filter path " << pathReqs[filterIdx].toString();
+        ASSERT_EQ(cellBlocks[filterIdx]->filterPositionInfo(), tc.filterPosInfo)
+            << "Incorrect position info for filter path " << pathReqs[filterIdx].toString()
+            << posInfoToString(cellBlocks[filterIdx]->filterPositionInfo())
+            << " == " << posInfoToString(tc.filterPosInfo);
+
 
         auto projectValues = blockToBsonArr(cellBlocks[projectIdx]->getValueBlock());
         ASSERT_TRUE(SimpleBSONObjComparator::kInstance.evaluate(projectValues == tc.projectValues))
@@ -260,12 +267,12 @@ TEST_F(BsonBlockDecodingTest, BSONDocumentBlockSimple) {
     std::vector<PathTestCase> tests{
         PathTestCase{.path = {Get{"a"}, Id{}},
                      .filterValues = fromjson("{result: [1,2,[3,4], null, 6]}"),
-                     .filterPosInfo = "11111",
+                     .filterPosInfo = {1, 1, 1, 1, 1},
                      .projectValues = fromjson("{result: [1,2,[3,4], null, 6]}")},
 
         PathTestCase{.path = {Get{"b"}, Id{}},
                      .filterValues = fromjson("{result: [1,2,3,null,null]}"),
-                     .filterPosInfo = "11111",
+                     .filterPosInfo = {1, 1, 1, 1, 1},
                      .projectValues = fromjson("{result: [1,2,3,null,null]}")}};
     testPaths(tests, bsons);
 }
@@ -286,7 +293,7 @@ TEST_F(BsonBlockDecodingTest, BSONDocumentBlockMissings) {
     std::vector<PathTestCase> tests{PathTestCase{
         .path = {Get{"a"}, Id{}},
         .filterValues = fromjson("{result: [null, null, 1,2,[[3],4], null, 6, null]}"),
-        .filterPosInfo = "11111111",
+        .filterPosInfo = {1, 1, 1, 1, 1, 1, 1, 1},
         .projectValues = fromjson("{result: [null, null, 1,2,[[3],4], null, 6, null]}")}};
     testPaths(tests, bsons);
 }
@@ -303,7 +310,7 @@ TEST_F(BsonBlockDecodingTest, BSONDocumentBlockGetTraverse) {
     std::vector<PathTestCase> tests{
         PathTestCase{.path = {Get{"a"}, Traverse{}, Id{}},
                      .filterValues = fromjson("{result: [1,2,3,4,[999], 5]}"),
-                     .filterPosInfo = "111001",
+                     .filterPosInfo = {1, 1, 3, 1},
                      .projectValues = fromjson("{result: [1,2,[3,4,[999]], 5]}")}};
     testPaths(tests, bsons);
 }
@@ -325,32 +332,32 @@ TEST_F(BsonBlockDecodingTest, BSONDocumentBlockSubfield) {
         // Get(A)/Id case.
         PathTestCase{.path = {Get{"a"}, Id{}},
                      .filterValues = getFieldAResult,
-                     .filterPosInfo = "11111",
+                     .filterPosInfo = {1, 1, 1, 1, 1},
                      .projectValues = getFieldAResult},
         // Get(A)/Traverse/Id case.
         PathTestCase{.path = {Get{"a"}, Traverse{}, Id{}},
                      .filterValues =
                          fromjson("{result: [{b: 1}, {b: [999, 999]}, {b: [2,3]}, {b: [4,5]}, "
                                   "null, {b: [[999]]}]}"),
-                     .filterPosInfo = "111011",
+                     .filterPosInfo = {1, 1, 2, 1, 1},
                      .projectValues = getFieldAResult},
         // Get(A)/Traverse/Get(b)/Id case.
         PathTestCase{.path = {Get{"a"}, Traverse{}, Get{"b"}, Id{}},
                      .filterValues =
                          fromjson("{result: [1, [999,999], [2,3], [4,5], null, [[999]]]}"),
-                     .filterPosInfo = "111011",
+                     .filterPosInfo = {1, 1, 2, 1, 1},
                      .projectValues =
                          fromjson("{result: [1, [999,999], [[2, 3], [4,5]], null, [[[999]]]]}")},
         // Get(a)/Get(b)/Id case. This case does not correspond to any MQL equivalent, but we
         // still want it to work.
         PathTestCase{.path = {Get{"a"}, Get{"b"}, Id{}},
                      .filterValues = fromjson("{result: [1, [999,999], null, null, null]}"),
-                     .filterPosInfo = "11111",
+                     .filterPosInfo = {1, 1, 1, 1, 1},
                      .projectValues = fromjson("{result: [1, [999,999], null, null, null]}")},
         // Get(A)/Traverse/Get(b)/Traverse/Id case.
         PathTestCase{.path = {Get{"a"}, Traverse{}, Get{"b"}, Traverse{}, Id{}},
                      .filterValues = fromjson("{result: [1,999,999,2,3,4,5, null, [999]]}"),
-                     .filterPosInfo = "110100011",
+                     .filterPosInfo = {1, 2, 4, 1, 1},
                      .projectValues =
                          fromjson("{result: [1, [999,999], [[2, 3], [4,5]], null, [[[999]]]]}")}};
     testPaths(tests, bsons);
@@ -369,13 +376,13 @@ TEST_F(BsonBlockDecodingTest, DoublyNestedArrays) {
         // Get(A)/Id case.
         PathTestCase{.path = {Get{"a"}, Id{}},
                      .filterValues = getFieldAResult,
-                     .filterPosInfo = "11",
+                     .filterPosInfo = {1, 1},
                      .projectValues = getFieldAResult},
         // Get(A)/Traverse/Id case.
         PathTestCase{.path = {Get{"a"}, Traverse{}, Id{}},
                      .filterValues =
                          fromjson("{result: [[{b: 1}], {b:2}, {b: [[3,4]]}, {b: [5, 6]}, {b:7}]}"),
-                     .filterPosInfo = "10100",
+                     .filterPosInfo = {2, 3},
                      .projectValues = getFieldAResult},
         // Get(A)/Traverse/Get(b)/Id case.
         PathTestCase{.path = {Get{"a"}, Traverse{}, Get{"b"}, Id{}},
@@ -383,20 +390,63 @@ TEST_F(BsonBlockDecodingTest, DoublyNestedArrays) {
                      // traversed. Arrays directly nested within arrays (e.g. [3,4]) are treated
                      // as "blobs" and are not traversed.
                      .filterValues = fromjson("{result: [2, [[3,4]], [5, 6], 7]}"),
-                     .filterPosInfo = "1100",
+                     .filterPosInfo = {1, 3},
                      .projectValues = fromjson("{result: [[2], [[[3,4]], [5, 6], 7]]}")},
         // Get(a)/Get(b)/Id case. This case does not correspond to any MQL equivalent, but we
         // still want it to work.
         PathTestCase{.path = {Get{"a"}, Get{"b"}, Id{}},
                      .filterValues = fromjson("{result: [null, null]}"),
-                     .filterPosInfo = "11",
+                     .filterPosInfo = {1, 1},
                      .projectValues = fromjson("{result: [null, null]}")},
         // Get(A)/Traverse/Get(b)/Traverse/Id case.
         PathTestCase{.path = {Get{"a"}, Traverse{}, Get{"b"}, Traverse{}, Id{}},
                      .filterValues = fromjson("{result: [2, [3,4], 5, 6, 7]}"),
-                     .filterPosInfo = "11000",
+                     .filterPosInfo = {1, 4},
                      .projectValues = fromjson("{result: [[2], [[[3,4]], [5, 6], 7]]}")}};
     testPaths(tests, bsons);
+}
+
+TEST_F(BsonBlockDecodingTest, BSONDocumentEmptyArrays) {
+    {
+        std::vector<BSONObj> bsons{
+            fromjson("{a: {b: 1}}"),
+            fromjson("{a: {b: []}}"),
+            fromjson("{a: {b: [2, 3]}}"),
+        };
+        std::vector<PathTestCase> tests{
+            PathTestCase{.path = {Get{"a"}, Traverse{}, Get{"b"}, Id{}},
+                         .filterValues = fromjson("{result: [1, [], [2,3]]}"),
+                         .filterPosInfo = {1, 1, 1},
+                         .projectValues = fromjson("{result: [1, [], [2,3]]}")},
+            PathTestCase{.path = {Get{"a"}, Traverse{}, Get{"b"}, Traverse{}, Id{}},
+                         .filterValues = fromjson("{result: [1, 2,3]}"),
+                         .filterPosInfo = {1, 0, 2},
+                         .projectValues = fromjson("{result: [1, [], [2,3]]}")},
+        };
+        testPaths(tests, bsons);
+    }
+
+    {
+        std::vector<BSONObj> bsons{
+            fromjson("{a: [{b: []}, {b: [1,2]}, {b: []}]}"),
+            fromjson("{a: [{b: []}, {b: []}, {b: []}]}"),
+            fromjson("{a: {b: [3, 4]}}"),
+        };
+        std::vector<PathTestCase> tests{
+            PathTestCase{.path = {Get{"a"}, Traverse{}, Get{"b"}, Id{}},
+                         .filterValues = fromjson("{result: [[], [1, 2], [], [], [], [], [3, 4]]}"),
+                         .filterPosInfo = {3, 3, 1},
+                         .projectValues =
+                             fromjson("{result: [[[], [1, 2], []], [[], [], []], [3, 4]]}")},
+            PathTestCase{.path = {Get{"a"}, Traverse{}, Get{"b"}, Traverse{}, Id{}},
+                         .filterValues = fromjson("{result: [1,2,3,4]}"),
+                         .filterPosInfo = {2, 0, 2},
+                         .projectValues =
+                             fromjson("{result: [[[], [1, 2], []], [[], [], []], [3, 4]]}")},
+
+        };
+        testPaths(tests, bsons);
+    }
 }
 
 TEST_F(BsonBlockDecodingTest, BSONDocumentBlockFieldDoesNotExist) {
@@ -418,7 +468,7 @@ TEST_F(BsonBlockDecodingTest, BSONDocumentBlockFieldDoesNotExist) {
     std::vector<PathTestCase> tests{
         PathTestCase{.path = {Get{"a"}, Traverse{}, Get{"b"}, Traverse{}, Id{}},
                      .filterValues = fromjson("{result: [1, null, null, 4, 5, 6, 7]}"),
-                     .filterPosInfo = "1111000",
+                     .filterPosInfo = {1, 1, 1, 4},
                      .projectValues = fromjson("{result: [1, [], [], [[4, 5], [], [6, 7]]]}")}};
     testPaths(tests, bsons);
 }
@@ -428,47 +478,33 @@ public:
     ValueBlockTest() = default;
 };
 
-static constexpr auto testOp1Type = ColumnOpType{ColumnOpType::kOutputNonNothingOnExpectedInput,
-                                                 TypeTags::Nothing,
-                                                 TypeTags::Boolean,
-                                                 ColumnOpType::ReturnBoolOnMissing{}};
-static const auto testOp1 = value::makeColumnOp<testOp1Type>([](TypeTags tag, Value val) {
-    return std::pair(TypeTags::Boolean, value::bitcastFrom<bool>(value::isString(tag)));
-});
+static const auto testOp1 =
+    value::makeColumnOp<ColumnOpType::kNoFlags>([](TypeTags tag, Value val) {
+        return std::pair(TypeTags::Boolean, value::bitcastFrom<bool>(value::isString(tag)));
+    });
 
-static constexpr auto testOp2Type = ColumnOpType{ColumnOpType::kOutputNonNothingOnExpectedInput,
-                                                 TypeTags::NumberDouble,
-                                                 TypeTags::Boolean,
-                                                 ColumnOpType::ReturnNothingOnMissing{}};
-static const auto testOp2 = value::makeColumnOp<testOp2Type>([](TypeTags tag, Value val) {
-    if (tag == TypeTags::NumberDouble) {
-        double d = value::bitcastTo<double>(val);
-        return std::pair(TypeTags::Boolean, value::bitcastFrom<bool>(d >= 5.0));
-    } else {
-        return std::pair(TypeTags::Nothing, Value{0u});
-    }
-});
-
-static constexpr auto testOp3Type = ColumnOpType{ColumnOpType::kOutputNonNothingOnExpectedInput,
-                                                 TypeTags::Nothing,
-                                                 TypeTags::Boolean,
-                                                 ColumnOpType::ReturnBoolOnMissing{}};
-static const auto testOp3 = value::makeColumnOp<testOp3Type>(
-    [](TypeTags tag, Value val) {
-        return std::pair(TypeTags::Boolean, value::bitcastFrom<bool>(tag != TypeTags::Nothing));
-    },
-    [](const TypeTags* tags, const Value* vals, TypeTags* outTags, Value* outVals, size_t count) {
-        for (size_t i = 0; i < count; ++i) {
-            outTags[i] = TypeTags::Boolean;
-            outVals[i] = value::bitcastFrom<bool>(tags[i] != TypeTags::Nothing);
+static const auto testOp2 =
+    value::makeColumnOp<ColumnOpType::kNoFlags>([](TypeTags tag, Value val) {
+        if (tag == TypeTags::NumberDouble) {
+            double d = value::bitcastTo<double>(val);
+            return std::pair(TypeTags::Boolean, value::bitcastFrom<bool>(d >= 5.0));
+        } else {
+            return std::pair(TypeTags::Nothing, Value{0u});
         }
     });
 
-static constexpr auto testOp4Type = ColumnOpType{ColumnOpType::kOutputNonNothingOnExpectedInput,
-                                                 TypeTags::NumberDouble,
-                                                 TypeTags::NumberDouble,
-                                                 ColumnOpType::ReturnNothingOnMissing{}};
-static const auto testOp4 = value::makeColumnOp<testOp4Type>(
+static const auto testOp3 = value::makeColumnOp<ColumnOpType::kNoFlags>(
+    [](TypeTags tag, Value val) {
+        return std::pair(TypeTags::Boolean, value::bitcastFrom<bool>(tag != TypeTags::Nothing));
+    },
+    [](TypeTags tag, const Value* vals, TypeTags* outTags, Value* outVals, size_t count) {
+        for (size_t i = 0; i < count; ++i) {
+            outTags[i] = TypeTags::Boolean;
+            outVals[i] = value::bitcastFrom<bool>(tag != TypeTags::Nothing);
+        }
+    });
+
+static const auto testOp4 = value::makeColumnOp<ColumnOpType::kNoFlags>(
     [](TypeTags tag, Value val) {
         if (tag == TypeTags::NumberDouble) {
             double d = value::bitcastTo<double>(val);
@@ -477,9 +513,9 @@ static const auto testOp4 = value::makeColumnOp<testOp4Type>(
             return std::pair(TypeTags::Nothing, Value{0u});
         }
     },
-    [](const TypeTags* tags, const Value* vals, TypeTags* outTags, Value* outVals, size_t count) {
+    [](TypeTags tag, const Value* vals, TypeTags* outTags, Value* outVals, size_t count) {
         for (size_t i = 0; i < count; ++i) {
-            if (tags[i] == TypeTags::NumberDouble) {
+            if (tag == TypeTags::NumberDouble) {
                 double d = value::bitcastTo<double>(vals[i]);
                 outTags[i] = TypeTags::NumberDouble;
                 outVals[i] = value::bitcastFrom<double>(d * 2.0 + 1.0);
@@ -517,6 +553,32 @@ TEST_F(ValueBlockTest, HeterogeneousBlockMap) {
     auto outBlock4 = block->map(testOp4);
     auto output4 = blockToBsonArr(*outBlock4);
     ASSERT_BSONOBJ_EQ(output4, fromjson("{result: [null, null, 7.0, 21.0, null]}"));
+}
+
+// Test HomogeneousBlock::map().
+TEST_F(ValueBlockTest, HomogeneousBlockMap) {
+    auto block = std::make_unique<value::DoubleBlock>();
+
+    block->pushNothing();
+    block->push_back(3.0);
+    block->push_back(10.0);
+    block->pushNothing();
+
+    auto outBlock1 = block->map(testOp1);
+    auto output1 = blockToBsonArr(*outBlock1);
+    ASSERT_BSONOBJ_EQ(output1, fromjson("{result: [false, false, false, false]}"));
+
+    auto outBlock2 = block->map(testOp2);
+    auto output2 = blockToBsonArr(*outBlock2);
+    ASSERT_BSONOBJ_EQ(output2, fromjson("{result: [null, false, true, null]}"));
+
+    auto outBlock3 = block->map(testOp3);
+    auto output3 = blockToBsonArr(*outBlock3);
+    ASSERT_BSONOBJ_EQ(output3, fromjson("{result: [false, true, true, false]}"));
+
+    auto outBlock4 = block->map(testOp4);
+    auto output4 = blockToBsonArr(*outBlock4);
+    ASSERT_BSONOBJ_EQ(output4, fromjson("{result: [null, 7.0, 21.0, null]}"));
 }
 
 // Test MonoBlock::map().
@@ -606,49 +668,6 @@ TEST_F(ValueBlockTest, MonoBlockMap) {
     }
 }
 
-class TestBlock : public value::ValueBlock {
-public:
-    TestBlock() = default;
-    TestBlock(const TestBlock& o) : value::ValueBlock(o) {
-        _vals.resize(o._vals.size(), Value{0u});
-        _tags.resize(o._tags.size(), TypeTags::Nothing);
-        for (size_t i = 0; i < o._vals.size(); ++i) {
-            auto [copyTag, copyVal] = copyValue(o._tags[i], o._vals[i]);
-            _vals[i] = copyVal;
-            _tags[i] = copyTag;
-        }
-    }
-    TestBlock(TestBlock&& o)
-        : value::ValueBlock(std::move(o)), _vals(std::move(o._vals)), _tags(std::move(o._tags)) {
-        o._vals = {};
-        o._tags = {};
-    }
-    ~TestBlock() {
-        for (size_t i = 0; i < _vals.size(); ++i) {
-            releaseValue(_tags[i], _vals[i]);
-        }
-    }
-
-    void push_back(TypeTags t, Value v) {
-        _vals.push_back(v);
-        _tags.push_back(t);
-    }
-    boost::optional<size_t> tryCount() const override {
-        return _vals.size();
-    }
-    value::DeblockedTagVals deblock(
-        boost::optional<value::DeblockedTagValStorage>& storage) override {
-        return {_vals.size(), _tags.data(), _vals.data()};
-    }
-    std::unique_ptr<value::ValueBlock> clone() const override {
-        return std::make_unique<TestBlock>(*this);
-    }
-
-private:
-    std::vector<Value> _vals;
-    std::vector<TypeTags> _tags;
-};
-
 // Test ValueBlock::defaultMapImpl().
 TEST_F(ValueBlockTest, TestBlockMap) {
     auto block = std::make_unique<TestBlock>();
@@ -676,6 +695,27 @@ TEST_F(ValueBlockTest, TestBlockMap) {
     auto outBlock4 = block->map(testOp4);
     auto output4 = blockToBsonArr(*outBlock4);
     ASSERT_BSONOBJ_EQ(output4, fromjson("{result: [null, null, 7.0, 21.0, null]}"));
+}
+
+// Test monotonic shortcut in ValueBlock::defaultMapImpl().
+static const auto testOp5 = value::makeColumnOp<ColumnOpType::kMonotonic>(
+    [](TypeTags tag, Value val) { return value::makeBigString("fake result from map"); });
+
+TEST_F(ValueBlockTest, TestBlockMapFast) {
+    auto block = std::make_unique<TestBlock>();
+
+    auto [strTag1, strVal1] = value::makeNewString("not a small string");
+    block->push_back(strTag1, strVal1);
+    auto [strTag2, strVal2] = value::makeNewString("a slightly longer string");
+    block->push_back(strTag2, strVal2);
+
+    block->setMin(strTag2, strVal2);
+    block->setMax(strTag1, strVal1);
+
+    auto outBlock1 = block->map(testOp5);
+    auto output1 = blockToBsonArr(*outBlock1);
+    ASSERT_BSONOBJ_EQ(output1,
+                      fromjson("{result: ['fake result from map', 'fake result from map']}"));
 }
 
 // Test ValueBlock::tokenize().
@@ -826,6 +866,131 @@ TEST_F(ValueBlockTest, DoubleBlockTokenize) {
 
     std::vector<size_t> expIdxs{0, 1, 2, 0, 0, 2, 3, 1, 2};
     ASSERT_EQ(outIdxs, expIdxs);
+}
+
+template <typename BlockType, typename T>
+std::unique_ptr<BlockType> makeArgMinMaxBlock(
+    bool inclNothing = false, std::unique_ptr<BlockType> block = std::make_unique<BlockType>()) {
+    if (inclNothing) {
+        block->pushNothing();
+        block->pushNothing();
+    }
+    block->push_back(static_cast<T>(1));
+    block->push_back(static_cast<T>(-1));
+    if (inclNothing) {
+        block->pushNothing();
+    }
+    block->push_back(static_cast<T>(-3));
+    block->push_back(static_cast<T>(4));
+    block->push_back(static_cast<T>(-2));
+    if (inclNothing) {
+        block->pushNothing();
+    }
+
+    return std::move(block);
+}
+
+TEST_F(ValueBlockTest, ArgMinMaxGetAt) {
+    {
+        auto block = makeArgMinMaxBlock<value::Int32Block, int32_t>();
+        ASSERT_EQ(block->argMin(), boost::optional<size_t>(2));
+        ASSERT_EQ(block->argMax(), boost::optional<size_t>(3));
+
+        block->push_back(std::numeric_limits<int32_t>::max());
+        block->push_back(std::numeric_limits<int32_t>::min());
+        ASSERT_EQ(block->argMin(), boost::optional<size_t>(6));
+        ASSERT_EQ(block->argMax(), boost::optional<size_t>(5));
+
+        auto blockWNothing = makeArgMinMaxBlock<value::Int32Block, int32_t>(true /* inclNothing */);
+        ASSERT_EQ(blockWNothing->argMin(), boost::none);
+        ASSERT_EQ(blockWNothing->argMax(), boost::none);
+    }
+
+    {
+        auto block = makeArgMinMaxBlock<value::DoubleBlock, double>();
+        ASSERT_EQ(block->argMin(), boost::optional<size_t>(2));
+        ASSERT_EQ(block->argMax(), boost::optional<size_t>(3));
+
+        block->push_back(std::numeric_limits<double>::max());
+        // std::numeric_limits<double>::min() returns the smallest positive finite value.
+        block->push_back(std::numeric_limits<double>::lowest());
+        ASSERT_EQ(block->argMin(), boost::optional<size_t>(6));
+        ASSERT_EQ(block->argMax(), boost::optional<size_t>(5));
+
+        block->push_back(-1 * std::numeric_limits<double>::infinity());
+        block->push_back(std::numeric_limits<double>::infinity());
+        ASSERT_EQ(block->argMin(), boost::optional<size_t>(7));
+        ASSERT_EQ(block->argMax(), boost::optional<size_t>(8));
+
+        auto tempBlockWLHSNaN = std::make_unique<value::DoubleBlock>();
+        tempBlockWLHSNaN->push_back(std::numeric_limits<double>::quiet_NaN());
+        auto blockWLHSNaN = makeArgMinMaxBlock<value::DoubleBlock, double>(
+            false /* inclNothing */, std::move(tempBlockWLHSNaN));
+        ASSERT_EQ(blockWLHSNaN->argMin(), boost::optional<size_t>(0));
+        ASSERT_EQ(blockWLHSNaN->argMax(), boost::optional<size_t>(4));
+
+        auto blockWRHSNaN = makeArgMinMaxBlock<value::DoubleBlock, double>();
+        blockWRHSNaN->push_back(std::numeric_limits<double>::signaling_NaN());
+        ASSERT_EQ(blockWRHSNaN->argMin(), boost::optional<size_t>(5));
+        ASSERT_EQ(blockWRHSNaN->argMax(), boost::optional<size_t>(3));
+    }
+
+    {
+        auto block = std::make_unique<value::Int64Block>();
+        block->pushNothing();
+        block->pushNothing();
+        block->pushNothing();
+        ASSERT_EQ(block->argMin(), boost::none);
+        ASSERT_EQ(block->argMax(), boost::none);
+    }
+
+    {
+        auto block = std::make_unique<value::Int64Block>();
+        block->push_back(static_cast<int64_t>(10));
+        block->push_back(static_cast<int64_t>(20));
+        block->push_back(static_cast<int64_t>(30));
+
+        // Dense homogeneous blocks access _vals directly.
+        ASSERT_THAT(
+            block->at(0),
+            ValueEq(std::pair{value::TypeTags::NumberInt64, value::bitcastFrom<int64_t>(10)}));
+        ASSERT_THAT(
+            block->at(1),
+            ValueEq(std::pair{value::TypeTags::NumberInt64, value::bitcastFrom<int64_t>(20)}));
+        ASSERT_THAT(
+            block->at(2),
+            ValueEq(std::pair{value::TypeTags::NumberInt64, value::bitcastFrom<int64_t>(30)}));
+
+        // Homogeneous blocks with Nothings call ValueBlock::getAt() which extracts first.
+        block->pushNothing();
+        block->pushNothing();
+        ASSERT_EQ(block->at(3).first, value::TypeTags::Nothing);
+        ASSERT_EQ(block->at(4).first, value::TypeTags::Nothing);
+    }
+
+    {
+        auto bools = std::make_unique<value::BoolBlock>();
+        bools->push_back(true);
+        bools->push_back(false);
+        ASSERT_EQ(bools->argMin(), boost::optional<size_t>(1));
+        ASSERT_EQ(bools->argMax(), boost::optional<size_t>(0));
+
+        auto boolsWNothing = std::make_unique<value::BoolBlock>();
+        boolsWNothing->pushNothing();
+        boolsWNothing->push_back(false);
+        boolsWNothing->pushNothing();
+        boolsWNothing->push_back(true);
+        boolsWNothing->pushNothing();
+        ASSERT_EQ(boolsWNothing->argMin(), boost::none);
+        ASSERT_EQ(boolsWNothing->argMax(), boost::none);
+    }
+
+    {
+        auto monoblock = std::make_unique<value::MonoBlock>(
+            5, value::TypeTags::NumberInt32, value::bitcastFrom<int32_t>(1));
+        ASSERT_EQ(monoblock->argMin(), boost::none);
+        ASSERT_EQ(monoblock->argMax(), boost::none);
+    }
 }
 
 }  // namespace mongo::sbe

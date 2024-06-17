@@ -114,7 +114,7 @@ class CmdCount : public BasicCommand {
 public:
     CmdCount() : BasicCommand("count") {}
 
-    const std::set<std::string>& apiVersions() const {
+    const std::set<std::string>& apiVersions() const override {
         return kApiVersions1;
     }
 
@@ -159,6 +159,10 @@ public:
                 Status::OK()};
     }
 
+    bool isSubjectToIngressAdmissionControl() const override {
+        return true;
+    }
+
     bool shouldAffectReadOptionCounters() const override {
         return true;
     }
@@ -181,17 +185,26 @@ public:
         }
 
         const auto hasTerm = false;
-        return auth::checkAuthForFind(authSession,
-                                      CollectionCatalog::get(opCtx)->resolveNamespaceStringOrUUID(
-                                          opCtx, CommandHelpers::parseNsOrUUID(dbname, cmdObj)),
-                                      hasTerm);
+        const auto nsOrUUID = CommandHelpers::parseNsOrUUID(dbname, cmdObj);
+        if (nsOrUUID.isNamespaceString()) {
+            uassert(ErrorCodes::InvalidNamespace,
+                    str::stream() << "Namespace " << nsOrUUID.toStringForErrorMsg()
+                                  << " is not a valid collection name",
+                    nsOrUUID.nss().isValid());
+            return auth::checkAuthForFind(authSession, nsOrUUID.nss(), hasTerm);
+        }
+
+        const auto resolvedNss =
+            CollectionCatalog::get(opCtx)->resolveNamespaceStringFromDBNameAndUUID(
+                opCtx, nsOrUUID.dbName(), nsOrUUID.uuid());
+        return auth::checkAuthForFind(authSession, resolvedNss, hasTerm);
     }
 
     Status explain(OperationContext* opCtx,
                    const OpMsgRequest& opMsgRequest,
                    ExplainOptions::Verbosity verbosity,
                    rpc::ReplyBuilderInterface* result) const override {
-        DatabaseName dbName = opMsgRequest.getDbName();
+        DatabaseName dbName = opMsgRequest.parseDbName();
         const BSONObj& cmdObj = opMsgRequest.body;
         // Acquire locks. The RAII object is optional, because in the case
         // of a view, the locks need to be released.
@@ -227,10 +240,10 @@ public:
                 return viewAggregation.getStatus();
             }
 
-            auto viewAggCmd =
-                OpMsgRequestBuilder::createWithValidatedTenancyScope(
-                    nss.dbName(), opMsgRequest.validatedTenancyScope, viewAggregation.getValue())
-                    .body;
+            auto viewAggCmd = OpMsgRequestBuilder::create(opMsgRequest.validatedTenancyScope,
+                                                          nss.dbName(),
+                                                          viewAggregation.getValue())
+                                  .body;
             auto viewAggRequest = aggregation_request_helper::parseFromBSON(
                 opCtx,
                 nss,
@@ -241,8 +254,12 @@ public:
 
             // An empty PrivilegeVector is acceptable because these privileges are only checked on
             // getMore and explain will not open a cursor.
-            return runAggregate(
-                opCtx, viewAggRequest, viewAggregation.getValue(), PrivilegeVector(), result);
+            return runAggregate(opCtx,
+                                viewAggRequest,
+                                {viewAggRequest},
+                                viewAggregation.getValue(),
+                                PrivilegeVector(),
+                                result);
         }
 
         const auto& collection = ctx->getCollection();
@@ -337,8 +354,8 @@ public:
 
             uassertStatusOK(viewAggregation.getStatus());
 
-            auto aggRequest = OpMsgRequestBuilder::createWithValidatedTenancyScope(
-                dbName, vts, std::move(viewAggregation.getValue()));
+            auto aggRequest =
+                OpMsgRequestBuilder::create(vts, dbName, std::move(viewAggregation.getValue()));
             BSONObj aggResult = CommandHelpers::runCommandDirectly(opCtx, aggRequest);
 
             uassertStatusOK(ViewResponseFormatter(aggResult).appendAsCountResponse(

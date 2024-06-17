@@ -29,10 +29,11 @@
 
 #include "mongo/db/concurrency/locker.h"
 
+#include "mongo/bson/json.h"
+#include "mongo/db/admission/ticketholder_manager.h"
 #include "mongo/db/dump_lock_manager.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/storage/recovery_unit.h"
-#include "mongo/db/storage/ticketholder_manager.h"
 #include "mongo/db/transaction_resources.h"
 #include "mongo/logv2/log.h"
 #include "mongo/logv2/log_attr.h"
@@ -57,6 +58,7 @@ namespace {
 
 MONGO_FAIL_POINT_DEFINE(enableTestOnlyFlagforRSTL);
 MONGO_FAIL_POINT_DEFINE(failNonIntentLocksIfWaitNeeded);
+MONGO_FAIL_POINT_DEFINE(hangTicketRelease);
 
 /**
  * Tracks global (across all clients) lock acquisition statistics, partitioned into multiple
@@ -148,7 +150,7 @@ constexpr Milliseconds kMaxWaitTime = Milliseconds(500);
 Locker::Locker(ServiceContext* serviceContext)
     : _id(idCounter.addAndFetch(1)),
       _lockManager(LockManager::get(serviceContext)),
-      _ticketHolderManager(TicketHolderManager::get(serviceContext)) {
+      _ticketHolderManager(admission::TicketHolderManager::get(serviceContext)) {
     updateThreadIdToCurrentThread();
 }
 
@@ -180,8 +182,8 @@ std::string Locker::getDebugInfo() const {
     return _debugInfo;
 }
 
-void Locker::setDebugInfo(const std::string& info) {
-    _debugInfo = info;
+void Locker::setDebugInfo(std::string info) {
+    _debugInfo = std::move(info);
 }
 
 Locker::ClientState Locker::getClientState() const {
@@ -198,7 +200,8 @@ Locker::ClientState Locker::getClientState() const {
 void Locker::getFlowControlTicket(OperationContext* opCtx, LockMode lockMode) {
     auto ticketholder = FlowControlTicketholder::get(opCtx);
     if (ticketholder && lockMode == LockMode::MODE_IX && _clientState.load() == kInactive &&
-        _admCtx.getPriority() != AdmissionContext::Priority::kImmediate &&
+        ExecutionAdmissionContext::get(opCtx).getPriority() !=
+            AdmissionContext::Priority::kExempt &&
         !_uninterruptibleLocksRequested) {
         // FlowControl only acts when a MODE_IX global lock is being taken. The clientState is only
         // being modified here to change serverStatus' `globalLock.currentQueue` metrics. This
@@ -446,7 +449,7 @@ ResourceId Locker::getWaitingResource() const {
 MONGO_TSAN_IGNORE
 void Locker::getLockerInfo(
     LockerInfo* lockerInfo,
-    const boost::optional<SingleThreadedLockStats> alreadyCountedStats) const {
+    const boost::optional<SingleThreadedLockStats>& alreadyCountedStats) const {
     invariant(lockerInfo);
 
     // Zero-out the contents
@@ -479,11 +482,11 @@ void Locker::getLockerInfo(
         lockerInfo->stats.subtract(*alreadyCountedStats);
 }
 
-boost::optional<Locker::LockerInfo> Locker::getLockerInfo(
-    const boost::optional<SingleThreadedLockStats> alreadyCountedStats) const {
+Locker::LockerInfo Locker::getLockerInfo(
+    const boost::optional<SingleThreadedLockStats>& alreadyCountedStats) const {
     Locker::LockerInfo lockerInfo;
     getLockerInfo(&lockerInfo, alreadyCountedStats);
-    return std::move(lockerInfo);
+    return lockerInfo;
 }
 
 bool Locker::canSaveLockState() {
@@ -985,9 +988,7 @@ bool Locker::_acquireTicket(OperationContext* opCtx, LockMode mode, Date_t deadl
     auto holder = _ticketHolderManager ? _ticketHolderManager->getTicketHolder(mode) : nullptr;
     const bool reader = isSharedLockMode(mode);
 
-    if (!shouldWaitForTicket() && holder) {
-        holder->reportImmediatePriorityAdmission();
-    } else if (mode != MODE_X && mode != MODE_NONE && holder) {
+    if (mode != MODE_X && mode != MODE_NONE && holder) {
         // MODE_X is exclusive of all other locks, thus acquiring a ticket is unnecessary.
         _clientState.store(reader ? kQueuedReader : kQueuedWriter);
         // If the ticket wait is interrupted, restore the state of the client.
@@ -999,7 +1000,13 @@ bool Locker::_acquireTicket(OperationContext* opCtx, LockMode mode, Date_t deadl
         invariant(!shard_role_details::getRecoveryUnit(opCtx)->isTimestamped());
 
         if (auto ticket = holder->waitForTicketUntil(
-                _uninterruptibleLocksRequested ? nullptr : opCtx, &_admCtx, deadline)) {
+                _uninterruptibleLocksRequested ? *Interruptible::notInterruptible() : *opCtx,
+                &ExecutionAdmissionContext::get(opCtx),
+                deadline)) {
+            // TODO(SERVER-88732): Remove `_timeQueuedForTicketMicros` when we only track admission
+            // context for waiting metrics.
+            _timeQueuedForTicketMicros =
+                ExecutionAdmissionContext::get(opCtx).totalTimeQueuedMicros();
             _ticket = std::move(*ticket);
         } else {
             return false;
@@ -1034,6 +1041,15 @@ bool Locker::_unlockImpl(LockRequestsMap::Iterator* it) {
 }
 
 void Locker::_releaseTicket() {
+    if (MONGO_unlikely(hangTicketRelease.shouldFail())) {
+        if (_ticket && _ticket->getPriority() != AdmissionContext::Priority::kExempt) {
+            LOGV2(8435300,
+                  "Hanging hangTicketRelease in _releaseTicket() due to 'hangTicketRelease' "
+                  "failpoint");
+            hangTicketRelease.pauseWhileSet();
+        }
+    }
+
     _ticket.reset();
     _clientState.store(kInactive);
 }
@@ -1046,8 +1062,6 @@ void Locker::_setWaitingResource(ResourceId resId) {
 bool Locker::_shouldDelayUnlock(ResourceId resId, LockMode mode) const {
     switch (resId.getType()) {
         case RESOURCE_MUTEX:
-        case RESOURCE_DDL_DATABASE:
-        case RESOURCE_DDL_COLLECTION:
             return false;
 
         case RESOURCE_GLOBAL:
@@ -1055,6 +1069,8 @@ bool Locker::_shouldDelayUnlock(ResourceId resId, LockMode mode) const {
         case RESOURCE_DATABASE:
         case RESOURCE_COLLECTION:
         case RESOURCE_METADATA:
+        case RESOURCE_DDL_DATABASE:
+        case RESOURCE_DDL_COLLECTION:
             break;
 
         default:

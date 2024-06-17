@@ -34,7 +34,6 @@ selector:
   - jstests/core/**/top.js  # top.
   # The following tests fail because mongos behaves differently from mongod when testing certain
   # functionality. The differences are in a comment next to the failing test.
-  - jstests/core/**/explain_missing_database.js  # Behavior with no db different on mongos, SERVER-18047.
   - jstests/core/**/geo_2d_explain.js  # executionSuccess in different spot in explain().
   - jstests/core/**/geo_s2explain.js  # inputStage in different spot in explain().
   - jstests/core/**/geo_s2sparse.js  # keysPerIndex in different spot in validate().
@@ -80,6 +79,18 @@ selector:
   - jstests/core/timeseries/timeseries_bucket_limit_count.js
   - jstests/core/timeseries/timeseries_insert_after_update.js
 
+  # These timeseries tests rely on specific bucketing behaviour that is not guaranteed across FCV
+  # upgrade/downgrade
+  # TODO SERVER-70605: remove this block.
+  - jstests/core/timeseries/bucket_granularity.js
+  - jstests/core/timeseries/timeseries_id_range.js
+  - jstests/core/timeseries/timeseries_insert_after_update.js
+  - jstests/core/timeseries/timeseries_sparse.js
+  - jstests/core/timeseries/timeseries_min_max.js
+  - jstests/core/timeseries/timeseries_simple.js
+  - jstests/core/timeseries/timeseries_collation.js
+  - jstests/core/timeseries/bucket_timestamp_rounding.js
+
   # These use "columnstore indexes are under development and cannot be used without enabling the feature flag"
   - jstests/core/query/null_query_semantics.js
   - jstests/core/query/project/projection_semantics.js
@@ -103,6 +114,11 @@ selector:
   - jstests/aggregation/sources/facet/facet_stats.js
   - jstests/aggregation/sources/unionWith/unionWith_query_stats.js
 
+  # Test runs an updateOne without shard key which will use an internal transaction
+  # that can be aborted by the fcv upgrade downgrade suite.
+  - jstests/aggregation/sources/unionWith/unionWith_invalid_usage.js
+  - jstests/core/index/hashed/hashed_index_with_arrays.js
+
   # Expected failure due to interfering collMod commands acquiring a lock that the test does not expect.
   - jstests/core/write/crud_ops_do_not_throw_locktimeout.js
 
@@ -116,8 +132,7 @@ selector:
 
   # Sharding specific failed:
   #
-  # $unionWith explain output does not check whether the collection is sharded in a sharded
-  # cluster.
+  # $unionWith explain output does not check whether the collection is sharded in a sharded cluster.
   - jstests/aggregation/sources/unionWith/unionWith_explain.js
   # Cannot specify runtime constants option to a mongos
   - jstests/aggregation/expressions/internal_js_emit_with_scope.js
@@ -145,6 +160,13 @@ selector:
   # setFCV operations. The exclusion can be removed once the linked ticket is fixed.
   - jstests/core/top.js
 
+  # SERVER-85456: this test uses benchRun which does not use runCommand and index creation can fail.
+  - jstests/core/bench_test1.js
+
+  # Bucketing behavior changes based on the timeseriesAlwaysUseCompressedBuckets feature flag.
+  - jstests/core/timeseries/timeseries_lastpoint.js
+  - jstests/core/timeseries/timeseries_reopened_bucket_insert.js
+
   exclude_with_any_tags:
   - assumes_standalone_mongod
   - assumes_against_mongod_not_mongos
@@ -160,13 +182,13 @@ selector:
   - requires_profiling
   # columnstore indexes are under development and cannot be used without enabling the feature flag
   - featureFlagColumnstoreIndexes
-  # TODO SERVER-52419 Remove this tag.
-  - featureFlagBulkWriteCommand
   - featureFlagFLE2CleanupCommand
   # TODO SERVER-71537: Remove Feature Flag for PM-412.
   - featureFlagQuerySettings
   # TODO: SERVER-66393 Remove Feature Flag for PM-2919.
   - featureFlagTimeseriesUpdatesSupport
+  # TODO: SERVER-78068 Remove Feature Flag for PM-2983
+  - featureFlagRecordIdsReplicated
   # Transactions are aborted upon fcv upgrade or downgrade.
   - uses_transactions
   # Exclude tests that require a specific fcv.
@@ -174,6 +196,7 @@ selector:
   - requires_fcv_71
   - requires_fcv_72
   - requires_fcv_73
+  - requires_fcv_80
   # Exclude tests that are not compatible with upgrade/downgrade.
   - cannot_run_during_upgrade_downgrade
 

@@ -1,5 +1,8 @@
-# RHEL build variants for testing development environments that should run on master,
-# rapid release (7.1, 7.2 etc.) and LTS release (7.0, 6.0 etc.) branch projects
+# RHEL build variants for testing development environments
+#
+# After the branching variants in this file
+# should continue to run on a new rapid release (v7.1, v7.2 etc.)
+# and LTS release (v7.0, v6.0 etc.) branch projects
 
 variables:
 # THIS HAS COPIES IN:
@@ -10,15 +13,13 @@ variables:
   run_on:
   - rhel80-xlarge
   activate: true  # These compile variants run on every commit to reduce latency of the auto-reverter.
-  modules:
-    - enterprise
   stepback: false
 
 # THIS HAS COPIES IN:
 # - etc/evergreen_yml_components/variants/rhel/test_dev_master_branch_only.yml
 # - etc/evergreen_yml_components/variants/rhel/test_dev.yml
 # ANY MODIFICATIONS HERE SHOULD ALSO BE MADE IN THOSE FILES
-- &linux-x86-dynamic-compile-expansions
+- &linux-x86-dynamic-enterprise-compile-expansions
   scons_cache_scope: shared
   scons_cache_mode: all
   has_packages: false
@@ -28,6 +29,7 @@ variables:
     -j$(grep -c ^processor /proc/cpuinfo)
     --variables-files=etc/scons/mongodbtoolchain_stable_gcc.vars
     --link-model=dynamic
+    --use-diagnostic-latches=on
 
 # THIS HAS COPIES IN:
 # - etc/evergreen_yml_components/variants/rhel/test_dev_master_branch_only.yml
@@ -43,8 +45,8 @@ variables:
     # This is added because of EVG-18211.
     # Without this we are adding extra dependencies on evergreen and it is causing strain
     omit_generated_tasks: true
-  - name: generate_buildid_to_debug_symbols_mapping
-    variant: linux-x86-dynamic-compile
+  # - name: generate_buildid_to_debug_symbols_mapping
+  #   variant: linux-x86-dynamic-compile
 
 # THIS HAS COPIES IN:
 # - etc/evergreen_yml_components/variants/rhel/test_dev_master_branch_only.yml
@@ -92,8 +94,8 @@ variables:
     # This is added because of EVG-18211.
     # Without this we are adding extra dependencies on evergreen and it is causing strain
     omit_generated_tasks: true
-  - name: generate_buildid_to_debug_symbols_mapping
-    variant: linux-debug-aubsan-compile-required
+  # - name: generate_buildid_to_debug_symbols_mapping
+  #   variant: linux-debug-aubsan-compile-required
 
 # If you add anything to san_options, make sure the appropriate changes are
 # also made to SConstruct.
@@ -129,9 +131,9 @@ variables:
 buildvariants:
 - <<: *linux-x86-dynamic-compile-params
   name: &linux-x86-dynamic-compile linux-x86-dynamic-compile
-  display_name: "* Linux x86 Shared Library"
+  display_name: "* Linux x86 Enterprise Shared Library"
   expansions:
-    <<: *linux-x86-dynamic-compile-expansions
+    <<: *linux-x86-dynamic-enterprise-compile-expansions
     compile_variant: *linux-x86-dynamic-compile
   tasks:
     - name: compile_ninja_quick_TG
@@ -139,22 +141,14 @@ buildvariants:
     - name: compile_test_parallel_core_stream_TG
     - name: compile_test_parallel_dbtest_stream_TG
     - name: compile_integration_and_test_parallel_stream_TG
-    - name: generate_buildid_to_debug_symbols_mapping
-    - name: run_pretty_printer_tests
-    - name: server_discovery_and_monitoring_json_test_TG
-      distros:
-      - rhel80-large
-    - name: server_selection_json_test_TG
-      distros:
-      - rhel80-large
+    - name: .release_critical .requires_compile_variant !.incompatible_development_variant !.stitch !.crypt
+    - name: .default .requires_compile_variant !.incompatible_development_variant
 
 - &enterprise-rhel-80-64-bit-dynamic-template
   <<: *linux_x86_dynamic_compile_variant_dependency
   name: &enterprise-rhel-80-64-bit-dynamic enterprise-rhel-80-64-bit-dynamic
   display_name: "* Shared Library Enterprise RHEL 8.0"
   cron: "0 */4 * * *" # From the ${project_required_suggested_cron} parameter
-  modules:
-  - enterprise
   run_on:
   - rhel80-small
   expansions:
@@ -168,159 +162,66 @@ buildvariants:
     # Without this we are adding extra dependencies on evergreen and it is causing strain
     omit_generated_tasks: true
   tasks:
-  - name: .aggfuzzer !.feature_flag_guarded
-  - name: .aggregation !.feature_flag_guarded
-  - name: aggregation_repeat_queries
-  - name: analyze_shard_key_jscore_passthrough_gen
-  - name: audit
-  - name: .auth
-  - name: unittest_shell_hang_analyzer_gen
-  - name: .causally_consistent !.sharding
-  - name: .change_streams
-  - name: .change_stream_fuzzer
-  - name: .misc_js
-  - name: .concurrency !.large !.no_txns
-  - name: .concurrency .large !.no_txns
-    distros:
-    - rhel80-medium
-  - name: .config_fuzzer !.large
-  - name: .config_fuzzer .large
-    distros:
-    - rhel80-medium
-  - name: disk_wiredtiger
-  - name: .encrypt
-  - name: idl_tests
-  - name: initial_sync_fuzzer_gen
-  - name: fcv_upgrade_downgrade_replica_sets_jscore_passthrough_gen
-  - name: fcv_upgrade_downgrade_sharding_jscore_passthrough_gen
-  - name: fcv_upgrade_downgrade_sharded_collections_jscore_passthrough_gen
-  - name: jsCore
-    distros:
-    - rhel80-xlarge
-  - name: .jscore .common !jsCore
-  - name: jsCore_min_batch_repeat_queries_ese_gsm
-  - name: jsCore_txns_large_txns_format
-  - name: json_schema
-  - name: .jstestfuzz !.flow_control  # Flow control jstestfuzz take longer.
-  - name: libunwind_tests
-  - name: .multi_shard
-  - name: multi_stmt_txn_jscore_passthrough_with_migration_gen
-  - name: multiversion_gen
-  - name: .query_fuzzer !.feature_flag_guarded
-  - name: .random_multiversion_ds
-  - name: .read_write_concern .large
-    distros:
-    - rhel80-medium
-  - name: .read_write_concern !.large
-  - name: .replica_sets !.encrypt !.auth
-    distros:
-    - rhel80-xlarge
-  - name: replica_sets_api_version_jscore_passthrough_gen
-  - name: replica_sets_reconfig_jscore_passthrough_gen
-  - name: replica_sets_reconfig_jscore_stepdown_passthrough_gen
-    distros:
-    - rhel80-xlarge
-  - name: replica_sets_reconfig_kill_primary_jscore_passthrough_gen
-    distros:
-    - rhel80-xlarge
-  - name: change_streams_pre_images_replica_sets_stepdown_primary_jscore_passthrough_gen
-    distros:
-    - rhel80-xlarge
-  - name: change_streams_pre_images_replica_sets_kill_secondary_jscore_passthrough_gen
-    distros:
-    - rhel80-xlarge
-  - name: change_streams_change_collection_replica_sets_stepdown_primary_jscore_passthrough_gen
-    distros:
-    - rhel80-xlarge
-  - name: change_streams_change_collection_replica_sets_kill_secondary_jscore_passthrough_gen
-    distros:
-    - rhel80-xlarge
-  - name: retryable_writes_jscore_passthrough_gen
-  - name: retryable_writes_jscore_stepdown_passthrough_gen
-    distros:
-    - rhel80-medium
-  - name: .read_only
-  - name: .rollbackfuzzer
-  - name: sasl
-  - name: search
-  - name: search_auth
-  - name: search_pinned_connections_auth
-  - name: search_ssl
-  - name: session_jscore_passthrough
-  - name: sharded_collections_single_writes_without_shard_key_jscore_passthrough_gen
-  - name: .sharding .jscore !.wo_snapshot !.multi_stmt
-  - name: sharding_api_version_jscore_passthrough_gen
-  - name: sharding_api_strict_passthrough_gen
-  - name: .sharding .txns
-  - name: .sharding .common
-  - name: .updatefuzzer
-  - name: secondary_reads_passthrough_gen
-  - name: .serverless
-    distros:
-    - rhel80-xlarge
-  - name: vector_search
-  - name: vector_search_auth
-  - name: vector_search_ssl
+  - name: .development_critical !.requires_compile_variant !.incompatible_development_variant !.requires_all_feature_flags
+  - name: .release_critical !.requires_compile_variant !.incompatible_development_variant !.requires_all_feature_flags
+  - name: .default !.requires_compile_variant !.incompatible_development_variant !.requires_all_feature_flags
 
-# TODO (SERVER-75884): Remove this variant once we switch to config shard as the default.
-# This build variant is used to test suites that use sharded cluster fixture with config shard mode.
-- &enterprise-rhel-80-64-bit-dynamic-config-shard
-  <<: *linux_x86_dynamic_compile_variant_dependency
-  name: enterprise-rhel-80-64-bit-dynamic-config-shard
-  display_name: "* Shared Library Enterprise RHEL 8.0 (Config Shard)"
-  cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
-  modules:
-  - enterprise
-  run_on:
-  - rhel80-small
-  stepback: false
-  expansions: &enterprise-rhel-80-64-bit-dynamic-config-shard-expansions
-    <<: *enterprise-rhel-80-64-bit-dynamic-expansions
-    test_flags: >-
-      --configShard=any
-      --excludeWithAnyTags=config_shard_incompatible
-  tasks:
-  - name: aggregation_mongos_passthrough
-  - name: aggregation_one_shard_sharded_collections
-  - name: aggregation_sharded_collections_causally_consistent_passthrough
-  - name: aggregation_sharded_collections_passthrough
-  - name: causally_consistent_hedged_reads_jscore_passthrough_gen
-  - name: causally_consistent_jscore_passthrough_auth_gen
-  - name: causally_consistent_jscore_passthrough_gen
-  - name: change_streams
-  - name: change_streams_mongos_sessions_passthrough
-  - name: change_streams_multi_stmt_txn_mongos_passthrough
-  - name: change_streams_multi_stmt_txn_sharded_collections_passthrough
-  - name: change_streams_per_shard_cursor_passthrough
-  - name: fle2_sharding_high_cardinality
-  - name: fle2_sharding
-  - name: jstestfuzz_sharded_causal_consistency_gen
-  - name: jstestfuzz_sharded_continuous_stepdown_gen
-  - name: jstestfuzz_sharded_gen
-  - name: jstestfuzz_sharded_session_gen
-  - name: sharded_causally_consistent_jscore_passthrough_gen
-  - name: sharded_causally_consistent_read_concern_snapshot_passthrough_gen
-  - name: sharding_auth_gen
-  # Explicitly include instead of using tags to avoid pulling in replica_sets_multiversion_gen. This
-  # variant will be removed when config shards become the default, so this is only temporary.
-  - name: sharding_multiversion_gen
-  - name: .sharding .txns
-  # Skip csrs stepdown suite because most tests can't handle the first shard stepping down.
-  - name: .sharding .common !.csrs
-  - name: .sharding .jscore !.wo_snapshot !.multi_stmt
-  - name: .concurrency .sharded !.large
-  - name: .concurrency .sharded .large
-    distros:
-    - rhel80-medium
-  - name: .multi_shard
+# TODO (SERVER-86211): Re-enable this variant once all the tests work.
+# # TODO (SERVER-75884): Remove this variant once we switch to config shard as the default.
+# # This build variant is used to test suites that use sharded cluster fixture with config shard mode.
+# - &enterprise-rhel-80-64-bit-dynamic-config-shard
+#   <<: *linux_x86_dynamic_compile_variant_dependency
+#   name: enterprise-rhel-80-64-bit-dynamic-config-shard
+#   display_name: "* Shared Library Enterprise RHEL 8.0 (Config Shard)"
+#   cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
+#   run_on:
+#   - rhel80-small
+#   stepback: false
+#   expansions: &enterprise-rhel-80-64-bit-dynamic-config-shard-expansions
+#     <<: *enterprise-rhel-80-64-bit-dynamic-expansions
+#     test_flags: >-
+#       --configShard=any
+#       --excludeWithAnyTags=config_shard_incompatible
+#   tasks:
+#   - name: aggregation_mongos_passthrough
+#   - name: aggregation_one_shard_sharded_collections
+#   - name: aggregation_sharded_collections_causally_consistent_passthrough
+#   - name: aggregation_sharded_collections_passthrough
+#   - name: causally_consistent_hedged_reads_jscore_passthrough_gen
+#   - name: causally_consistent_jscore_passthrough_auth_gen
+#   - name: causally_consistent_jscore_passthrough_gen
+#   - name: change_streams
+#   - name: change_streams_mongos_sessions_passthrough
+#   - name: change_streams_multi_stmt_txn_mongos_passthrough
+#   - name: change_streams_multi_stmt_txn_sharded_collections_passthrough
+#   - name: change_streams_per_shard_cursor_passthrough
+#   - name: fle2_sharding_high_cardinality
+#   - name: fle2_sharding
+#   - name: jstestfuzz_sharded_causal_consistency_gen
+#   - name: jstestfuzz_sharded_continuous_stepdown_gen
+#   - name: jstestfuzz_sharded_gen
+#   - name: jstestfuzz_sharded_session_gen
+#   - name: sharded_causally_consistent_jscore_passthrough_gen
+#   - name: sharded_causally_consistent_read_concern_snapshot_passthrough_gen
+#   - name: sharding_auth_gen
+#   # Explicitly include instead of using tags to avoid pulling in replica_sets_multiversion_gen. This
+#   # variant will be removed when config shards become the default, so this is only temporary.
+#   - name: sharding_multiversion_gen
+#   - name: .sharding .txns
+#   # Skip csrs stepdown suite because most tests can't handle the first shard stepping down.
+#   - name: .sharding .common !.csrs !.feature_flag_guarded
+#   - name: .sharding .jscore !.wo_snapshot !.multi_stmt !.feature_flag_guarded
+#   - name: .concurrency .sharded !.large
+#   - name: .concurrency .sharded .large
+#     distros:
+#     - rhel80-medium
+#   - name: .multi_shard
 
 - &enterprise-rhel-80-64-bit-dynamic-classic-engine
   <<: *linux_x86_dynamic_compile_variant_dependency
   name: enterprise-rhel-80-64-bit-dynamic-classic-engine
   display_name: "Shared Library Enterprise RHEL 8.0 (Classic Engine)"
   cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
-  modules:
-  - enterprise
   run_on:
   - rhel80-small
   stepback: false
@@ -332,6 +233,7 @@ buildvariants:
     max_sub_suites: 5
     test_flags: >-
       --mongodSetParameters="{internalQueryFrameworkControl: forceClassicEngine}"
+      --excludeWithAnyTags=featureFlagSbeFull
     large_distro_name: rhel80-medium
   depends_on:
   - name: archive_dist_test_debug
@@ -342,22 +244,22 @@ buildvariants:
     # Without this we are adding extra dependencies on evergreen and it is causing strain
     omit_generated_tasks: true
   tasks:
-  - name: .aggfuzzer !.sbe_only !.cqf_only
+  - name: .aggfuzzer !.sbe_only
   - name: .aggregation !.sbe_only
   - name: .auth
   - name: .causally_consistent !.sharding
   - name: .change_stream_fuzzer
   - name: .change_streams
-  - name: .concurrency !.large !.no_txns !.compute_mode
-  - name: .concurrency .large !.no_txns !.compute_mode
+  - name: .concurrency !.large !.no_txns !.compute_mode !.feature_flag_guarded
+  - name: .concurrency .large !.no_txns !.compute_mode !.feature_flag_guarded
     distros:
     - rhel80-medium
   - name: .encrypt
   - name: .jscore .common !jsCore !.sbe_only
-  - name: .jstestfuzz !.flow_control
+  - name: .jstestfuzz !.feature_flag_guarded !.flow_control
   - name: .misc_js
   - name: .multi_shard
-  - name: .query_fuzzer !.cqf_only
+  - name: .query_fuzzer
   - name: query_golden_classic
   - name: .random_multiversion_ds
   - name: .read_only
@@ -369,8 +271,8 @@ buildvariants:
     distros:
     - rhel80-xlarge
   - name: .rollbackfuzzer
-  - name: .sharding .common
-  - name: .sharding .jscore !.wo_snapshot !.multi_stmt
+  - name: .sharding .common !.feature_flag_guarded
+  - name: .sharding .jscore !.wo_snapshot !.multi_stmt !.feature_flag_guarded
   - name: .sharding .txns
   - name: .serverless
     distros:
@@ -445,15 +347,13 @@ buildvariants:
   name: &rhel80-debug-aubsan-classic-engine rhel80-debug-aubsan-classic-engine
   display_name: "* {A,UB}SAN Enterprise RHEL 8.0 DEBUG (Classic Engine)"
   cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
-  modules:
-  - enterprise
   run_on:
   - rhel80-build
   expansions:
     <<: *aubsan-lite-required-expansions
     test_flags: >-
       --mongodSetParameters="{internalQueryFrameworkControl: forceClassicEngine}"
-      --excludeWithAnyTags=requires_ocsp_stapling,requires_increased_memlock_limits
+      --excludeWithAnyTags=requires_increased_memlock_limits,featureFlagSbeFull
   tasks:
   - name: .aggregation !.sbe_only
   - name: .auth
@@ -462,7 +362,7 @@ buildvariants:
   - name: .change_streams
   # - name: disk_wiredtiger
   - name: .misc_js
-  - name: .concurrency !.no_txns !.kill_terminate !.compute_mode
+  - name: .concurrency !.no_txns !.kill_terminate !.compute_mode !.feature_flag_guarded
   - name: .encrypt
   - name: external_auth
   - name: external_auth_aws
@@ -476,9 +376,9 @@ buildvariants:
   - name: jsCore_txns_large_txns_format
   - name: json_schema
   - name: .multi_shard .common
-  - name: .query_fuzzer !.cqf_only
+  - name: .query_fuzzer
   - name: .read_write_concern
-  - name: replica_sets_large_txns_format_jscore_passthrough
+  - name: replica_sets_large_txns_format_jscore_passthrough_gen
   - name: .replica_sets !.multi_oplog
   - name: .replica_sets .encrypt
   - name: .resharding_fuzzer
@@ -488,10 +388,9 @@ buildvariants:
   - name: sasl
   - name: secondary_reads_passthrough_gen
   - name: session_jscore_passthrough
-  - name: .sharding .jscore !.wo_snapshot
-  - name: .sharding .common !.csrs !.jstestfuzz
+  - name: .sharding .jscore !.wo_snapshot !.feature_flag_guarded
+  - name: .sharding .common !.csrs !.jstestfuzz !.feature_flag_guarded
   - name: .updatefuzzer
   - name: .serverless
   - name: unittest_shell_hang_analyzer_gen
   - name: .watchdog
-  - name: generate_buildid_to_debug_symbols_mapping

@@ -329,8 +329,12 @@ public:
     class Invocation final : public InvocationBaseGen {
     public:
         using InvocationBaseGen::InvocationBaseGen;
-        virtual bool supportsWriteConcern() const final {
+        bool supportsWriteConcern() const final {
             return false;
+        }
+
+        bool isSubjectToIngressAdmissionControl() const override {
+            return true;
         }
 
         void doCheckAuthorization(OperationContext* opCtx) const final {

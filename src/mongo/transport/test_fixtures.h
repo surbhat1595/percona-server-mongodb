@@ -37,10 +37,10 @@
 
 #include "mongo/db/dbmessage.h"
 #include "mongo/logv2/log.h"
-#include "mongo/stdx/thread.h"
 #include "mongo/transport/service_entry_point.h"
 #include "mongo/transport/session.h"
 #include "mongo/transport/transport_layer_mock.h"
+#include "mongo/unittest/join_thread.h"
 #include "mongo/unittest/temp_dir.h"
 #include "mongo/util/net/ssl_options.h"
 
@@ -74,14 +74,7 @@ private:
     std::queue<T> _q;
 };
 
-class JoinThread : public stdx::thread {
-public:
-    using stdx::thread::thread;
-    ~JoinThread() {
-        if (joinable())
-            join();
-    }
-};
+using unittest::JoinThread;
 
 struct SessionThread {
     struct StopException {};
@@ -156,7 +149,7 @@ public:
         MONGO_UNREACHABLE;
     }
 
-    void appendStats(BSONObjBuilder&) const {
+    void appendStats(BSONObjBuilder&) const override {
         MONGO_UNREACHABLE;
     }
 };
@@ -181,10 +174,6 @@ public:
 
     ~MockSessionManager() override {
         _join();
-    }
-
-    Status start() override {
-        return Status::OK();
     }
 
     void startSession(std::shared_ptr<transport::Session> session) override {

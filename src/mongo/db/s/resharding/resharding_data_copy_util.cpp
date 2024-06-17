@@ -439,8 +439,10 @@ boost::optional<SharedSemiFuture<void>> withSessionCheckedOut(OperationContext* 
     auto txnParticipant = TransactionParticipant::get(opCtx);
 
     try {
-        txnParticipant.beginOrContinue(
-            opCtx, {txnNumber}, boost::none /* autocommit */, boost::none /* startTransaction */);
+        txnParticipant.beginOrContinue(opCtx,
+                                       {txnNumber},
+                                       boost::none /* autocommit */,
+                                       TransactionParticipant::TransactionActions::kNone);
 
         if (stmtId && txnParticipant.checkStatementExecuted(opCtx, *stmtId)) {
             // Skip the incoming statement because it has already been logged locally.
@@ -515,8 +517,10 @@ void runWithTransactionFromOpCtx(OperationContext* opCtx,
         }
     });
 
-    txnParticipant.beginOrContinue(
-        opCtx, {txnNumber}, false /* autocommit */, true /* startTransaction */);
+    txnParticipant.beginOrContinue(opCtx,
+                                   {txnNumber},
+                                   false /* autocommit */,
+                                   TransactionParticipant::TransactionActions::kStart);
     txnParticipant.unstashTransactionResources(opCtx, "reshardingOplogApplication");
 
     func(opCtx);
@@ -566,7 +570,7 @@ void updateSessionRecord(OperationContext* opCtx,
         "resharding::data_copy::updateSessionRecord",
         NamespaceString::kSessionTransactionsTableNamespace,
         [&] {
-            AutoGetOplog oplogWrite(opCtx, OplogAccessMode::kWrite);
+            AutoGetOplogFastPath oplogWrite(opCtx, OplogAccessMode::kWrite);
 
             WriteUnitOfWork wuow(opCtx);
             repl::OpTime opTime = repl::logOp(opCtx, &oplogEntry);

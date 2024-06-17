@@ -2,10 +2,10 @@
 // directly through setClusterParameter.
 // @tags: [
 //   directly_against_shardsvrs_incompatible,
-//   featureFlagQuerySettings,
 //   simulate_atlas_proxy_incompatible,
 //   requires_sharding,
 //   requires_replication,
+//   requires_fcv_80,
 // ]
 
 import {assertDropAndRecreateCollection} from "jstests/libs/collection_drop_recreate.js";
@@ -29,7 +29,12 @@ let test =
                 },
             ]
         });
-        let querySetting = {indexHints: {allowedIndexes: ["groupID_1", {$natural: 1}]}};
+        const querySettings = {
+            indexHints: {
+                ns: {db: db.getName(), coll: coll.getName()},
+                allowedIndexes: ["groupID_1", {$natural: 1}]
+            }
+        };
 
         // Ensure that query settings cluster parameter is empty.
         qsutils.assertQueryShapeConfiguration([]);
@@ -38,23 +43,39 @@ let test =
         assert.commandFailedWithCode(db.adminCommand({
             setClusterParameter: {
                 querySettings: [
-                    querySetting,
+                    querySettings,
                 ]
             }
         }),
-                                     ErrorCodes.IllegalOperation);
+                                     ErrorCodes.NoSuchKey);
 
         // Ensure that 'querySettings' cluster parameter hasn't changed after invoking
         // 'setClusterParameter' command.
         qsutils.assertQueryShapeConfiguration([]);
 
         // Ensure that query settings can be configured through setQuerySettings command.
-        assert.commandWorked(db.adminCommand({setQuerySettings: query, settings: querySetting}));
+        assert.commandWorked(db.adminCommand({setQuerySettings: query, settings: querySettings}));
 
         // Ensure that 'querySettings' cluster parameter contains QueryShapeConfiguration after
         // invoking setQuerySettings command.
         qsutils.assertQueryShapeConfiguration(
-            [qsutils.makeQueryShapeConfiguration(querySetting, query)]);
+            [qsutils.makeQueryShapeConfiguration(querySettings, query)]);
+
+        // Ensure 'getClusterParameter' doesn't accept query settings parameter directly.
+        assert.commandFailedWithCode(db.adminCommand({getClusterParameter: "querySettings"}),
+                                     ErrorCodes.NoSuchKey);
+        assert.commandFailedWithCode(db.adminCommand({
+            getClusterParameter:
+                ["testIntClusterParameter", "querySettings", "testStrClusterParameter"]
+        }),
+                                     ErrorCodes.NoSuchKey);
+
+        // Ensure 'getClusterParameter' doesn't print query settings value with other cluster
+        // parameters.
+        const clusterParameters =
+            assert.commandWorked(db.adminCommand({getClusterParameter: "*"})).clusterParameters;
+        assert(!clusterParameters.some(parameter => parameter._id === "querySettings"),
+               "unexpected _id = 'querySettings' in " + tojson(clusterParameters));
 
         // Cleanup query settings.
         qsutils.removeAllQuerySettings();

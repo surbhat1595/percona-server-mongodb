@@ -55,7 +55,7 @@ const allCommands = {
     _configsvrCreateDatabase: {skip: isAnInternalCommand},
     _configsvrDropIndexCatalogEntry: {skip: isAnInternalCommand},
     _configsvrEnsureChunkVersionIsGreaterThan: {skip: isAnInternalCommand},
-    _configsvrGetHistoricalPlacement: {skip: isAnInternalCommand},  // TODO SERVER-73029 remove
+    _configsvrGetHistoricalPlacement: {skip: isAnInternalCommand},
     _configsvrMoveRange: {skip: isAnInternalCommand},
     _configsvrRefineCollectionShardKey: {skip: isAnInternalCommand},
     _configsvrRemoveChunks: {skip: isAnInternalCommand},
@@ -94,11 +94,13 @@ const allCommands = {
     _recvChunkStatus: {skip: isAnInternalCommand},
     _refreshQueryAnalyzerConfiguration: {skip: isAnInternalCommand},
     _shardsvrAbortReshardCollection: {skip: isAnInternalCommand},
+    _shardsvrBeginMigrationBlockingOperation: {skip: isAnInternalCommand},
     _shardsvrChangePrimary: {skip: isAnInternalCommand},
     _shardsvrCleanupStructuredEncryptionData: {skip: isAnInternalCommand},
     _shardsvrCleanupReshardCollection: {skip: isAnInternalCommand},
     _shardsvrCloneCatalogData: {skip: isAnInternalCommand},
     _shardsvrCompactStructuredEncryptionData: {skip: isAnInternalCommand},
+    _shardsvrConvertToCapped: {skip: isAnInternalCommand},
     _shardsvrRegisterIndex: {skip: isAnInternalCommand},
     _shardsvrCommitIndexParticipant: {skip: isAnInternalCommand},
     _shardsvrCommitReshardCollection: {skip: isAnInternalCommand},
@@ -112,6 +114,7 @@ const allCommands = {
     _shardsvrDropIndexes: {skip: isAnInternalCommand},
     _shardsvrCreateCollectionParticipant: {skip: isAnInternalCommand},
     _shardsvrCoordinateMultiUpdate: {skip: isAnInternalCommand},
+    _shardsvrEndMigrationBlockingOperation: {skip: isAnInternalCommand},
     _shardsvrGetStatsForBalancing: {skip: isAnInternalCommand},
     _shardsvrInsertGlobalIndexKey: {skip: isAnInternalCommand},
     _shardsvrDeleteGlobalIndexKey: {skip: isAnInternalCommand},
@@ -140,6 +143,7 @@ const allCommands = {
     _shardsvrCollMod: {skip: isAnInternalCommand},
     _shardsvrCollModParticipant: {skip: isAnInternalCommand},
     _shardsvrParticipantBlock: {skip: isAnInternalCommand},
+    _shardsvrUntrackUnsplittableCollection: {skip: isAnInternalCommand},
     _shardsvrCheckMetadataConsistency: {skip: isAnInternalCommand},
     _shardsvrCheckMetadataConsistencyParticipant: {skip: isAnInternalCommand},
     streams_startStreamProcessor: {skip: isAnInternalCommand},
@@ -150,6 +154,9 @@ const allCommands = {
     streams_getStats: {skip: isAnInternalCommand},
     streams_testOnlyInsert: {skip: isAnInternalCommand},
     streams_getMetrics: {skip: isAnInternalCommand},
+    streams_updateFeatureFlags: {skip: isAnInternalCommand},
+    streams_testOnlyGetFeatureFlags: {skip: isAnInternalCommand},
+    streams_writeCheckpoint: {skip: isAnInternalCommand},
     _transferMods: {skip: isAnInternalCommand},
     _vectorClockPersist: {skip: isAnInternalCommand},
     abortMoveCollection: {
@@ -268,6 +275,7 @@ const allCommands = {
         skip: "requires additional authentication setup"
     },
     autoCompact: {
+        checkFeatureFlag: "AutoCompact",
         command: {autoCompact: false},
         isAdminCommand: true,
         isReplSetOnly: true,
@@ -354,8 +362,6 @@ const allCommands = {
     checkMetadataConsistency: {
         isAdminCommand: true,
         isShardedOnly: true,
-        // TODO SERVER-70396: Remove check when this feature flag is removed.
-        checkFeatureFlag: "CheckMetadataConsistency",
         command: {checkMetadataConsistency: 1},
     },
     checkShardingIndex: {
@@ -1469,7 +1475,7 @@ const allCommands = {
         doesNotRunOnStandalone: true,
         command: {
             setQuerySettings: {find: collName, $db: dbName, filter: {a: 1}},
-            settings: {indexHints: {allowedIndexes: ["a_1"]}}
+            settings: {indexHints: {ns: {db: dbName, coll: collName}, allowedIndexes: ["a_1"]}}
         }
     },
     removeQuerySettings: {
@@ -1542,6 +1548,7 @@ const allCommands = {
         // Skipping command because it requires an actual file path for recording traffic to.
         skip: "requires an actual file path to record traffic to",
     },
+    sysprofile: {skip: isAnInternalCommand},
     testDeprecation: {skip: isAnInternalCommand},
     testDeprecationInVersion2: {skip: isAnInternalCommand},
     testInternalTransactions: {skip: isAnInternalCommand},

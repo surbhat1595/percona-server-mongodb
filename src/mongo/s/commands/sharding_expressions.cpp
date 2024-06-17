@@ -396,8 +396,6 @@ private:
 }  // namespace
 
 Value ExpressionInternalOwningShard::evaluate(const Document& root, Variables* variables) const {
-    // TODO SERVER-71519: Add support for handling stale exception from mongos with
-    // enableFinerGrainedCatalogCacheRefresh.
     uassert(6868600,
             "$_internalOwningShard is currently not supported on mongos",
             !serverGlobalParams.clusterRole.hasExclusively(ClusterRole::RouterServer));
@@ -428,8 +426,9 @@ Value ExpressionInternalOwningShard::evaluate(const Document& root, Variables* v
     const auto cri =
         uassertStatusOK(catalogCache->getCollectionRoutingInfo(opCtx, ns, true /* allowLocks */));
 
-    // Invalidate catalog cache if the chunk manager version is stale.
-    if (cri.cm.getVersion().isOlderThan(shardVersion.placementVersion())) {
+    // Invalidate catalog cache if the chunk manager is not yet available or its version is stale.
+    if (!cri.cm.hasRoutingTable() ||
+        cri.cm.getVersion().isOlderThan(shardVersion.placementVersion())) {
         catalogCache->invalidateShardOrEntireCollectionEntryForShardedCollection(
             ns, boost::none /* wanted */, ShardId());
 

@@ -362,13 +362,15 @@ bool killExhaust(const Message& in, ServiceEntryPoint* sep, Client* client) {
         const auto& [cmd, firstElement] = body.firstElement();
         if (cmd != "getMore"_sd)
             return false;
-        sep->handleRequest(client->makeOperationContext().get(),
-                           OpMsgRequest::fromDBAndBody(
-                               inRequest.getDbName(),
-                               KillCursorsCommandRequest(
-                                   NamespaceStringUtil::deserialize(inRequest.getDbName(),
-                                                                    body["collection"].String()),
-                                   {CursorId{firstElement.Long()}})
+        auto opCtx = client->makeOperationContext();
+        auto dbName = inRequest.parseDbName();
+        sep->handleRequest(opCtx.get(),
+                           OpMsgRequestBuilder::create(
+                               auth::ValidatedTenancyScope::get(opCtx.get()),
+                               dbName,
+                               KillCursorsCommandRequest(NamespaceStringUtil::deserialize(
+                                                             dbName, body["collection"].String()),
+                                                         {CursorId{firstElement.Long()}})
                                    .toBSON(BSONObj{}))
                                .serialize())
             .get();
@@ -380,7 +382,8 @@ bool killExhaust(const Message& in, ServiceEntryPoint* sep, Client* client) {
 }
 
 // Counts the # of responses to completed operations that we were unable to send back to the client.
-CounterMetric unsendableCompletedResponses("operation.unsendableCompletedResponses");
+auto& unsendableCompletedResponses =
+    *MetricBuilder<Counter64>("operation.unsendableCompletedResponses");
 }  // namespace
 
 class SessionWorkflow::Impl {
@@ -731,7 +734,10 @@ void SessionWorkflow::Impl::_acceptResponse(DbResponse response) {
     Message& toSink = response.response;
     if (toSink.empty())
         return;
-    invariant(!OpMsg::isFlagSet(work.in(), OpMsg::kMoreToCome));
+
+    tassert(ErrorCodes::InternalError,
+            "Attempted to respond to fire-and-forget request",
+            !OpMsg::isFlagSet(work.in(), OpMsg::kMoreToCome));
     invariant(!OpMsg::isFlagSet(toSink, OpMsg::kChecksumPresent));
 
     // Update the header for the response message.
@@ -796,8 +802,12 @@ void SessionWorkflow::Impl::_scheduleIteration() try {
         }
 
         try {
-            _doOneIteration().get();
-            _scheduleIteration();
+            // All available service executors use dedicated threads, so it's okay to
+            // run eager futures in an ordinary loop to bypass scheduler overhead.
+            while (true) {
+                _doOneIteration().get();
+                _work = nullptr;
+            }
         } catch (const DBException& ex) {
             _onLoopError(ex.toStatus());
         }

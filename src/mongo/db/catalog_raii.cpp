@@ -46,6 +46,7 @@
 #include "mongo/db/catalog/collection_yield_restore.h"
 #include "mongo/db/catalog/database_holder.h"
 #include "mongo/db/concurrency/exception_util.h"
+#include "mongo/db/direct_connection_util.h"
 #include "mongo/db/repl/collection_utils.h"
 #include "mongo/db/s/collection_sharding_state.h"
 #include "mongo/db/s/database_sharding_state.h"
@@ -147,6 +148,10 @@ AutoGetDb::AutoGetDb(OperationContext* opCtx,
           auto databaseHolder = DatabaseHolder::get(opCtx);
           return databaseHolder->getDb(opCtx, dbName);
       }()) {
+    // Check if this operation is a direct connection and if it is authorized to be one after
+    // acquiring the lock.
+    direct_connection_util::checkDirectShardOperationAllowed(opCtx, dbName);
+
     // The 'primary' database must be version checked for sharding.
     DatabaseShardingState::assertMatchingDbVersion(opCtx, _dbName);
 }
@@ -336,6 +341,10 @@ AutoGetCollection::AutoGetCollection(OperationContext* opCtx,
         _autoDb.refreshDbReferenceIfNull(opCtx);
     }
 
+    // Recheck if this operation is a direct connection and if it is authorized to be one after
+    // acquiring the collection locks.
+    direct_connection_util::checkDirectShardOperationAllowed(opCtx, _resolvedNss.dbName());
+
     verifyDbAndCollection(
         opCtx, modeColl, nsOrUUID, _resolvedNss, _coll.get(), _autoDb.getDb(), verifyWriteEligible);
     for (auto iter = secondaryNssOrUUIDsBegin; iter != secondaryNssOrUUIDsEnd; ++iter) {
@@ -352,6 +361,9 @@ AutoGetCollection::AutoGetCollection(OperationContext* opCtx,
                               databaseHolder->getDb(opCtx, secondaryDbName),
                               verifyWriteEligible);
     }
+
+    const auto receivedShardVersion{
+        OperationShardingState::get(opCtx).getShardVersion(_resolvedNss)};
 
     if (_coll) {
         // Fetch and store the sharding collection description data needed for use during the
@@ -371,11 +383,23 @@ AutoGetCollection::AutoGetCollection(OperationContext* opCtx,
 
         checkCollectionUUIDMismatch(opCtx, *catalog, _resolvedNss, _coll, options._expectedUUID);
 
+        if (receivedShardVersion && *receivedShardVersion == ShardVersion::UNSHARDED()) {
+            shard_role_details::checkLocalCatalogIsValidForUnshardedShardVersion(
+                opCtx, *catalog, _coll, _resolvedNss);
+        }
+
+        if (receivedShardVersion) {
+            shard_role_details::checkShardingAndLocalCatalogCollectionUUIDMatch(
+                opCtx, _resolvedNss, *receivedShardVersion, collDesc, _coll);
+        }
+
         return;
     }
 
-    const auto receivedShardVersion{
-        OperationShardingState::get(opCtx).getShardVersion(_resolvedNss)};
+    if (receivedShardVersion && *receivedShardVersion == ShardVersion::UNSHARDED()) {
+        shard_role_details::checkLocalCatalogIsValidForUnshardedShardVersion(
+            opCtx, *catalog, _coll, _resolvedNss);
+    }
 
     if (!options._expectedUUID) {
         // We only need to look up a view if an expected collection UUID was not provided. If this
@@ -618,17 +642,25 @@ ReadSourceScope::~ReadSourceScope() {
     }
 }
 
-AutoGetOplog::AutoGetOplog(OperationContext* opCtx, OplogAccessMode mode, Date_t deadline) {
+AutoGetOplogFastPath::AutoGetOplogFastPath(OperationContext* opCtx,
+                                           OplogAccessMode mode,
+                                           Date_t deadline,
+                                           const AutoGetOplogFastPathOptions& options) {
     auto lockMode = (mode == OplogAccessMode::kRead) ? MODE_IS : MODE_IX;
     if (mode == OplogAccessMode::kLogOp) {
         // Invariant that global lock is already held for kLogOp mode.
         invariant(shard_role_details::getLocker(opCtx)->isWriteLocked());
     } else {
-        _globalLock.emplace(opCtx, lockMode, deadline, Lock::InterruptBehavior::kThrow);
+        _globalLock.emplace(opCtx,
+                            lockMode,
+                            deadline,
+                            Lock::InterruptBehavior::kThrow,
+                            Lock::GlobalLockSkipOptions{.skipRSTLLock = options.skipRSTLLock});
     }
 
     _oplogInfo = LocalOplogInfo::get(opCtx);
-    _oplog = CollectionPtr(_oplogInfo->getCollection());
+    _oplog = CollectionPtr(CollectionCatalog::get(opCtx)->lookupCollectionByNamespace(
+        opCtx, NamespaceString::kRsOplogNamespace));
     _oplog.makeYieldable(opCtx, LockedCollectionYieldRestore(opCtx, _oplog));
 }
 

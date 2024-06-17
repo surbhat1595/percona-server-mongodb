@@ -120,7 +120,7 @@ TEST(WiredTigerRecordStoreTest, SizeStorer1) {
         WiredTigerRecordStore::Params params;
         params.nss = NamespaceString::createNamespaceString_forTest("a.b");
         params.ident = ident;
-        params.engineName = kWiredTigerEngineName;
+        params.engineName = std::string{kWiredTigerEngineName};
         params.isCapped = false;
         params.keyFormat = KeyFormat::Long;
         params.overwrite = true;
@@ -130,7 +130,7 @@ TEST(WiredTigerRecordStoreTest, SizeStorer1) {
         params.tracksSizeAdjustments = true;
         params.forceUpdateWithFullDocument = false;
 
-        auto ret = new StandardWiredTigerRecordStore(nullptr, opCtx.get(), params);
+        auto ret = new WiredTigerRecordStore(nullptr, opCtx.get(), params);
         ret->postConstructorInit(opCtx.get(), params.nss);
         rs.reset(ret);
     }
@@ -169,7 +169,7 @@ TEST(WiredTigerRecordStoreTest, SizeStorer1) {
 
 class SizeStorerUpdateTest : public mongo::unittest::Test {
 private:
-    virtual void setUp() {
+    void setUp() override {
         harnessHelper.reset(new WiredTigerHarnessHelper());
         sizeStorer.reset(new WiredTigerSizeStorer(
             harnessHelper->conn(), WiredTigerKVEngine::kTableUriPrefix + "sizeStorer"));
@@ -179,7 +179,7 @@ private:
         ident = wtrs->getIdent();
         uri = wtrs->getURI();
     }
-    virtual void tearDown() {
+    void tearDown() override {
         rs.reset(nullptr);
         sizeStorer->flush(false);
         sizeStorer.reset(nullptr);

@@ -63,7 +63,7 @@ namespace mongo {
 
 class QueryPlannerTest : public mongo::unittest::Test {
 protected:
-    void setUp();
+    void setUp() override;
 
     /**
      * Clean up any previous state from a call to runQuery*()
@@ -280,7 +280,7 @@ protected:
 
     BSONObj queryObj;
     std::unique_ptr<CanonicalQuery> cq;
-    QueryPlannerParams params;
+    QueryPlannerParams params{QueryPlannerParams::ArgsForTest{}};
     Status plannerStatus = Status::OK();
     std::vector<std::unique_ptr<QuerySolution>> solns;
 

@@ -45,9 +45,6 @@ parameters:
 
 ## Patch Aliases
 patch_aliases:
-- alias: aggfuzzer
-  variant: '^(linux-64)$'
-  task: '^(aggregation_multiversion_fuzzer.*)$'
 - alias: embedded
   variant: '.*'
   task: 'embedded_.*'
@@ -60,9 +57,16 @@ patch_aliases:
 - alias: security
   variant: '^(.*security-patch-only|linux-x86-dynamic-compile|windows-compile-required)$'
   task: '.*'
-- alias: bazel
-  variant_tags: ["bazel_check"]
-  task: '.*'
+
+commit_queue_aliases:
+- variant: "commit-queue"
+  task: "^(bazel_.*|run_.*|compile_.*|lint_.*|validate_commit_message|jsCore|version_gen_validation|resmoke_validation_tests)$"
+  variant_tags: []
+  task_tags: []
+- variant: "^(amazon-linux2-arm64-dynamic-compile|linux-x86-dynamic-compile-required)$"
+  task: "clang_tidy.*"
+  variant_tags: []
+  task_tags: []
 
 #######################################
 #               Modules               #
@@ -70,52 +74,10 @@ patch_aliases:
 # if a module is added and to be added to the manifest
 # be sure to add the module to git.get_project revisions parameter
 modules:
-- name: enterprise
-  repo: git@github.com:10gen/mongo-enterprise-modules.git
-  prefix: src/mongo/db/modules
-  branch: master
-
 - name: wtdevelop
   repo: git@github.com:wiredtiger/wiredtiger.git
   prefix: src/third_party
   branch: develop
-
-- name: dsi
-  repo: git@github.com:10gen/dsi.git
-  prefix: ${workdir}/src
-  branch: master
-- name: genny
-  repo: git@github.com:10gen/genny.git
-  prefix: ${workdir}/src
-  branch: master
-- name: workloads
-  repo: git@github.com:10gen/workloads.git
-  prefix: ${workdir}/src
-  branch: master
-- name: linkbench
-  repo: git@github.com:10gen/linkbench.git
-  prefix: ${workdir}/src
-  branch: master
-- name: linkbench2
-  repo: git@github.com:10gen/linkbench2.git
-  prefix: ${workdir}/src
-  branch: master
-- name: tsbs
-  repo: git@github.com:mongodb-forks/tsbs.git
-  prefix: ${workdir}/src
-  branch: main
-- name: YCSB
-  repo: git@github.com:mongodb-labs/YCSB.git
-  prefix: ${workdir}/src
-  branch: production
-- name: flamegraph
-  repo: git@github.com:mongodb-forks/flamegraph.git
-  prefix: ${workdir}/src
-  branch: master
-- name: PrivateWorkloads
-  repo: git@github.com:10gen/PrivateWorkloads.git
-  prefix: ${workdir}/src
-  branch: production
 
 # Pre task steps
 pre:
@@ -125,8 +87,11 @@ pre:
 # Post task steps
 post:
 - func: "f_expansions_write"
+- func: "cleanup external auth OIDC resources"
 - func: "upload npm logs"
+- func: "attach scons logs"
 - func: "attach local resmoke invocation"
+- func: "attach bazel invocation"
 - func: "attach multiversion exclude tags"
 - func: "attach report"
 - func: "attach task errors"
@@ -136,16 +101,37 @@ post:
 - func: "attach wiki page"
 - func: "upload docker compose"
 - func: "upload jstestfuzz minimized output"
+- func: "upload clang tidy results"
 - func: "kill processes"
 - func: "save local client logs"
 - func: "save jepsen artifacts"
 - func: "save mongo coredumps"
 - func: "generate hang analyzer tasks"
 - func: "save failed unittests"
+- func: "save unstripped dbtest"
 - func: "save hang analyzer debugger files"
 - func: "save disk statistics"
 - func: "save system resource information"
 - func: "save UndoDB recordings"
+- func: "save libfuzzertest corpora"
+- func: "remove files"
+  vars:
+    files: >-
+      src/resmoke_error_code
+      src/build/scons/config.log
+      src/*.gcda.gcov
+      src/gcov-intermediate-files.tgz
+      src/*.core src/*.mdmp src/*.core.gz src/*.mdmp.gz
+      mongo-coredumps.json
+      src/dist-unittests/bin/*
+      src/dist-unittests/lib/*
+      mongo-unittests.tgz
+      src/debugger*.*
+      src/mongo-hanganalyzer.tgz
+      diskstats.tgz
+      system-resource-info.tgz
+      ${report_file|src/report.json}
+      ${archive_file|src/archive.json}
 - func: "umount shared scons directory"
 - func: "umount tmp directory"
 - func: "cleanup FUSE watchdog"

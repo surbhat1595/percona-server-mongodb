@@ -87,6 +87,11 @@ namespace mongo::projection_ast {
 class Projection;
 }
 
+namespace mongo {
+class AccumulationStatement;
+struct WindowFunctionStatement;
+}  // namespace mongo
+
 namespace mongo::stage_builder {
 
 class PlanStageSlots;
@@ -119,6 +124,17 @@ std::unique_ptr<sbe::EExpression> generateNullOrMissing(sbe::FrameId frameId,
                                                         sbe::value::SlotId slotId);
 
 std::unique_ptr<sbe::EExpression> generateNullOrMissing(std::unique_ptr<sbe::EExpression> arg);
+
+/**
+ * Generates an EExpression that checks if the input expression is null, missing, or undefined.
+ */
+std::unique_ptr<sbe::EExpression> generateNullMissingOrUndefined(const sbe::EVariable& var);
+
+std::unique_ptr<sbe::EExpression> generateNullMissingOrUndefined(sbe::FrameId frameId,
+                                                                 sbe::value::SlotId slotId);
+
+std::unique_ptr<sbe::EExpression> generateNullMissingOrUndefined(
+    std::unique_ptr<sbe::EExpression> arg);
 
 /**
  * Generates an EExpression that checks if the input expression is a non-numeric type _assuming
@@ -218,6 +234,9 @@ std::unique_ptr<sbe::EExpression> buildMultiBranchConditionalFromCaseValuePairs(
  */
 std::unique_ptr<sbe::PlanStage> makeLimitCoScanTree(PlanNodeId planNodeId, long long limit = 1);
 
+std::unique_ptr<sbe::EExpression> makeFillEmpty(std::unique_ptr<sbe::EExpression> expr,
+                                                std::unique_ptr<sbe::EExpression> altExpr);
+
 /**
  * Check if expression returns Nothing and return boolean false if so. Otherwise, return the
  * expression.
@@ -274,7 +293,7 @@ inline auto makeStrConstant(StringData str) {
     return sbe::makeE<sbe::EConstant>(tag, val);
 }
 
-std::unique_ptr<sbe::EExpression> makeVariable(sbe::value::SlotId slotId);
+std::unique_ptr<sbe::EExpression> makeVariable(SbSlot ts);
 
 std::unique_ptr<sbe::EExpression> makeVariable(sbe::FrameId frameId, sbe::value::SlotId slotId);
 
@@ -379,11 +398,12 @@ SbStage makeProject(SbStage stage, PlanNodeId nodeId, Ts&&... pack) {
 }
 
 SbStage makeHashAgg(SbStage stage,
-                    sbe::value::SlotVector gbs,
+                    const sbe::value::SlotVector& gbs,
                     sbe::AggExprVector aggs,
                     boost::optional<sbe::value::SlotId> collatorSlot,
                     bool allowDiskUse,
                     sbe::SlotExprPairVector mergingExprs,
+                    PlanYieldPolicy* yieldPolicy,
                     PlanNodeId planNodeId);
 
 std::unique_ptr<sbe::EExpression> makeIf(std::unique_ptr<sbe::EExpression> condExpr,
@@ -416,7 +436,8 @@ std::pair<sbe::value::SlotId, std::unique_ptr<sbe::PlanStage>> generateVirtualSc
     sbe::value::SlotIdGenerator* slotIdGenerator,
     sbe::value::TypeTags arrTag,
     sbe::value::Value arrVal,
-    PlanYieldPolicy* yieldPolicy = nullptr);
+    PlanYieldPolicy* yieldPolicy = nullptr,
+    PlanNodeId planNodeId = kEmptyPlanNodeId);
 
 /**
  * Make a mock scan with multiple output slots from an BSON array. This method does NOT assume
@@ -427,7 +448,8 @@ std::pair<sbe::value::SlotVector, std::unique_ptr<sbe::PlanStage>> generateVirtu
     int numSlots,
     sbe::value::TypeTags arrTag,
     sbe::value::Value arrVal,
-    PlanYieldPolicy* yieldPolicy = nullptr);
+    PlanYieldPolicy* yieldPolicy = nullptr,
+    PlanNodeId planNodeId = kEmptyPlanNodeId);
 
 /**
  * Helper functions for converting from BSONObj/BSONArray to SBE Object/Array. Caller owns the SBE
@@ -440,6 +462,71 @@ std::pair<sbe::value::TypeTags, sbe::value::Value> makeValue(const BSONArray& ba
  * Returns a BSON type mask of all data types coercible to date.
  */
 uint32_t dateTypeMask();
+
+struct BuildSortKeysPlan {
+    enum Type {
+        kTraverseFields,
+        kCallGenSortKey,
+        kCallGenCheapSortKey,
+    };
+
+    Type type = kCallGenSortKey;
+    bool needsResultObj = true;
+    std::vector<std::string> fieldsForSortKeys;
+};
+
+struct SortKeysExprs {
+    SbExpr::Vector keyExprs;
+    SbExpr parallelArraysCheckExpr;
+    SbExpr fullKeyExpr;
+};
+
+BuildSortKeysPlan makeSortKeysPlan(const SortPattern& sortPattern,
+                                   bool allowCallGenCheapSortKey = false);
+
+SortKeysExprs buildSortKeys(StageBuilderState& state,
+                            const BuildSortKeysPlan& plan,
+                            const SortPattern& sortPattern,
+                            const PlanStageSlots& outputs,
+                            SbExpr sortSpecExpr = {});
+
+/**
+ * Retrieves the accumulation op name from 'accStmt' and returns it.
+ */
+StringData getAccumulationOpName(const AccumulationStatement& accStmt);
+
+/**
+ * Retrieves the window function op name from 'accStmt' and returns it.
+ */
+StringData getWindowFunctionOpName(const WindowFunctionStatement& wfStmt);
+
+/**
+ * Return true iff 'name', 'accStmt', or 'wfStmt' is one of $topN, $bottomN, $minN, $maxN,
+ * $firstN, or $lastN.
+ */
+bool isAccumulatorN(StringData name);
+bool isAccumulatorN(const AccumulationStatement& accStmt);
+bool isAccumulatorN(const WindowFunctionStatement& wfStmt);
+
+/**
+ * Return true iff 'name', 'accStmt', or 'wfStmt' is $topN or $bottomN.
+ */
+bool isTopBottomN(StringData name);
+bool isTopBottomN(const AccumulationStatement& accStmt);
+bool isTopBottomN(const WindowFunctionStatement& wfStmt);
+
+/**
+ * Gets the internal pointer to the SortPattern (if there is one) inside 'accStmt' or 'wfStmt'.
+ */
+boost::optional<SortPattern> getSortPattern(const AccumulationStatement& accStmt);
+boost::optional<SortPattern> getSortPattern(const WindowFunctionStatement& wfStmt);
+
+/**
+ * Creates a SortSpec object from a SortPattern.
+ */
+std::unique_ptr<sbe::SortSpec> makeSortSpecFromSortPattern(const SortPattern& sortPattern);
+std::unique_ptr<sbe::SortSpec> makeSortSpecFromSortPattern(
+    const boost::optional<SortPattern>& sortPattern);
 
 /**
  * Constructs local binding with inner expression built by 'innerExprFunc' and variables assigned
@@ -477,15 +564,15 @@ std::unique_ptr<sbe::EExpression> makeLocalBind(sbe::value::FrameIdGenerator* fr
 }
 
 std::unique_ptr<sbe::PlanStage> makeLoopJoinForFetch(std::unique_ptr<sbe::PlanStage> inputStage,
-                                                     sbe::value::SlotId resultSlot,
-                                                     sbe::value::SlotId recordIdSlot,
+                                                     SbSlot resultSlot,
+                                                     SbSlot recordIdSlot,
                                                      std::vector<std::string> fields,
                                                      sbe::value::SlotVector fieldSlots,
-                                                     sbe::value::SlotId seekRecordIdSlot,
-                                                     sbe::value::SlotId snapshotIdSlot,
-                                                     sbe::value::SlotId indexIdentSlot,
-                                                     sbe::value::SlotId indexKeySlot,
-                                                     sbe::value::SlotId indexKeyPatternSlot,
+                                                     SbSlot seekRecordIdSlot,
+                                                     SbSlot snapshotIdSlot,
+                                                     SbSlot indexIdentSlot,
+                                                     SbSlot indexKeySlot,
+                                                     SbSlot indexKeyPatternSlot,
                                                      const CollectionPtr& collToFetch,
                                                      PlanNodeId planNodeId,
                                                      sbe::value::SlotVector slotsToForward);
@@ -1115,10 +1202,10 @@ std::pair<std::vector<std::string>, std::vector<ProjectNode>> getProjectNodes(
  *
  * The order of slots in 'outSlots' will match the order of field paths in 'fields'.
  */
-std::pair<std::unique_ptr<sbe::PlanStage>, sbe::value::SlotVector> projectFieldsToSlots(
+std::pair<std::unique_ptr<sbe::PlanStage>, SbSlotVector> projectFieldsToSlots(
     std::unique_ptr<sbe::PlanStage> stage,
     const std::vector<std::string>& fields,
-    sbe::value::SlotId resultSlot,
+    SbSlot resultSlot,
     PlanNodeId nodeId,
     sbe::value::SlotIdGenerator* slotIdGenerator,
     StageBuilderState& state,

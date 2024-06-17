@@ -682,7 +682,9 @@ void InitialSyncer::_startInitialSyncAttemptCallback(
         // since that would also set the all_durable point to zero. We specifically don't set
         // the stable timestamp here because that will trigger taking a first stable checkpoint even
         // though the initialDataTimestamp is still set to kAllowUnstableCheckpointsSentinel.
-        storageEngine->setOldestTimestamp(kTimestampOne);
+        // We need to use force in case we are resetting the oldest timestamp backwards after a
+        // failed initial sync attempt.
+        storageEngine->setOldestTimestamp(kTimestampOne, true /*force*/);
     }
 
     LOGV2_DEBUG(21168,
@@ -1540,7 +1542,7 @@ void InitialSyncer::_getNextApplierBatchCallback(
 
     std::string logMsg = str::stream()
         << "Initial Syncer is about to apply the next oplog batch of size: "
-        << batchResult.getValue().size();
+        << batchResult.getValue().count();
     pauseAtInitialSyncFuzzerSyncronizationPoints(logMsg);
 
     if (MONGO_unlikely(failInitialSyncBeforeApplyingBatch.shouldFail())) {
@@ -1555,7 +1557,7 @@ void InitialSyncer::_getNextApplierBatchCallback(
     }
 
     // Schedule MultiApplier if we have operations to apply.
-    const auto& ops = batchResult.getValue();
+    const auto& ops = batchResult.getValue().getBatch();
     if (!ops.empty()) {
         _fetchCount.store(0);
         MultiApplier::MultiApplyFn applyBatchOfOperationsFn = [this](OperationContext* opCtx,
@@ -2118,12 +2120,12 @@ void InitialSyncer::_shutdownComponent_inlock(Component& component) {
     component->shutdown();
 }
 
-StatusWith<std::vector<OplogEntry>> InitialSyncer::_getNextApplierBatch_inlock() {
+StatusWith<OplogApplierBatch> InitialSyncer::_getNextApplierBatch_inlock() {
     // If the fail-point is active, delay the apply batch by returning an empty batch so that
     // _getNextApplierBatchCallback() will reschedule itself at a later time.
     // See InitialSyncerInterface::Options::getApplierBatchCallbackRetryWait.
     if (MONGO_unlikely(rsSyncApplyStop.shouldFail())) {
-        return std::vector<OplogEntry>();
+        return OplogApplierBatch();
     }
 
     // Obtain next batch of operations from OplogApplier.
@@ -2162,11 +2164,8 @@ Status InitialSyncer::_enqueueDocuments(OplogFetcher::Documents::const_iterator 
 
     invariant(_oplogBuffer);
 
-    // Wait for enough space.
-    _oplogApplier->waitForSpace(makeOpCtx().get(), info.toApplyDocumentBytes);
-
     // Buffer docs for later application.
-    _oplogApplier->enqueue(makeOpCtx().get(), begin, end);
+    _oplogApplier->enqueue(makeOpCtx().get(), begin, end, info.toApplyDocumentBytes);
 
     _lastFetched = info.lastDocument;
 

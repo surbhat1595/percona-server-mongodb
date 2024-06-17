@@ -39,6 +39,7 @@
 
 #include "mongo/db/operation_context.h"
 #include "mongo/db/storage/journal_listener.h"
+#include "mongo/db/storage/wiredtiger/wiredtiger_compiled_configuration.h"
 #include "mongo/db/storage/wiredtiger/wiredtiger_snapshot_manager.h"
 #include "mongo/platform/atomic_word.h"
 #include "mongo/platform/mutex.h"
@@ -54,8 +55,8 @@ class WiredTigerSessionCache;
 
 class WiredTigerCachedCursor {
 public:
-    WiredTigerCachedCursor(uint64_t id, uint64_t gen, WT_CURSOR* cursor, const std::string& config)
-        : _id(id), _gen(gen), _cursor(cursor), _config(config) {}
+    WiredTigerCachedCursor(uint64_t id, uint64_t gen, WT_CURSOR* cursor, std::string config)
+        : _id(id), _gen(gen), _cursor(cursor), _config(std::move(config)) {}
 
     uint64_t _id;   // Source ID, assigned to each URI
     uint64_t _gen;  // Generation, used to age out old cursors
@@ -135,7 +136,7 @@ public:
      * Additionally calls into the WiredTigerKVEngine to see if the SizeStorer needs to be flushed.
      * The SizeStorer gets flushed on a periodic basis.
      */
-    void releaseCursor(uint64_t id, WT_CURSOR* cursor, const std::string& config);
+    void releaseCursor(uint64_t id, WT_CURSOR* cursor, std::string config);
 
     /**
      * Close a cursor without releasing it into the cursor cache.
@@ -178,6 +179,14 @@ public:
         return _idleExpireTime;
     }
 
+    void setCompiledConfigurationsPerConnection(CompiledConfigurationsPerConnection* compiled) {
+        _compiled = compiled;
+    }
+
+    CompiledConfigurationsPerConnection* getCompiledConfigurationsPerConnection() {
+        return _compiled;
+    }
+
 private:
     friend class WiredTigerSessionCache;
     friend class WiredTigerKVEngine;
@@ -191,11 +200,14 @@ private:
     }
 
     const uint64_t _epoch;
-    WiredTigerSessionCache* _cache;  // not owned
-    WT_SESSION* _session;            // owned
-    CursorCache _cursors;            // owned
+    WT_SESSION* _session;  // owned
+    CursorCache _cursors;  // owned
     uint64_t _cursorGen;
     int _cursorsOut;
+
+    WiredTigerSessionCache* _cache;                  // not owned
+    CompiledConfigurationsPerConnection* _compiled;  // not owned
+
     Date_t _idleExpireTime;
 };
 
@@ -206,7 +218,9 @@ private:
 class WiredTigerSessionCache {
 public:
     WiredTigerSessionCache(WiredTigerKVEngine* engine);
-    WiredTigerSessionCache(WT_CONNECTION* conn, ClockSource* cs);
+    WiredTigerSessionCache(WT_CONNECTION* conn,
+                           ClockSource* cs,
+                           WiredTigerKVEngine* engine = nullptr);
     ~WiredTigerSessionCache();
 
     /**
@@ -299,6 +313,11 @@ public:
      */
     bool isShuttingDown();
 
+    /**
+     * Restart a previously shut down cache.
+     */
+    void restart();
+
     bool isEphemeral();
 
     /**
@@ -367,6 +386,10 @@ public:
         return _prepareCommitOrAbortCounter.loadRelaxed();
     }
 
+    CompiledConfigurationsPerConnection* getCompiledConfigurations() {
+        return &_compiledConfigurations;
+    }
+
 private:
     /**
      * Looks up the journal listener under a mutex along.
@@ -376,15 +399,16 @@ private:
     std::pair<JournalListener*, boost::optional<JournalListener::Token>>
     _getJournalListenerWithToken(OperationContext* opCtx, UseJournalListener useListener);
 
-    WiredTigerKVEngine* _engine;      // not owned, might be NULL
     WT_CONNECTION* _conn;             // not owned
     ClockSource* const _clockSource;  // not owned
+    WiredTigerKVEngine* _engine;      // not owned, might be NULL
     WiredTigerSnapshotManager _snapshotManager;
+    CompiledConfigurationsPerConnection _compiledConfigurations;
 
     // Used as follows:
     //   The low 31 bits are a count of active calls that need to block shutdown.
     //   The high bit is a flag that is set if and only if we're shutting down.
-    AtomicWord<unsigned> _shuttingDown;
+    AtomicWord<unsigned> _shuttingDown{0};
     static const uint32_t kShuttingDownMask = 1 << 31;
 
     Mutex _cacheLock = MONGO_MAKE_LATCH("WiredTigerSessionCache::_cacheLock");

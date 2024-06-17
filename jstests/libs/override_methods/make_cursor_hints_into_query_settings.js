@@ -1,4 +1,4 @@
-import {getWinningPlan, isIdhack} from "jstests/libs/analyze_plan.js";
+import {getQueryPlanners, getWinningPlan, isIdhackOrExpress} from "jstests/libs/analyze_plan.js";
 import {OverrideHelpers} from "jstests/libs/override_methods/override_helpers.js";
 import {QuerySettingsUtils} from "jstests/libs/query_settings_utils.js";
 
@@ -7,8 +7,7 @@ function hasSupportedHint(cmdObj) {
 }
 
 function getCommandType(cmdObj) {
-    // TODO SERVER-79231 Add 'aggregate' to the supported commands.
-    const supportedCommands = ["find", "distinct"];
+    const supportedCommands = ["aggregate", "distinct", "find"];
     return supportedCommands.find((key) => (key in cmdObj));
 }
 
@@ -30,7 +29,8 @@ function requestsResumeToken(cmdObj) {
 function isIdHackQuery(db, cmdObj) {
     const {hint, ...queryWithoutHint} = cmdObj;
     const explain = db.runCommand({explain: queryWithoutHint});
-    return isIdhack(db, getWinningPlan(explain.queryPlanner));
+    const queryPlanners = getQueryPlanners(explain);
+    return queryPlanners.every(queryPlanner => isIdhackOrExpress(db, getWinningPlan(queryPlanner)));
 }
 
 function getInnerCommand(cmdObj) {
@@ -63,10 +63,18 @@ function runCommandOverride(conn, dbName, cmdName, cmdObj, clientFunction, makeF
 
     // Construct the equivalent query settings, remove the hint from the original command object and
     // build the representative query.
-    const settings = {indexHints: {allowedIndexes: [innerCmd.hint]}};
+    const allowedIndexes = [innerCmd.hint];
     delete innerCmd.hint;
     const commandType = getCommandType(innerCmd);
-    const collectionName = innerCmd[commandType];
+
+    // If the collection used is a view, determine the underyling collection.
+    const collInfos = db.getCollectionInfos({name: innerCmd[commandType]});
+    if (!collInfos) {
+        return originalResponse;
+    }
+    const collectionName = collInfos[0].options.viewOn || innerCmd[commandType];
+
+    const settings = {indexHints: {ns: {db: dbName, coll: collectionName}, allowedIndexes}};
     const qsutils = new QuerySettingsUtils(db, collectionName);
     const representativeQuery = (function() {
         switch (commandType) {
@@ -81,13 +89,8 @@ function runCommandOverride(conn, dbName, cmdName, cmdObj, clientFunction, makeF
 
     // Set the equivalent query settings, execute the original command without the hint, and finally
     // remove all the settings.
-    qsutils.removeAllQuerySettings();
-    assert.commandWorked(db.adminCommand({setQuerySettings: representativeQuery, settings}));
-    qsutils.assertQueryShapeConfiguration(
-        [qsutils.makeQueryShapeConfiguration(settings, representativeQuery)]);
-    const response = clientFunction.apply(conn, makeFuncArgs(cmdObj));
-    qsutils.removeAllQuerySettings();
-    return response;
+    return qsutils.withQuerySettings(
+        representativeQuery, settings, () => clientFunction.apply(conn, makeFuncArgs(cmdObj)));
 }
 
 // Override the default runCommand with our custom version.

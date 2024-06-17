@@ -1,7 +1,7 @@
 /**
  * Tests deleteOne with id without shard key works with StaleConfigError.
  *
- * @tags: [featureFlagUpdateOneWithIdWithoutShardKey, requires_fcv_73]
+ * @tags: [requires_fcv_80, temp_disabled_embedded_router_uncategorized]
  */
 
 import {CreateShardedCollectionUtil} from "jstests/sharding/libs/create_sharded_collection_util.js";
@@ -33,7 +33,9 @@ assert.commandWorked(
     db.adminCommand({moveChunk: coll.getFullName(), find: {x: -1}, to: st.shard1.shardName}));
 
 // This delete via mongos1 should trigger a StaleConfigError as mongos1 is not aware of moved chunk.
-const res = st.s1.getDB(jsTestName()).coll.deleteOne({_id: -1});
+const session = st.s1.startSession({retryWrites: true});
+const sessionColl = session.getDatabase(db.getName()).getCollection(db.coll.getName());
+const res = sessionColl.deleteOne({_id: -1});
 assert.commandWorked(res);
 assert.eq(res.deletedCount, 1);
 

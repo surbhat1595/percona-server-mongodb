@@ -36,9 +36,10 @@ executor:
           enableMajorityReadConcern: ''
           hashTestNamesForMultitenancy: true
           logRetryAttempts: true
+          multitenancyExpectPrefix: true
           networkErrorAndTxnOverrideConfig:
             retryOnNetworkErrors: true
-          overrideRetryAttempts: 3
+          overrideRetryAttempts: 6
           sessionOptions:
             readConcern:
               level: majority
@@ -121,7 +122,6 @@ selector:
   - jstests/core/**/project_with_collation.js
   - jstests/core/**/currentop.js
   - jstests/core/**/fsync.js
-  - jstests/core/**/killop_drop_collection.js
   - jstests/core/**/explain_upsert.js
   - jstests/core/**/indexes_multiple_commands.js
   - jstests/core/**/create_indexes.js

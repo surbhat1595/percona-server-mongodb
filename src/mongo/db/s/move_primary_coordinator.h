@@ -64,7 +64,7 @@ public:
     using Phase = MovePrimaryCoordinatorPhaseEnum;
 
     MovePrimaryCoordinator(ShardingDDLCoordinatorService* service, const BSONObj& initialState);
-    virtual ~MovePrimaryCoordinator() = default;
+    ~MovePrimaryCoordinator() override = default;
 
     void checkIfOptionsConflict(const BSONObj& doc) const override;
     bool canAlwaysStartWhenUserWritesAreDisabled() const override;
@@ -143,6 +143,11 @@ private:
      * (`kExitCriticalSection` phase).
      */
     void clearDbMetadataOnPrimary(OperationContext* opCtx) const;
+
+    /*
+     * Clears the filtering metadata in the local catalog cache for every cloned collection.
+     */
+    void clearFilteringMetadata(OperationContext* opCtx) const;
 
     /**
      * Drops stale collections on the donor.

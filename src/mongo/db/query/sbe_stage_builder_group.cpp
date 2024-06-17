@@ -38,27 +38,6 @@
 
 namespace mongo::stage_builder {
 namespace {
-
-// Return true iff 'accStmt' is a $topN or $bottomN operator.
-bool isTopBottomN(const AccumulationStatement& accStmt) {
-    return accStmt.expr.name == AccumulatorTopBottomN<kTop, true>::getName() ||
-        accStmt.expr.name == AccumulatorTopBottomN<kBottom, true>::getName() ||
-        accStmt.expr.name == AccumulatorTopBottomN<kTop, false>::getName() ||
-        accStmt.expr.name == AccumulatorTopBottomN<kBottom, false>::getName();
-}
-
-// Return true iff 'accStmt' is one of $topN, $bottomN, $minN, $maxN, $firstN or $lastN.
-bool isAccumulatorN(const AccumulationStatement& accStmt) {
-    return accStmt.expr.name == AccumulatorTopBottomN<kTop, true>::getName() ||
-        accStmt.expr.name == AccumulatorTopBottomN<kBottom, true>::getName() ||
-        accStmt.expr.name == AccumulatorTopBottomN<kTop, false>::getName() ||
-        accStmt.expr.name == AccumulatorTopBottomN<kBottom, false>::getName() ||
-        accStmt.expr.name == AccumulatorMinN::getName() ||
-        accStmt.expr.name == AccumulatorMaxN::getName() ||
-        accStmt.expr.name == AccumulatorFirstN::getName() ||
-        accStmt.expr.name == AccumulatorLastN::getName();
-}
-
 template <typename F>
 struct FieldPathAndCondPreVisitor : public SelectiveConstExpressionVisitorBase {
     // To avoid overloaded-virtual warnings.
@@ -85,10 +64,14 @@ void walkAndActOnFieldPaths(Expression* expr, const F& fn) {
     expression_walker::walk(expr, &walker);
 }
 
-// Compute what values 'groupNode' will need from its child node in order to build expressions for
-// the group-by key ("_id") and the accumulators.
+/**
+ * Compute what values 'groupNode' will need from its child node in order to build expressions for
+ * the group-by key ("_id") and the accumulators.
+ */
 MONGO_COMPILER_NOINLINE
 PlanStageReqs computeChildReqsForGroup(const PlanStageReqs& reqs, const GroupNode& groupNode) {
+    constexpr bool allowCallGenCheapSortKey = true;
+
     auto childReqs = reqs.copyForChild().setResultObj().clearAllFields();
 
     // If the group node references any top level fields, we take all of them and add them to
@@ -102,7 +85,7 @@ PlanStageReqs computeChildReqsForGroup(const PlanStageReqs& reqs, const GroupNod
     if (!groupNode.needWholeDocument) {
         // Tracks whether we need to require our child to produce a materialized result object.
         bool rootDocIsNeeded = false;
-        bool sortKeyIsNeeded = false;
+        bool sortKeysNeedRootDoc = false;
         auto referencesRoot = [&](const ExpressionFieldPath* fieldExpr) {
             rootDocIsNeeded = rootDocIsNeeded || fieldExpr->isROOT();
         };
@@ -111,14 +94,22 @@ PlanStageReqs computeChildReqsForGroup(const PlanStageReqs& reqs, const GroupNod
         walkAndActOnFieldPaths(groupNode.groupByExpression.get(), referencesRoot);
         for (const auto& accStmt : groupNode.accumulators) {
             walkAndActOnFieldPaths(accStmt.expr.argument.get(), referencesRoot);
-            if (isTopBottomN(accStmt)) {
-                sortKeyIsNeeded = true;
+
+            if (auto sortPattern = getSortPattern(accStmt)) {
+                auto plan = makeSortKeysPlan(*sortPattern, allowCallGenCheapSortKey);
+
+                if (!plan.fieldsForSortKeys.empty()) {
+                    childReqs.setFields(std::move(plan.fieldsForSortKeys));
+                }
+                if (plan.needsResultObj) {
+                    sortKeysNeedRootDoc = true;
+                }
             }
         }
 
         // If any accumulator requires generating sort key, we cannot clear the result requirement
         // from 'childReqs'.
-        if (!sortKeyIsNeeded) {
+        if (!sortKeysNeedRootDoc) {
             const auto& childNode = *groupNode.children[0];
 
             // If the group node doesn't have any dependency (e.g. $count) or if the dependency can
@@ -144,8 +135,10 @@ PlanStageReqs computeChildReqsForGroup(const PlanStageReqs& reqs, const GroupNod
     return childReqs;
 }
 
-// Collect the FieldPath expressions referenced by a GroupNode that should be exposed in a slot for
-// the group stage to work properly.
+/**
+ * Collect the FieldPath expressions referenced by a GroupNode that should be exposed in a slot for
+ * the group stage to work properly.
+ */
 MONGO_COMPILER_NOINLINE
 StringMap<const ExpressionFieldPath*> collectFieldPaths(const GroupNode* groupNode) {
     StringMap<const ExpressionFieldPath*> groupFieldMap;
@@ -174,292 +167,612 @@ StringMap<const ExpressionFieldPath*> collectFieldPaths(const GroupNode* groupNo
     return groupFieldMap;
 }
 
-// Given a list of field path expressions used in the group-by ('_id') and accumulator expressions
-// of a $group, populate a slot in 'childOutputs' for each path found. Each slot is bound via a
-// ProjectStage to an EExpression that evaluates the path traversal.
+namespace {
+struct PartitionedFieldPathExprs {
+    StringDataMap<const ExpressionFieldPath*> exprsOnBlockSlots;
+    StringDataMap<const ExpressionFieldPath*> exprsOnScalarSlots;
+};
+
+/*
+ * Returns whether or not the given field path expression references a block. Assumes
+ * that we are in block mode.
+ */
+bool doesExpressionReferenceBlock(const PlanStageSlots& outputs,
+                                  const ExpressionFieldPath& expressionFieldPath) {
+    tassert(8829002, "Expected outputs to have block output", outputs.hasBlockOutput());
+
+    if (expressionFieldPath.getVariableId() != Variables::kRootId) {
+        return false;
+    }
+
+    auto& fieldPath = expressionFieldPath.getFieldPath();
+
+    // The first component should be $$CURRENT.
+    tassert(
+        8829001, "Field path should have more than one component", fieldPath.getPathLength() > 1);
+
+    // Top level field is at index 1.
+    auto firstComponent = fieldPath.getFieldName(1);
+
+    // Since we're in block mode, the child MUST provide this kField, as there is no result
+    // obj.  Note: in the future, it may be possible that the child provides the full
+    // kPathExpr, but not the kField for the top level. This code will have to handle that
+    // case.
+
+    auto outputSlot =
+        outputs.get(PlanStageReqs::UnownedSlotName(PlanStageReqs::kField, firstComponent));
+
+    // Skip any field path expressions on blocks. Those will be computed after block_to_row.
+    if (outputSlot.typeSig &&
+        (*outputSlot.typeSig)
+            .containsAny(TypeSignature::kBlockType.include(TypeSignature::kCellType))) {
+        return true;
+    }
+
+    return false;
+}
+
+/**
+ * Splits the given map of field path expressions into those which refer to block fields and those
+ * which refer to scalar fields.
+ */
 MONGO_COMPILER_NOINLINE
-SbStage projectPathTraversalsForGroupBy(
+PartitionedFieldPathExprs partitionFieldPathExprsByBlock(
+    PlanStageSlots& outputs, const StringMap<const ExpressionFieldPath*>& groupFieldMapIn) {
+
+    PartitionedFieldPathExprs out;
+    for (auto& [fieldStr, expressionFieldPath] : groupFieldMapIn) {
+        if (doesExpressionReferenceBlock(outputs, *expressionFieldPath)) {
+            out.exprsOnBlockSlots.emplace(fieldStr, expressionFieldPath);
+        } else {
+            out.exprsOnScalarSlots.emplace(fieldStr, expressionFieldPath);
+        }
+    }
+    return out;
+}
+}  // namespace
+
+/**
+ * Given a list of field path expressions used in the group-by ('_id') and accumulator expressions
+ * of a $group, populate a slot in 'outputs' for each path found. Each slot is bound to an SBE
+ * EExpression (via a ProjectStage) that evaluates the path traversal.
+ */
+MONGO_COMPILER_NOINLINE
+SbStage projectFieldPathsToPathExprSlots(
     StageBuilderState& state,
     const GroupNode& groupNode,
-    SbStage childStage,
-    PlanStageSlots& childOutputs,
-    const StringMap<const ExpressionFieldPath*>& groupFieldMap) {
-    // Slot to EExpression map that tracks path traversal expressions. Note that this only contains
-    // expressions corresponding to paths which require traversals (that is, if there exists a
-    // top level field slot corresponding to a field, we take care not to add it to 'projects' to
-    // avoid rebinding a slot).
-    sbe::SlotExprPairVector projects;
+    SbStage stage,
+    PlanStageSlots& outputs,
+    const StringDataMap<const ExpressionFieldPath*>& groupFieldMap) {
+    SbBuilder b(state, groupNode.nodeId());
 
-    // Populates 'projects' and 'childOutputs' with an expression and/or a slot, respectively,
-    // corresponding to the value of 'fieldExpr'.
+    SbExprOptSbSlotVector projects;
     for (auto& fp : groupFieldMap) {
-        // Either find a slot corresponding to it or generate an expression for it and bind it to a
-        // slot.
-        TypedSlot slot;
-        auto result = stage_builder::generateExpression(
-            state, fp.second, childOutputs.getResultObjIfExists(), &childOutputs);
+        projects.emplace_back(stage_builder::generateExpression(
+                                  state, fp.second, outputs.getResultObjIfExists(), outputs),
+                              boost::none);
+    }
 
-        if (result.hasSlot()) {
-            slot = TypedSlot{*result.getSlot(), TypeSignature::kAnyScalarType};
-        } else {
-            auto newSlot = state.slotId();
-            auto expr = result.extractExpr(state);
-            projects.emplace_back(newSlot, std::move(expr.expr));
-            slot = TypedSlot{newSlot, expr.typeSignature};
+    if (!projects.empty()) {
+        auto [outStage, outSlots] =
+            b.makeProject(std::move(stage), buildVariableTypes(outputs), std::move(projects));
+        stage = std::move(outStage);
+
+        size_t i = 0;
+        for (auto& fp : groupFieldMap) {
+            auto name = PlanStageSlots::OwnedSlotName(PlanStageSlots::kPathExpr, fp.first);
+            outputs.set(std::move(name), outSlots[i]);
+            ++i;
         }
-        childOutputs.set(std::make_pair(PlanStageSlots::kPathExpr, fp.first), slot);
     }
 
-    if (!projects.empty()) {
-        childStage = makeProject(std::move(childStage), std::move(projects), groupNode.nodeId());
-    }
-
-    return childStage;
+    return stage;
 }
-
+/**
+ * Ensure that all kPathExpr reqs are available in slots.
+ */
 MONGO_COMPILER_NOINLINE
-std::tuple<sbe::value::SlotVector, SbStage, SbExpr> generateGroupByObjKey(
+SbStage makePathExprsAvailableInSlots(
     StageBuilderState& state,
-    ExpressionObject* idExprObj,
-    const PlanStageSlots& outputs,
+    const GroupNode& groupNode,
     SbStage stage,
-    PlanNodeId nodeId) {
-    SbExprBuilder b(state);
+    PlanStageSlots& outputs,
+    const StringMap<const ExpressionFieldPath*>& groupFieldMapIn) {
 
-    auto rootSlot = outputs.getResultObjIfExists();
-
-    VariableTypes varTypes = buildVariableTypes(outputs);
-    sbe::value::SlotVector slots;
-    SbExpr::Vector exprs;
-    sbe::SlotExprPairVector projects;
-
-    for (auto&& [fieldName, fieldExpr] : idExprObj->getChildExpressions()) {
-        auto abt = abt::unwrap(
-            generateExpression(state, fieldExpr.get(), rootSlot, &outputs).extractABT());
-
-        auto slot = state.slotId();
-        projects.emplace_back(slot, abtToExpr(abt, state, &varTypes).expr);
-
-        slots.push_back(slot);
-        exprs.emplace_back(b.makeStrConstant(fieldName));
-        exprs.emplace_back(SbVar{slot});
+    if (groupFieldMapIn.empty()) {
+        // No work to do.
+        return stage;
     }
 
-    if (!projects.empty()) {
-        stage = makeProject(std::move(stage), std::move(projects), nodeId);
-    }
+    SbBuilder b(state, groupNode.nodeId());
 
-    // When there's only one field in the document _id expression, 'Nothing' is converted to
-    // 'Null'.
-    // TODO SERVER-21992: Remove the following block because this block emulates the classic
-    // engine's buggy behavior. With index that can handle 'Nothing' and 'Null' differently,
-    // SERVER-21992 issue goes away and the distinct scan should be able to return 'Nothing' and
-    // 'Null' separately.
-    if (slots.size() == 1) {
-        auto slot = state.slotId();
+    if (outputs.hasBlockOutput()) {
+        // We are currently running in block mode. Some slots will contain blocks, and others may
+        // contain scalars. The scalar slots contain values common to the entire block, like the
+        // timeseries 'meta' field.
 
-        auto e = b.makeFillEmptyNull(std::move(exprs[1]));
-        stage = makeProject(std::move(stage), nodeId, slot, e.extractExpr(state).expr);
+        // First we compute the field path expressions for any expressions which are on scalars. We
+        // want to do these before we close the block processing pipeline.
 
-        slots[0] = slot;
-        exprs[1] = SbVar{slots[0]};
-    }
+        auto [blockFieldPathExprs, nonBlockFieldPathExprs] =
+            partitionFieldPathExprsByBlock(outputs, groupFieldMapIn);
 
-    // Composes the _id document and assigns a slot to the result using 'newObj' function if _id
-    // should produce a document.
-    auto newObjExpr = b.makeFunction("newObj"_sd, std::move(exprs));
-    return {slots, std::move(stage), std::move(newObjExpr)};
-}
+        stage = projectFieldPathsToPathExprSlots(
+            state, groupNode, std::move(stage), outputs, nonBlockFieldPathExprs);
 
-MONGO_COMPILER_NOINLINE
-std::tuple<sbe::value::SlotVector, SbStage, SbExpr> generateGroupBySingleKey(
-    StageBuilderState& state,
-    const boost::intrusive_ptr<Expression>& idExpr,
-    const PlanStageSlots& outputs,
-    SbStage stage,
-    PlanNodeId nodeId) {
-    auto rootSlot = outputs.getResultObjIfExists();
-    // The group-by field may end up being 'Nothing' and in that case _id: null will be
-    // returned. Calling 'makeFillEmptyNull' for the group-by field takes care of that.
-    SbExprBuilder b(state);
-    auto groupBySbExpr =
-        b.makeFillEmptyNull(generateExpression(state, idExpr.get(), rootSlot, &outputs));
-    VariableTypes varTypes = buildVariableTypes(outputs);
-    auto groupByExpr = groupBySbExpr.extractExpr(state, &varTypes);
+        if (blockFieldPathExprs.empty()) {
+            // If there are no block field path exprs, we actually don't need to close the block
+            // pipeline.
+            return stage;
+        }
 
-    if (auto groupByExprConstant = groupByExpr.expr->as<sbe::EConstant>(); groupByExprConstant) {
-        return {sbe::value::SlotVector{}, std::move(stage), std::move(groupByExpr.expr)};
+        stage = buildBlockToRow(std::move(stage), state, outputs);
+
+
+        // Now that we've done the block to row, evaluate the path
+        // expressions for the slots that were blocks, and are now scalars.
+        stage = projectFieldPathsToPathExprSlots(
+            state, groupNode, std::move(stage), outputs, blockFieldPathExprs);
     } else {
-        auto slot = state.slotId();
-        stage = makeProject(std::move(stage), nodeId, slot, std::move(groupByExpr.expr));
-        return {sbe::value::SlotVector{slot}, std::move(stage), SbExpr{}};
+        // We have to convert to StringDataMap to call projectFieldPathsToPathExprSlots().
+        StringDataMap<const ExpressionFieldPath*> groupFieldMap;
+        groupFieldMap.insert(groupFieldMapIn.begin(), groupFieldMapIn.end());
+        stage = projectFieldPathsToPathExprSlots(
+            state, groupNode, std::move(stage), outputs, groupFieldMap);
+    }
+    return stage;
+}
+
+MONGO_COMPILER_NOINLINE
+SbExpr::Vector generateGroupByKeyExprs(StageBuilderState& state,
+                                       Expression* idExpr,
+                                       const PlanStageSlots& outputs) {
+    SbExprBuilder b(state);
+    SbExpr::Vector exprs;
+    auto rootSlot = outputs.getResultObjIfExists();
+
+    auto idExprObj = dynamic_cast<ExpressionObject*>(idExpr);
+    if (idExprObj) {
+        for (auto&& [fieldName, fieldExpr] : idExprObj->getChildExpressions()) {
+            exprs.emplace_back(generateExpression(state, fieldExpr.get(), rootSlot, outputs));
+        }
+        // When there's only one field in the document _id expression, 'Nothing' is converted to
+        // 'Null'.
+        // TODO SERVER-21992: Remove the following block because this block emulates the classic
+        // engine's buggy behavior. With index that can handle 'Nothing' and 'Null' differently,
+        // SERVER-21992 issue goes away and the distinct scan should be able to return 'Nothing'
+        // and 'Null' separately.
+        if (exprs.size() == 1) {
+            exprs[0] = b.makeFillEmptyNull(std::move(exprs[0]));
+        }
+    } else {
+        // The group-by field may end up being 'Nothing' and in that case _id: null will be
+        // returned. Calling 'makeFillEmptyNull' for the group-by field takes care of that.
+        exprs.emplace_back(
+            b.makeFillEmptyNull(generateExpression(state, idExpr, rootSlot, outputs)));
+    }
+
+    return exprs;
+}
+
+std::variant<Expression*, BSONElement> getTopBottomNValueExprHelper(
+    const AccumulationStatement& accStmt) {
+    auto accOp = AccumOp{accStmt};
+
+    auto expObj = dynamic_cast<ExpressionObject*>(accStmt.expr.argument.get());
+    auto expConst =
+        !expObj ? dynamic_cast<ExpressionConstant*>(accStmt.expr.argument.get()) : nullptr;
+
+    tassert(5807015,
+            str::stream() << accOp.getOpName() << " accumulator must have an object argument",
+            expObj || (expConst && expConst->getValue().isObject()));
+
+    if (expObj) {
+        for (auto& [key, value] : expObj->getChildExpressions()) {
+            if (key == AccumulatorN::kFieldNameOutput) {
+                return value.get();
+            }
+        }
+    } else {
+        auto objConst = expConst->getValue();
+        auto objBson = objConst.getDocument().toBson();
+        auto outputField = objBson.getField(AccumulatorN::kFieldNameOutput);
+        if (outputField.ok()) {
+            return outputField;
+        }
+    }
+
+    tasserted(5807016,
+              str::stream() << accOp.getOpName()
+                            << " accumulator must have an output field in the argument");
+}
+
+SbExpr getTopBottomNValueExpr(StageBuilderState& state,
+                              const AccumulationStatement& accStmt,
+                              const PlanStageSlots& outputs) {
+    SbExprBuilder b(state);
+
+    auto valueExpr = getTopBottomNValueExprHelper(accStmt);
+
+    if (holds_alternative<Expression*>(valueExpr)) {
+        auto rootSlot = outputs.getResultObjIfExists();
+        auto* expr = get<Expression*>(valueExpr);
+        return b.makeFillEmptyNull(generateExpression(state, expr, rootSlot, outputs));
+    } else {
+        auto [tag, val] = sbe::bson::convertFrom<false /*View*/>(get<BSONElement>(valueExpr));
+        return b.makeConstant(tag, val);
     }
 }
 
-template <TopBottomSense sense, bool single>
-SbExpr getSortSpecFromTopBottomN(const AccumulatorTopBottomN<sense, single>* acc,
-                                 StageBuilderState& state) {
+std::pair<SbExpr::Vector, bool> getBlockTopBottomNValueExpr(StageBuilderState& state,
+                                                            const AccumulationStatement& accStmt,
+                                                            const PlanStageSlots& outputs) {
     SbExprBuilder b(state);
+    bool isArray = false;
 
-    tassert(5807013, "Accumulator state must not be null", acc);
-    auto sortPattern =
-        acc->getSortPattern().serialize(SortPattern::SortKeySerialization::kForExplain).toBson();
-    auto sortSpec = std::make_unique<sbe::SortSpec>(sortPattern);
-    auto sortSpecExpr = b.makeConstant(sbe::value::TypeTags::sortSpec,
-                                       sbe::value::bitcastFrom<sbe::SortSpec*>(sortSpec.release()));
-    return sortSpecExpr;
+    auto valueExpr = getTopBottomNValueExprHelper(accStmt);
+
+    if (holds_alternative<Expression*>(valueExpr)) {
+        auto rootSlot = outputs.getResultObjIfExists();
+        auto* expr = get<Expression*>(valueExpr);
+        auto* arrayExpr = dynamic_cast<ExpressionArray*>(expr);
+
+        if (arrayExpr) {
+            isArray = true;
+
+            // If the output field from the $top/$bottom AccumulationStatement is an
+            // ExpressionArray, then we set 'isArray' to true and return a vector of the
+            // element expressions.
+            SbExpr::Vector sbExprs;
+            for (size_t i = 0; i < arrayExpr->getChildren().size(); ++i) {
+                auto* elemExpr = arrayExpr->getChildren()[i].get();
+                sbExprs.emplace_back(
+                    b.makeFillEmptyNull(generateExpression(state, elemExpr, rootSlot, outputs)));
+            }
+
+            return {std::move(sbExprs), isArray};
+        }
+
+        auto sbExpr = b.makeFillEmptyNull(generateExpression(state, expr, rootSlot, outputs));
+        return {SbExpr::makeSeq(std::move(sbExpr)), isArray};
+    } else {
+        auto [tag, val] = sbe::bson::convertFrom<false /*View*/>(get<BSONElement>(valueExpr));
+        return {SbExpr::makeSeq(b.makeConstant(tag, val)), isArray};
+    }
 }
 
-SbExpr getSortSpecFromTopBottomN(const AccumulationStatement& accStmt, StageBuilderState& state) {
-    auto acc = accStmt.expr.factory();
-    if (accStmt.expr.name == AccumulatorTopBottomN<kTop, true>::getName()) {
-        return getSortSpecFromTopBottomN(
-            dynamic_cast<AccumulatorTopBottomN<kTop, true>*>(acc.get()), state);
-    } else if (accStmt.expr.name == AccumulatorTopBottomN<kBottom, true>::getName()) {
-        return getSortSpecFromTopBottomN(
-            dynamic_cast<AccumulatorTopBottomN<kBottom, true>*>(acc.get()), state);
-    } else if (accStmt.expr.name == AccumulatorTopBottomN<kTop, false>::getName()) {
-        return getSortSpecFromTopBottomN(
-            dynamic_cast<AccumulatorTopBottomN<kTop, false>*>(acc.get()), state);
-    } else if (accStmt.expr.name == AccumulatorTopBottomN<kBottom, false>::getName()) {
-        return getSortSpecFromTopBottomN(
-            dynamic_cast<AccumulatorTopBottomN<kBottom, false>*>(acc.get()), state);
+SbExpr getTopBottomNSortByExpr(StageBuilderState& state,
+                               const AccumulationStatement& accStmt,
+                               const PlanStageSlots& outputs,
+                               SbExpr sortSpecExpr) {
+    constexpr bool allowCallGenCheapSortKey = true;
+
+    SbExprBuilder b(state);
+
+    auto sortPattern = getSortPattern(accStmt);
+    tassert(8774900, "Expected sort pattern for $top/$bottom accumulator", sortPattern.has_value());
+
+    auto plan = makeSortKeysPlan(*sortPattern, allowCallGenCheapSortKey);
+    auto sortKeys = buildSortKeys(state, plan, *sortPattern, outputs, std::move(sortSpecExpr));
+
+    if (plan.type == BuildSortKeysPlan::kTraverseFields) {
+        auto fullKeyExpr = [&] {
+            if (sortPattern->size() == 1) {
+                // When the sort pattern has only one part, we return the sole part's key expr.
+                return std::move(sortKeys.keyExprs[0]);
+            } else if (sortPattern->size() > 1) {
+                // When the sort pattern has more than one part, we return an array containing
+                // each part's key expr (in order).
+                return b.makeFunction("newArray", std::move(sortKeys.keyExprs));
+            } else {
+                MONGO_UNREACHABLE;
+            }
+        }();
+
+        if (sortKeys.parallelArraysCheckExpr) {
+            // If 'parallelArraysCheckExpr' is not null, inject it into 'fullKeyExpr'.
+            auto parallelArraysError =
+                b.makeFail(ErrorCodes::BadValue, "cannot sort with keys that are parallel arrays");
+
+            fullKeyExpr = b.makeIf(std::move(sortKeys.parallelArraysCheckExpr),
+                                   std::move(fullKeyExpr),
+                                   std::move(parallelArraysError));
+        }
+
+        return fullKeyExpr;
+    } else if (plan.type == BuildSortKeysPlan::kCallGenCheapSortKey) {
+        // generateCheapSortKey() returns a SortKeyComponentVector, but we need an array of
+        // keys (or the sole part's key in cases where the sort pattern has only one part),
+        // so we generate a call to sortKeyComponentVectorToArray() to perform the conversion.
+        return b.makeFunction("sortKeyComponentVectorToArray", std::move(sortKeys.fullKeyExpr));
     } else {
         MONGO_UNREACHABLE;
     }
 }
 
-sbe::value::SlotVector generateAccumulator(StageBuilderState& state,
-                                           const AccumulationStatement& accStmt,
-                                           const PlanStageSlots& outputs,
-                                           sbe::value::SlotIdGenerator* slotIdGenerator,
-                                           sbe::AggExprVector& aggSlotExprs,
-                                           boost::optional<TypedSlot> initializerRootSlot) {
+std::pair<SbExpr::Vector, bool> getBlockTopBottomNSortByExpr(StageBuilderState& state,
+                                                             const AccumulationStatement& accStmt,
+                                                             const PlanStageSlots& outputs,
+                                                             SbExpr sortSpecExpr) {
+    constexpr bool allowCallGenCheapSortKey = true;
+    bool useMK = false;
+
     SbExprBuilder b(state);
 
-    auto rootSlot = outputs.getResultObjIfExists();
-    auto collatorSlot = state.getCollatorSlot();
+    auto sortPattern = getSortPattern(accStmt);
+    tassert(8448719, "Expected sort pattern for $top/$bottom accumulator", sortPattern.has_value());
 
-    // One accumulator may be translated to multiple accumulator expressions. For example, The
-    // $avg will have two accumulators expressions, a sum(..) and a count which is implemented
-    // as sum(1).
-    auto accExprs = [&]() {
-        // $topN/$bottomN accumulators require multiple arguments to the accumulator builder.
-        if (isTopBottomN(accStmt)) {
-            StringDataMap<SbExpr> accArgs;
+    auto plan = makeSortKeysPlan(*sortPattern, allowCallGenCheapSortKey);
+    auto sortKeys = buildSortKeys(state, plan, *sortPattern, outputs, std::move(sortSpecExpr));
 
-            auto sortSpecExpr = getSortSpecFromTopBottomN(accStmt, state);
-            accArgs.emplace(AccArgs::kTopBottomNSortSpec, sortSpecExpr.clone());
-
-            // Build the key expression for the accumulator.
-            tassert(5807014,
-                    str::stream() << accStmt.expr.name
-                                  << " accumulator must have the root slot set",
-                    rootSlot);
-            auto key = collatorSlot ? b.makeFunction("generateCheapSortKey",
-                                                     std::move(sortSpecExpr),
-                                                     SbVar{rootSlot->slotId},
-                                                     SbVar{*collatorSlot})
-                                    : b.makeFunction("generateCheapSortKey",
-                                                     std::move(sortSpecExpr),
-                                                     SbVar{rootSlot->slotId});
-            accArgs.emplace(AccArgs::kTopBottomNKey,
-                            b.makeFunction("sortKeyComponentVectorToArray", std::move(key)));
-
-            // Build the value expression for the accumulator.
-            if (auto expObj = dynamic_cast<ExpressionObject*>(accStmt.expr.argument.get())) {
-                for (auto& [key, value] : expObj->getChildExpressions()) {
-                    if (key == AccumulatorN::kFieldNameOutput) {
-                        auto outputExpr =
-                            generateExpression(state, value.get(), rootSlot, &outputs);
-                        accArgs.emplace(AccArgs::kTopBottomNValue,
-                                        b.makeFillEmptyNull(std::move(outputExpr)));
-                        break;
-                    }
-                }
-            } else if (auto expConst =
-                           dynamic_cast<ExpressionConstant*>(accStmt.expr.argument.get())) {
-                auto objConst = expConst->getValue();
-                tassert(7767100,
-                        str::stream()
-                            << accStmt.expr.name << " accumulator must have an object argument",
-                        objConst.isObject());
-                auto objBson = objConst.getDocument().toBson();
-                auto outputField = objBson.getField(AccumulatorN::kFieldNameOutput);
-                if (outputField.ok()) {
-                    auto [outputTag, outputVal] =
-                        sbe::bson::convertFrom<false /* View */>(outputField);
-                    auto outputExpr = b.makeConstant(outputTag, outputVal);
-                    accArgs.emplace(AccArgs::kTopBottomNValue,
-                                    b.makeFillEmptyNull(std::move(outputExpr)));
-                }
+    if (plan.type == BuildSortKeysPlan::kTraverseFields) {
+        auto keyExprs = [&] {
+            if (sortPattern->size() == 1) {
+                // When the sort pattern has only one part, we return the sole part's key expr.
+                return SbExpr::makeSeq(std::move(sortKeys.keyExprs[0]));
+            } else if (sortPattern->size() > 1) {
+                // When the sort pattern has more than one part, we return an array containing
+                // each part's key expr (in order).
+                useMK = true;
+                return std::move(sortKeys.keyExprs);
             } else {
-                tasserted(5807015,
-                          str::stream()
-                              << accStmt.expr.name << " accumulator must have an object argument");
+                return SbExpr::makeSeq(b.makeFunction("newArray"));
             }
-            tassert(5807016,
-                    str::stream() << accStmt.expr.name
-                                  << " accumulator must have an output field in the argument",
-                    accArgs.find(AccArgs::kTopBottomNValue) != accArgs.end());
+        }();
 
-            auto accExprs =
-                stage_builder::buildAccumulator(accStmt, std::move(accArgs), collatorSlot, state);
+        if (sortKeys.parallelArraysCheckExpr) {
+            // If 'parallelArraysCheckExpr' is not null, inject it into 'fullKeyExpr'.
+            auto parallelArraysError =
+                b.makeFail(ErrorCodes::BadValue, "cannot sort with keys that are parallel arrays");
 
-            return accExprs;
-        } else {
-            auto argExpr =
-                generateExpression(state, accStmt.expr.argument.get(), rootSlot, &outputs);
+            tassert(8448720, "Expected vector to be non-empty", !keyExprs.empty());
 
-            auto accExprs =
-                stage_builder::buildAccumulator(accStmt, std::move(argExpr), collatorSlot, state);
-
-            return accExprs;
+            keyExprs[0] = b.makeIf(std::move(sortKeys.parallelArraysCheckExpr),
+                                   std::move(keyExprs[0]),
+                                   std::move(parallelArraysError));
         }
-    }();
 
-    auto initExprs = [&]() {
-        StringDataMap<SbExpr> initExprArgs;
+        return {std::move(keyExprs), useMK};
+    } else if (plan.type == BuildSortKeysPlan::kCallGenCheapSortKey) {
+        // generateCheapSortKey() returns a SortKeyComponentVector, but we need an array of
+        // keys (or the sole part's key in cases where the sort pattern has only one part),
+        // so we generate a call to sortKeyComponentVectorToArray() to perform the conversion.
+        auto fullKeyExpr =
+            b.makeFunction("sortKeyComponentVectorToArray", std::move(sortKeys.fullKeyExpr));
+
+        return {SbExpr::makeSeq(std::move(fullKeyExpr)), useMK};
+    } else {
+        MONGO_UNREACHABLE;
+    }
+}
+
+AccumInputsPtr generateAccumExprs(StageBuilderState& state,
+                                  const AccumulationStatement& accStmt,
+                                  const PlanStageSlots& outputs) {
+    auto accOp = AccumOp{accStmt};
+
+    auto rootSlot = outputs.getResultObjIfExists();
+
+    AccumInputsPtr inputs;
+
+    // For $topN and $bottomN, we need to pass multiple SbExprs to buildAddExprs()
+    // (an "input" expression and a "sortBy" expression).
+    if (isTopBottomN(accStmt)) {
+        auto spec = SbExpr{state.getSortSpecSlot(&accStmt)};
+
+        inputs = std::make_unique<AddTopBottomNInputs>(
+            getTopBottomNValueExpr(state, accStmt, outputs),
+            getTopBottomNSortByExpr(state, accStmt, outputs, std::move(spec)),
+            SbExpr{state.getSortSpecSlot(&accStmt)});
+    } else {
+        // For all other accumulators, we call generateExpression() on 'argument' to create an
+        // SbExpr and then we pass this SbExpr as the kInput arg to buildAddExprs().
+        inputs = std::make_unique<AddSingleInput>(
+            generateExpression(state, accStmt.expr.argument.get(), rootSlot, outputs));
+    }
+
+    return accOp.buildAddExprs(state, std::move(inputs));
+}
+
+boost::optional<std::vector<AccumInputsPtr>> generateAllAccumExprs(StageBuilderState& state,
+                                                                   const GroupNode& groupNode,
+                                                                   const PlanStageSlots& outputs) {
+    boost::optional<std::vector<AccumInputsPtr>> accExprsVec;
+    accExprsVec.emplace();
+
+    for (const auto& accStmt : groupNode.accumulators) {
+        // One accumulator may be translated to multiple accumulator expressions. For example, The
+        // $avg will have two accumulators expressions, a sum(..) and a count which is implemented
+        // as sum(1).
+        AccumInputsPtr accExprs = generateAccumExprs(state, accStmt, outputs);
+        if (!accExprs) {
+            return boost::none;
+        }
+
+        accExprsVec->emplace_back(std::move(accExprs));
+    }
+
+    return accExprsVec;
+}
+
+boost::optional<AddBlockExprs> generateAccumBlockExprs(StageBuilderState& state,
+                                                       const AccumulationStatement& accStmt,
+                                                       const PlanStageSlots& outputs) {
+    auto accOp = AccumOp{accStmt};
+
+    auto rootSlot = outputs.getResultObjIfExists();
+
+    AccumInputsPtr inputs;
+
+    // For $topN and $bottomN, we need to pass multiple SbExprs to buildAddExprs()
+    // (an "input" expression and a "sortBy" expression).
+    if (isTopBottomN(accStmt)) {
+        auto spec = SbExpr{state.getSortSpecSlot(&accStmt)};
+
+        inputs = std::make_unique<AddBlockTopBottomNInputs>(
+            getBlockTopBottomNValueExpr(state, accStmt, outputs),
+            getBlockTopBottomNSortByExpr(state, accStmt, outputs, std::move(spec)),
+            SbExpr{state.getSortSpecSlot(&accStmt)});
+    } else {
+        // For all other accumulators, we call generateExpression() on 'argument' to create an
+        // SbExpr and then we pass this SbExpr as the kInput arg to buildAddExprs().
+        inputs = std::make_unique<AddSingleInput>(
+            generateExpression(state, accStmt.expr.argument.get(), rootSlot, outputs));
+    }
+
+    return accOp.buildAddBlockExprs(state, std::move(inputs), outputs);
+}
+
+boost::optional<std::vector<AddBlockExprs>> generateAllAccumBlockExprs(
+    StageBuilderState& state, const GroupNode& groupNode, const PlanStageSlots& outputs) {
+    boost::optional<std::vector<AddBlockExprs>> blockAccumExprsVec;
+    blockAccumExprsVec.emplace();
+
+    for (const auto& accStmt : groupNode.accumulators) {
+        // One accumulator may be translated to multiple accumulator expressions. For example, The
+        // $avg will have two accumulators expressions, a sum(..) and a count which is implemented
+        // as sum(1).
+        boost::optional<AddBlockExprs> blockAccumExprs =
+            generateAccumBlockExprs(state, accStmt, outputs);
+
+        if (!blockAccumExprs) {
+            return boost::none;
+        }
+
+        blockAccumExprsVec->emplace_back(std::move(*blockAccumExprs));
+    }
+
+    return blockAccumExprsVec;
+}
+
+/**
+ * This function generates one or more SbAggExprs for the specified accumulator ('accStmt')
+ * and returns them.
+ *
+ * If 'genBlockAggs' is true, generateAccumAggs() accumulator may fail, in which case it
+ * will leave the 'sbAggExprs' vector unmodified and return boost::none.
+ */
+boost::optional<SbAggExprVector> generateAccumAggs(StageBuilderState& state,
+                                                   const AccumulationStatement& accStmt,
+                                                   const PlanStageSlots& outputs,
+                                                   AccumInputsPtr accExprs,
+                                                   boost::optional<SbSlot> initRootSlot,
+                                                   bool genBlockAggs,
+                                                   boost::optional<SbSlot> bitmapInternalSlot) {
+    SbExprBuilder b(state);
+
+    auto accOp = AccumOp{accStmt};
+
+    boost::optional<SbAggExprVector> sbAggExprs;
+    sbAggExprs.emplace();
+
+    // Generate the agg expressions (and blockAgg expressions too if 'genBlockAggs' is true).
+    std::vector<BlockAggAndRowAgg> blockAggsAndRowAggs;
+
+    if (!genBlockAggs) {
+        // Handle the case where we only want to generate "normal" aggs without blockAggs.
+        SbExpr::Vector aggs = accOp.buildAddAggs(state, std::move(accExprs));
+
+        for (size_t i = 0; i < aggs.size(); ++i) {
+            blockAggsAndRowAggs.emplace_back(BlockAggAndRowAgg{SbExpr{}, std::move(aggs[i])});
+        }
+    } else {
+        // Handle the case where we want to generate aggs _and_ blockAggs.
+        tassert(
+            8448600, "Expected 'bitmapInternalSlot' to be defined", bitmapInternalSlot.has_value());
+
+        boost::optional<std::vector<BlockAggAndRowAgg>> aggs =
+            accOp.buildAddBlockAggs(state, std::move(accExprs), *bitmapInternalSlot);
+
+        // If 'genBlockAggs' is true and we weren't able to generate block aggs for 'accStmt',
+        // then we return boost::none to indicate failure.
+        if (!aggs) {
+            return boost::none;
+        }
+
+        blockAggsAndRowAggs = std::move(*aggs);
+    }
+
+    // Generate the init expressions.
+    SbExpr::Vector inits = [&]() {
+        PlanStageSlots slots;
+        if (initRootSlot) {
+            slots.setResultObj(*initRootSlot);
+        }
+
+        AccumInputsPtr initInputs;
+
         if (isAccumulatorN(accStmt)) {
-            initExprArgs.emplace(
-                AccArgs::kMaxSize,
-                generateExpression(
-                    state, accStmt.expr.initializer.get(), initializerRootSlot, nullptr));
-            initExprArgs.emplace(
-                AccArgs::kIsGroupAccum,
-                b.makeConstant(sbe::value::TypeTags::Boolean, sbe::value::bitcastFrom<bool>(true)));
-        } else {
-            initExprArgs.emplace(
-                "",
-                generateExpression(
-                    state, accStmt.expr.initializer.get(), initializerRootSlot, nullptr));
+            auto expr =
+                generateExpression(state, accStmt.expr.initializer.get(), initRootSlot, slots);
+
+            initInputs =
+                std::make_unique<InitAccumNInputs>(std::move(expr), b.makeBoolConstant(true));
         }
-        return initExprArgs;
-    }();
-    auto accInitExprs = [&]() {
-        if (initExprs.size() == 1) {
-            return stage_builder::buildInitialize(
-                accStmt, std::move(initExprs.begin()->second), state);
-        } else {
-            return stage_builder::buildInitialize(accStmt, std::move(initExprs), state);
-        }
+
+        return accOp.buildInitialize(state, std::move(initInputs));
     }();
 
     tassert(7567301,
             "The accumulation and initialization expression should have the same length",
-            accExprs.size() == accInitExprs.size());
-    sbe::value::SlotVector aggSlots;
-    for (size_t i = 0; i < accExprs.size(); i++) {
-        auto slot = slotIdGenerator->generate();
-        aggSlots.push_back(slot);
-        aggSlotExprs.push_back(
-            std::make_pair(slot,
-                           sbe::AggExprPair{std::move(accInitExprs[i].extractExpr(state).expr),
-                                            std::move(accExprs[i].extractExpr(state).expr)}));
+            inits.size() == blockAggsAndRowAggs.size());
+
+    // For each 'init' / 'blockAgg' / 'agg' expression tuple, wrap the expressions in
+    // an SbAggExpr and append the SbAggExpr to 'sbAggExprs'.
+    for (size_t i = 0; i < blockAggsAndRowAggs.size(); i++) {
+        SbExpr& init = inits[i];
+        SbExpr& blockAgg = blockAggsAndRowAggs[i].blockAgg;
+        SbExpr& rowAgg = blockAggsAndRowAggs[i].rowAgg;
+
+        sbAggExprs->emplace_back(SbAggExpr{std::move(init), std::move(blockAgg), std::move(rowAgg)},
+                                 boost::none);
     }
 
-    return aggSlots;
-}
+    return sbAggExprs;
+}  // generateAccumAggs
+
+/**
+ * This function generates a vector of SbAggExprs that correspond to the accumulators from
+ * the specified GroupNode ('groupNode') and returns it.
+ *
+ * If 'genBlockAggs' is true, generateAllAccumAggs() will fail if any of the accumulators do not
+ * support block mode, in which case it will return boost::none.
+ */
+boost::optional<std::vector<SbAggExprVector>> generateAllAccumAggs(
+    StageBuilderState& state,
+    const GroupNode& groupNode,
+    const PlanStageSlots& childOutputs,
+    std::vector<AccumInputsPtr> accExprsVec,
+    boost::optional<SbSlot> initRootSlot,
+    bool genBlockAggs,
+    boost::optional<SbSlot> bitmapInternalSlot) {
+    // Loop over 'groupNode.accumulators' and populate 'sbAggExprs'.
+    boost::optional<std::vector<SbAggExprVector>> sbAggExprs;
+    sbAggExprs.emplace();
+
+    size_t i = 0;
+    for (const auto& accStmt : groupNode.accumulators) {
+        boost::optional<SbAggExprVector> vec = generateAccumAggs(state,
+                                                                 accStmt,
+                                                                 childOutputs,
+                                                                 std::move(accExprsVec[i]),
+                                                                 initRootSlot,
+                                                                 genBlockAggs,
+                                                                 bitmapInternalSlot);
+
+        // If we weren't able to generate block aggs for 'accStmt', then we return boost::none
+        // to indicate failure. This should only happen when 'genBlockAggs' is true.
+        if (!vec.has_value()) {
+            return boost::none;
+        }
+
+        sbAggExprs->emplace_back(std::move(*vec));
+
+        ++i;
+    }
+
+    return sbAggExprs;
+}  // generateAllAccumAggs
 
 /**
  * Generate a vector of (inputSlot, mergingExpression) pairs. The slot (whose id is allocated by
@@ -471,121 +784,164 @@ sbe::value::SlotVector generateAccumulator(StageBuilderState& state,
  * is implemented by calculating multiple separate aggregates in the SBE plan, which are finalized
  * by a subsequent project stage to produce the ultimate value.
  */
-sbe::SlotExprPairVector generateMergingExpressions(StageBuilderState& state,
-                                                   const AccumulationStatement& accStmt,
-                                                   int numInputSlots) {
-    tassert(7039555, "'numInputSlots' must be positive", numInputSlots > 0);
+SbExprSbSlotVector generateMergingExpressions(StageBuilderState& state,
+                                              const AccumulationStatement& accStmt,
+                                              int numInputSlots) {
     auto slotIdGenerator = state.slotIdGenerator;
-    tassert(7039556, "expected non-null 'slotIdGenerator' pointer", slotIdGenerator);
     auto frameIdGenerator = state.frameIdGenerator;
+
+    tassert(7039555, "'numInputSlots' must be positive", numInputSlots > 0);
+    tassert(7039556, "expected non-null 'slotIdGenerator' pointer", slotIdGenerator);
     tassert(7039557, "expected non-null 'frameIdGenerator' pointer", frameIdGenerator);
 
-    auto spillSlots = slotIdGenerator->generateMultiple(numInputSlots);
-    auto collatorSlot = state.getCollatorSlot();
+    auto accOp = AccumOp{accStmt};
 
-    auto mergingExprs = [&]() {
+    SbSlotVector spillSlots;
+    for (int i = 0; i < numInputSlots; ++i) {
+        spillSlots.emplace_back(SbSlot{slotIdGenerator->generate()});
+    }
+
+    SbExpr::Vector mergingExprs = [&]() {
+        AccumInputsPtr combineInputs;
+
         if (isTopBottomN(accStmt)) {
-            StringDataMap<SbExpr> mergeArgs;
-            mergeArgs.emplace(AccArgs::kTopBottomNSortSpec,
-                              getSortSpecFromTopBottomN(accStmt, state));
-            return buildCombinePartialAggregates(
-                accStmt, spillSlots, std::move(mergeArgs), collatorSlot, state);
-        } else {
-            return buildCombinePartialAggregates(accStmt, spillSlots, collatorSlot, state);
+            auto sortSpec = SbExpr{state.getSortSpecSlot(&accStmt)};
+            combineInputs = std::make_unique<CombineAggsTopBottomNInputs>(std::move(sortSpec));
         }
+
+        return accOp.buildCombineAggs(state, std::move(combineInputs), spillSlots);
     }();
 
     // Zip the slot vector and expression vector into a vector of pairs.
     tassert(7039550,
             "expected same number of slots and input exprs",
             spillSlots.size() == mergingExprs.size());
-    sbe::SlotExprPairVector result;
+    SbExprSbSlotVector result;
     result.reserve(spillSlots.size());
     for (size_t i = 0; i < spillSlots.size(); ++i) {
-        result.push_back({spillSlots[i], mergingExprs[i].extractExpr(state).expr});
+        result.emplace_back(std::pair(std::move(mergingExprs[i]), spillSlots[i]));
     }
     return result;
 }
 
-// Given a sequence 'groupBySlots' of slot ids, return a new sequence that contains all slots ids in
-// 'groupBySlots' but without any duplicate ids.
-sbe::value::SlotVector dedupGroupBySlots(const sbe::value::SlotVector& groupBySlots) {
-    stdx::unordered_set<sbe::value::SlotId> uniqueSlots;
-    sbe::value::SlotVector dedupedGroupBySlots;
+/**
+ * This function generates all of the merging expressions needed by the accumulators from the
+ * specified GroupNode ('groupNode').
+ */
+std::vector<SbExprSbSlotVector> generateAllMergingExprs(StageBuilderState& state,
+                                                        const GroupNode& groupNode) {
+    // Since partial accumulator state may be spilled to disk and then merged, we must construct not
+    // only the basic agg expressions for each accumulator, but also agg expressions that are used
+    // to combine partial aggregates that have been spilled to disk.
+    std::vector<SbExprSbSlotVector> mergingExprs;
+    size_t accIdx = 0;
 
-    for (auto slot : groupBySlots) {
-        if (!uniqueSlots.contains(slot)) {
-            dedupedGroupBySlots.emplace_back(slot);
-            uniqueSlots.insert(slot);
-        }
+    for (const auto& accStmt : groupNode.accumulators) {
+        auto accOp = AccumOp{accStmt};
+        size_t numAggs = accOp.getNumAggs();
+
+        mergingExprs.emplace_back(generateMergingExpressions(state, accStmt, numAggs));
+
+        ++accIdx;
     }
 
-    return dedupedGroupBySlots;
+    return mergingExprs;
 }
 
-std::tuple<std::vector<std::string>, sbe::value::SlotVector, SbStage> generateGroupFinalStage(
+/**
+ * This function performs any computations needed after the HashAggStage (or BlockHashAggStage)
+ * for the accumulators from 'groupNode'.
+ *
+ * generateGroupFinalStage() returns a tuple containing the updated SBE stage tree, a list of
+ * output field names and a list of output field slots (corresponding to the accumulators from
+ * 'groupNode'), and a new empty PlanStageSlots object.
+ */
+std::tuple<SbStage, std::vector<std::string>, SbSlotVector, PlanStageSlots> generateGroupFinalStage(
     StageBuilderState& state,
     SbStage groupStage,
-    sbe::value::SlotVector groupOutSlots,
-    SbExpr idFinalExpr,
-    sbe::value::SlotVector dedupedGroupBySlots,
-    const std::vector<AccumulationStatement>& accStmts,
-    const std::vector<sbe::value::SlotVector>& aggSlotsVec,
-    PlanNodeId nodeId) {
-    sbe::SlotExprPairVector projects;
-    // To passthrough the output slots of accumulators with trivial finalizers, we need to find
-    // their slot ids. We can do this by sorting 'groupStage.outSlots' because the slot ids
-    // correspond to the order in which the accumulators were translated (that is, the order in
-    // which they are listed in 'accStmts'). Note, that 'groupStage.outSlots' contains deduped
-    // group-by slots at the front and the accumulator slots at the back.
-    std::sort(groupOutSlots.begin() + dedupedGroupBySlots.size(), groupOutSlots.end());
+    PlanStageSlots outputs,
+    SbSlotVector& individualSlots,
+    SbSlotVector groupBySlots,
+    SbSlotVector groupOutSlots,
+    const GroupNode& groupNode,
+    bool idIsSingleKey,
+    SbExpr idConstantValue) {
+    SbBuilder b(state, groupNode.nodeId());
 
-    tassert(5995100,
-            "The _id expression must either produce an expression or a scalar value",
-            idFinalExpr || dedupedGroupBySlots.size() == 1);
+    SbExpr idFinalExpr;
 
-    auto finalGroupBySlot = [&]() {
-        if (!idFinalExpr) {
-            return dedupedGroupBySlots[0];
-        } else {
-            auto slot = state.slotId();
-            projects.emplace_back(slot, idFinalExpr.extractExpr(state).expr);
-            return slot;
+    if (idConstantValue) {
+        // If '_id' is a constant, use the constant value for 'idExpr'.
+        idFinalExpr = std::move(idConstantValue);
+    } else if (idIsSingleKey) {
+        // Otherwise, if '_id' is a single key, use the sole groupBy slot for 'idExpr'.
+        idFinalExpr = SbExpr{groupBySlots[0]};
+    } else {
+        // Otherwise, create the appropriate "newObj(..)" expression and store it in 'idExpr'.
+        const auto& idExpr = groupNode.groupByExpression;
+        auto idExprObj = dynamic_cast<ExpressionObject*>(idExpr.get());
+        tassert(8620900, "Expected expression of type ExpressionObject", idExprObj != nullptr);
+
+        std::vector<std::string> fieldNames;
+        for (auto&& [fieldName, fieldExpr] : idExprObj->getChildExpressions()) {
+            fieldNames.emplace_back(fieldName);
         }
-    }();
 
-    auto collatorSlot = state.getCollatorSlot();
-    auto finalSlots{sbe::value::SlotVector{finalGroupBySlot}};
-    std::vector<std::string> fieldNames{"_id"};
-    size_t idxAccFirstSlot = dedupedGroupBySlots.size();
+        SbExpr::Vector exprs;
+        size_t i = 0;
+        for (const auto& slot : groupBySlots) {
+            exprs.emplace_back(b.makeStrConstant(fieldNames[i]));
+            exprs.emplace_back(slot);
+            ++i;
+        }
+
+        idFinalExpr = b.makeFunction("newObj"_sd, std::move(exprs));
+    }
+
+    const auto& accStmts = groupNode.accumulators;
+
+    std::vector<SbSlotVector> aggSlotsVec;
+    auto groupOutSlotsIt = groupOutSlots.begin();
+
     for (size_t idxAcc = 0; idxAcc < accStmts.size(); ++idxAcc) {
+        auto accOp = AccumOp{accStmts[idxAcc]};
+        size_t numAggs = accOp.getNumAggs();
+
+        aggSlotsVec.emplace_back(SbSlotVector(groupOutSlotsIt, groupOutSlotsIt + numAggs));
+        groupOutSlotsIt += numAggs;
+    }
+
+    // Prepare to project 'idFinalExpr' to a slot.
+    SbExprOptSbSlotVector projects;
+    projects.emplace_back(std::move(idFinalExpr), boost::none);
+
+    // Generate all the finalize expressions and prepare to project all these expressions
+    // to slots.
+    std::vector<std::string> fieldNames{"_id"};
+    size_t idxAccFirstSlot = 0;
+    for (size_t idxAcc = 0; idxAcc < accStmts.size(); ++idxAcc) {
+        const AccumulationStatement& accStmt = accStmts[idxAcc];
+        auto accOp = AccumOp{accStmt};
+
         // Gathers field names for the output object from accumulator statements.
         fieldNames.push_back(accStmts[idxAcc].fieldName);
 
-        auto finalExpr = [&]() {
-            const auto& accStmt = accStmts[idxAcc];
-            if (isTopBottomN(accStmt)) {
-                StringDataMap<SbExpr> finalArgs;
-                finalArgs.emplace(AccArgs::kTopBottomNSortSpec,
-                                  getSortSpecFromTopBottomN(accStmt, state));
-                return buildFinalize(state,
-                                     accStmts[idxAcc],
-                                     aggSlotsVec[idxAcc],
-                                     std::move(finalArgs),
-                                     collatorSlot);
-            } else {
-                return buildFinalize(state, accStmts[idxAcc], aggSlotsVec[idxAcc], collatorSlot);
-            }
-        }();
+        AccumInputsPtr finalizeInputs;
 
-        // The final step may not return an expression if it's trivial. For example, $first and
-        // $last's final steps are trivial.
-        if (finalExpr) {
-            auto outSlot = state.slotId();
-            finalSlots.push_back(outSlot);
-            projects.emplace_back(outSlot, finalExpr.extractExpr(state).expr);
+        if (isTopBottomN(accStmt)) {
+            auto sortSpec = SbExpr{state.getSortSpecSlot(&accStmt)};
+            finalizeInputs = std::make_unique<FinalizeTopBottomNInputs>(std::move(sortSpec));
+        }
+
+        SbExpr finalExpr =
+            accOp.buildFinalize(state, std::move(finalizeInputs), aggSlotsVec[idxAcc]);
+
+        // buildFinalize() might not return an expression if the final step is trivial.
+        // For example, $first and $last's final steps are trivial.
+        if (!finalExpr) {
+            projects.emplace_back(groupOutSlots[idxAccFirstSlot], boost::none);
         } else {
-            finalSlots.push_back(groupOutSlots[idxAccFirstSlot]);
+            projects.emplace_back(std::move(finalExpr), boost::none);
         }
 
         // Some accumulator(s) like $avg generate multiple expressions and slots. So, need to
@@ -593,135 +949,244 @@ std::tuple<std::vector<std::string>, sbe::value::SlotVector, SbStage> generateGr
         idxAccFirstSlot += aggSlotsVec[idxAcc].size();
     }
 
-    // Gathers all accumulator results. If there're no project expressions, does not add a project
-    // stage.
-    auto retStage = projects.empty()
-        ? std::move(groupStage)
-        : makeProject(std::move(groupStage), std::move(projects), nodeId);
+    // Project all the aforementioned expressions to slots.
+    auto [retStage, finalSlots] = b.makeProject(
+        std::move(groupStage), buildVariableTypes(outputs, individualSlots), std::move(projects));
 
-    return {std::move(fieldNames), std::move(finalSlots), std::move(retStage)};
+    individualSlots.insert(individualSlots.end(), finalSlots.begin(), finalSlots.end());
+
+    return {std::move(retStage), std::move(fieldNames), std::move(finalSlots), std::move(outputs)};
 }
 
-// Generate the accumulator expressions and HashAgg operator used to compute a $group pipeline
-// stage.
+/**
+ * This function generates a HashAggStage or a BlockHashAggStage as appropriate for the specified
+ * GroupNode ('groupNode').
+ *
+ * buildGroupAggregation() returns a tuple containing the updated SBE plan tree, the list of
+ * slots corresponding to the group by inputs, and the list of accumulator output slots
+ * corresponding to the accumulators from 'groupNode'.
+ */
 MONGO_COMPILER_NOINLINE
-std::tuple<std::vector<std::string>, sbe::value::SlotVector, SbStage> buildGroupAggregation(
+std::tuple<SbStage, SbSlotVector, SbSlotVector> buildGroupAggregation(
     StageBuilderState& state,
-    const GroupNode& groupNode,
-    bool allowDiskUse,
-    SbExpr idFinalExpr,
     const PlanStageSlots& childOutputs,
-    SbStage groupByStage,
-    sbe::value::SlotVector& groupBySlots) {
-    SbExprBuilder b(state);
+    SbSlotVector individualSlots,
+    SbStage stage,
+    bool allowDiskUse,
+    SbExpr::Vector groupByExprs,
+    std::vector<SbAggExprVector> sbAggExprs,
+    std::vector<SbExprSbSlotVector> mergingExprs,
+    bool useBlockHashAgg,
+    std::vector<SbExpr::Vector> blockAccExprs,
+    boost::optional<SbSlot> bitmapInternalSlot,
+    const std::vector<SbSlotVector>& accumulatorDataSlots,
+    PlanYieldPolicy* yieldPolicy,
+    PlanNodeId nodeId) {
+    constexpr auto kBlockSelectivityBitmap = PlanStageSlots::kBlockSelectivityBitmap;
 
-    auto nodeId = groupNode.nodeId();
+    SbBuilder b(state, nodeId);
 
-    auto initializerRootSlot = [&]() {
-        bool isVariableGroupInitializer = false;
-        for (const auto& accStmt : groupNode.accumulators) {
-            isVariableGroupInitializer = isVariableGroupInitializer ||
-                !ExpressionConstant::isNullOrConstant(accStmt.expr.initializer);
-        }
-        if (!isVariableGroupInitializer) {
-            return boost::optional<TypedSlot>{};
-        }
+    // Project the group by expressions and the accumulator arg expressions to slots.
+    SbExprOptSbSlotVector projects;
+    size_t numGroupByExprs = groupByExprs.size();
 
-        sbe::value::SlotId idSlot;
-        // We materialize the groupId before the group stage to provide it as root to
-        // initializer expression
-        if (idFinalExpr) {
-            auto slot = state.slotId();
-            groupByStage = makeProject(
-                std::move(groupByStage), nodeId, slot, idFinalExpr.extractExpr(state).expr);
-
-            groupBySlots.clear();
-            groupBySlots.push_back(slot);
-            idFinalExpr.reset();
-            idSlot = slot;
-        } else {
-            idSlot = groupBySlots[0];
-        }
-
-        // As per the mql semantics add a project expression 'isObject(id) ? id : {}'
-        // which will be provided as root to initializer expression
-        auto [emptyObjTag, emptyObjVal] = sbe::value::makeNewObject();
-        auto isObjectExpr = b.makeIf(b.makeFunction("isObject"_sd, SbVar{idSlot}),
-                                     SbVar{idSlot},
-                                     b.makeConstant(emptyObjTag, emptyObjVal));
-
-        auto isObjSlot = state.slotId();
-        groupByStage = makeProject(
-            std::move(groupByStage), nodeId, isObjSlot, isObjectExpr.extractExpr(state).expr);
-
-        return boost::optional<TypedSlot>(TypedSlot{isObjSlot, TypeSignature::kObjectType});
-    }();
-
-    // Translates accumulators which are executed inside the group stage and gets slots for
-    // accumulators.
-    auto currentStage = std::move(groupByStage);
-    sbe::AggExprVector aggSlotExprs;
-    std::vector<sbe::value::SlotVector> aggSlotsVec;
-    // Since partial accumulator state may be spilled to disk and then merged, we must construct not
-    // only the basic agg expressions for each accumulator, but also agg expressions that are used
-    // to combine partial aggregates that have been spilled to disk.
-    sbe::SlotExprPairVector mergingExprs;
-    for (const auto& accStmt : groupNode.accumulators) {
-        sbe::value::SlotVector curAggSlots = generateAccumulator(
-            state, accStmt, childOutputs, state.slotIdGenerator, aggSlotExprs, initializerRootSlot);
-
-        sbe::SlotExprPairVector curMergingExprs =
-            generateMergingExpressions(state, accStmt, curAggSlots.size());
-
-        aggSlotsVec.emplace_back(std::move(curAggSlots));
-        mergingExprs.insert(mergingExprs.end(),
-                            std::make_move_iterator(curMergingExprs.begin()),
-                            std::make_move_iterator(curMergingExprs.end()));
+    for (auto& expr : groupByExprs) {
+        projects.emplace_back(std::move(expr), boost::none);
     }
 
-    // There might be duplicated expressions and slots. Dedup them before creating a HashAgg
-    // because it would complain about duplicated slots and refuse to be created, which is
-    // reasonable because duplicated expressions would not contribute to grouping.
-    auto dedupedGroupBySlots = dedupGroupBySlots(groupBySlots);
-
-    auto groupOutSlots = dedupedGroupBySlots;
-    for (auto& [slot, _] : aggSlotExprs) {
-        groupOutSlots.push_back(slot);
+    for (auto& exprsVec : blockAccExprs) {
+        for (auto& expr : exprsVec) {
+            projects.emplace_back(std::move(expr), boost::none);
+        }
     }
+
+    auto [outStage, outSlots] = b.makeProject(
+        std::move(stage), buildVariableTypes(childOutputs, individualSlots), std::move(projects));
+    stage = std::move(outStage);
+
+    SbSlotVector groupBySlots;
+    SbSlotVector flattenedBlockAccArgSlots;
+    SbSlotVector flattenedAccumulatorDataSlots;
+
+    groupBySlots.reserve(numGroupByExprs);
+    flattenedBlockAccArgSlots.reserve(outSlots.size() - numGroupByExprs);
+
+    for (size_t i = 0; i < numGroupByExprs; ++i) {
+        groupBySlots.emplace_back(outSlots[i]);
+    }
+
+    for (size_t i = numGroupByExprs; i < outSlots.size(); ++i) {
+        flattenedBlockAccArgSlots.emplace_back(outSlots[i]);
+    }
+
+    for (const auto& slotsVec : accumulatorDataSlots) {
+        flattenedAccumulatorDataSlots.insert(
+            flattenedAccumulatorDataSlots.end(), slotsVec.begin(), slotsVec.end());
+    }
+
+    individualSlots.insert(individualSlots.end(), groupBySlots.begin(), groupBySlots.end());
+    individualSlots.insert(
+        individualSlots.end(), flattenedBlockAccArgSlots.begin(), flattenedBlockAccArgSlots.end());
 
     // Builds a group stage with accumulator expressions and group-by slot(s).
-    currentStage = makeHashAgg(std::move(currentStage),
-                               dedupedGroupBySlots,
-                               std::move(aggSlotExprs),
-                               state.getCollatorSlot(),
-                               allowDiskUse,
-                               std::move(mergingExprs),
-                               nodeId);
+    auto [hashAggStage, groupByOutSlots, aggSlots] = [&] {
+        SbAggExprVector flattenedSbAggExprs;
+        for (auto& vec : sbAggExprs) {
+            std::move(vec.begin(), vec.end(), std::back_inserter(flattenedSbAggExprs));
+        }
 
-    tassert(
-        5851603,
-        "Group stage's output slots must include deduped slots for group-by keys and slots for all "
-        "accumulators",
-        groupOutSlots.size() ==
-            std::accumulate(aggSlotsVec.begin(),
-                            aggSlotsVec.end(),
-                            dedupedGroupBySlots.size(),
-                            [](int sum, const auto& aggSlots) { return sum + aggSlots.size(); }));
-    tassert(
-        5851604,
-        "Group stage's output slots must contain the deduped groupBySlots at the front",
-        std::equal(dedupedGroupBySlots.begin(), dedupedGroupBySlots.end(), groupOutSlots.begin()));
+        SbExprSbSlotVector flattenedMergingExprs;
+        for (auto& vec : mergingExprs) {
+            std::move(vec.begin(), vec.end(), std::back_inserter(flattenedMergingExprs));
+        }
 
+        if (useBlockHashAgg) {
+            tassert(8448603,
+                    "Expected 'bitmapInternalSlot' to be defined",
+                    bitmapInternalSlot.has_value());
 
-    // Builds the final stage(s) over the collected accumulators.
-    return generateGroupFinalStage(state,
-                                   std::move(currentStage),
-                                   std::move(groupOutSlots),
-                                   std::move(idFinalExpr),
-                                   dedupedGroupBySlots,
-                                   groupNode.accumulators,
-                                   aggSlotsVec,
-                                   nodeId);
+            return b.makeBlockHashAgg(std::move(stage),
+                                      buildVariableTypes(childOutputs, individualSlots),
+                                      groupBySlots,
+                                      std::move(flattenedSbAggExprs),
+                                      childOutputs.get(kBlockSelectivityBitmap),
+                                      flattenedBlockAccArgSlots,
+                                      *bitmapInternalSlot,
+                                      flattenedAccumulatorDataSlots,
+                                      allowDiskUse,
+                                      std::move(flattenedMergingExprs),
+                                      yieldPolicy);
+        } else {
+            return b.makeHashAgg(std::move(stage),
+                                 buildVariableTypes(childOutputs, individualSlots),
+                                 groupBySlots,
+                                 std::move(flattenedSbAggExprs),
+                                 state.getCollatorSlot(),
+                                 allowDiskUse,
+                                 std::move(flattenedMergingExprs),
+                                 yieldPolicy);
+        }
+    }();
+
+    stage = std::move(hashAggStage);
+
+    return {std::move(stage), std::move(groupByOutSlots), std::move(aggSlots)};
+}
+
+/**
+ * This function generates the kResult object at the end of $group when needed.
+ */
+std::pair<SbStage, SbSlot> generateGroupResultObject(SbStage stage,
+                                                     StageBuilderState& state,
+                                                     const GroupNode* groupNode,
+                                                     const std::vector<std::string>& fieldNames,
+                                                     const SbSlotVector& finalSlots) {
+    SbBuilder b(state, groupNode->nodeId());
+
+    SbExpr::Vector funcArgs;
+    for (size_t i = 0; i < fieldNames.size(); ++i) {
+        funcArgs.emplace_back(b.makeStrConstant(fieldNames[i]));
+        funcArgs.emplace_back(finalSlots[i]);
+    }
+
+    StringData newObjFn = groupNode->shouldProduceBson ? "newBsonObj"_sd : "newObj"_sd;
+    SbExpr outputExpr = b.makeFunction(newObjFn, std::move(funcArgs));
+
+    auto [outStage, outSlots] = b.makeProject(std::move(stage), std::move(outputExpr));
+    stage = std::move(outStage);
+
+    SbSlot slot = outSlots[0];
+    slot.setTypeSignature(TypeSignature::kObjectType);
+
+    return {std::move(stage), slot};
+}
+
+/**
+ * This function generates the "root slot" for initializer expressions when it is needed.
+ */
+std::tuple<SbStage, SbExpr::Vector, SbSlot> generateInitRootSlot(
+    SbStage stage,
+    StageBuilderState& state,
+    const PlanStageSlots& childOutputs,
+    SbSlotVector& individualSlots,
+    SbExpr::Vector groupByExprs,
+    bool vectorizedGroupByExprs,
+    ExpressionObject* idExprObj,
+    boost::optional<SbSlot> slotIdForInitRoot,
+    PlanNodeId nodeId) {
+    SbBuilder b(state, nodeId);
+
+    bool idIsSingleKey = idExprObj == nullptr;
+
+    // If there is more than one groupBy key, combine them all into a single object and
+    // then use that object as sole groupBy key.
+    if (!idIsSingleKey) {
+        std::vector<std::string> fieldNames;
+        for (auto&& [fieldName, fieldExpr] : idExprObj->getChildExpressions()) {
+            fieldNames.emplace_back(fieldName);
+        }
+
+        SbExpr::Vector exprs;
+        size_t i = 0;
+        for (const auto& e : groupByExprs) {
+            exprs.emplace_back(b.makeStrConstant(fieldNames[i]));
+            exprs.emplace_back(e.clone());
+            ++i;
+        }
+
+        groupByExprs.clear();
+        groupByExprs.emplace_back(b.makeFunction("newObj"_sd, std::move(exprs)));
+
+        idIsSingleKey = true;
+    }
+
+    SbExpr& groupByExpr = groupByExprs[0];
+
+    bool idIsKnownToBeObj = [&] {
+        if (idExprObj != nullptr) {
+            return true;
+        } else if (groupByExpr.isConstantExpr() && !vectorizedGroupByExprs) {
+            auto [tag, _] = groupByExpr.getConstantValue();
+            return stage_builder::getTypeSignature(tag).isSubset(TypeSignature::kObjectType);
+        }
+        return false;
+    }();
+
+    // Project 'groupByExpr' to a slot.
+    boost::optional<SbSlot> targetSlot = idIsKnownToBeObj ? slotIdForInitRoot : boost::none;
+    auto [projectStage, projectOutSlots] =
+        b.makeProject(std::move(stage),
+                      buildVariableTypes(childOutputs),
+                      SbExprOptSbSlotPair{std::move(groupByExpr), targetSlot});
+    stage = std::move(projectStage);
+
+    groupByExpr = SbExpr{projectOutSlots[0]};
+    individualSlots.emplace_back(projectOutSlots[0]);
+
+    // As per the mql semantics add a project expression 'isObject(_id) ? _id : {}'
+    // which will be provided as root to initializer expression.
+    if (idIsKnownToBeObj) {
+        // If we know '_id' is an object, then we can just use the slot as-is.
+        return {std::move(stage), std::move(groupByExprs), projectOutSlots[0]};
+    } else {
+        // If we're not sure whether '_id' is an object, then we need to project the
+        // aforementioned expression to a slot and use that.
+        auto [emptyObjTag, emptyObjVal] = sbe::value::makeNewObject();
+        SbExpr idOrEmptyObjExpr = b.makeIf(b.makeFunction("isObject"_sd, groupByExpr.clone()),
+                                           groupByExpr.clone(),
+                                           b.makeConstant(emptyObjTag, emptyObjVal));
+
+        auto [outStage, outSlots] =
+            b.makeProject(std::move(stage),
+                          buildVariableTypes(childOutputs, individualSlots),
+                          SbExprOptSbSlotPair{std::move(idOrEmptyObjExpr), slotIdForInitRoot});
+        stage = std::move(outStage);
+
+        outSlots[0].setTypeSignature(TypeSignature::kObjectType);
+        individualSlots.emplace_back(outSlots[0]);
+
+        return {std::move(stage), std::move(groupByExprs), outSlots[0]};
+    }
 }
 }  // namespace
 
@@ -749,8 +1214,8 @@ std::tuple<std::vector<std::string>, sbe::value::SlotVector, SbStage> buildGroup
  * [2] project [s8 = (s4 ?: null)]
  * [1] scan s6 s7 none none none none [s4 = a, s5 = b] @<collUuid> true false
  */
-std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> SlotBasedStageBuilder::buildGroup(
-    const QuerySolutionNode* root, const PlanStageReqs& reqs) {
+std::pair<SbStage, PlanStageSlots> SlotBasedStageBuilder::buildGroup(const QuerySolutionNode* root,
+                                                                     const PlanStageReqs& reqs) {
     tassert(6023414, "buildGroup() does not support kSortKey", !reqs.hasSortKeys());
 
     auto groupNode = static_cast<const GroupNode*>(root);
@@ -764,133 +1229,32 @@ std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> SlotBasedStageBuilder
 
     const auto& childNode = groupNode->children[0].get();
 
-    // Builds the child and gets the child result slot. If we don't need the full result object, we
-    // can process block values.
-    auto [childStage, childOutputs] = build(
-        childNode,
-        computeChildReqsForGroup(reqs, *groupNode).setCanProcessBlockValues(!reqs.hasResultObj()));
+    // Builds the child and gets the child result slot. If the GroupNode doesn't need the full
+    // result object, then we can process block values.
+    auto childReqs = computeChildReqsForGroup(reqs, *groupNode);
+    childReqs.setCanProcessBlockValues(!childReqs.hasResult());
+
+    auto [childStage, childOutputs] = build(childNode, childReqs);
+    auto stage = std::move(childStage);
 
     // Build the group stage in a separate helper method, so that the variables that are not needed
     // to setup the recursive call to build() don't consume precious stack.
-    return buildGroupImpl(groupNode, reqs, std::move(childStage), std::move(childOutputs));
-}
+    auto [outStage, fieldNames, finalSlots, outputs] =
+        buildGroupImpl(std::move(stage), reqs, std::move(childOutputs), groupNode);
+    stage = std::move(outStage);
 
-std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> SlotBasedStageBuilder::buildGroupImpl(
-    const GroupNode* groupNode,
-    const PlanStageReqs& reqs,
-    std::unique_ptr<sbe::PlanStage> childStage,
-    PlanStageSlots childOutputs) {
-    auto nodeId = groupNode->nodeId();
-
-    const auto& idExpr = groupNode->groupByExpression;
-    tassert(5851601, "GROUP should have had group-by key expression", idExpr);
-
-    const auto& accStmts = groupNode->accumulators;
-
-    // Map of field paths referenced by group. Useful for de-duplicating fields and clearing the
-    // slots corresponding to fields in 'childOutputs' so that they are not mistakenly referenced by
-    // parent stages.
-    StringMap<const ExpressionFieldPath*> groupFieldMap = collectFieldPaths(groupNode);
-    if (!groupFieldMap.empty()) {
-        // If we have block values in input, convert them to scalar values before computing the
-        // projection.
-        if (hasBlockOutput(childOutputs)) {
-            childStage = buildBlockToRow(std::move(childStage), childOutputs);
-        }
-
-        childStage = projectPathTraversalsForGroupBy(
-            _state, *groupNode, std::move(childStage), childOutputs, groupFieldMap);
-    }
-
-    sbe::value::SlotVector groupBySlots;
-    SbStage groupByStage;
-    SbExpr idFinalExpr;
-
-    SbExprBuilder b(_state);
-
-    // If we have an object as group id, let's stop block processing immediately and build
-    // the required projection to create it. If we have a single expression, we can try to
-    // vectorize it.
-    if (auto idExprObj = dynamic_cast<ExpressionObject*>(idExpr.get()); idExprObj) {
-        if (hasBlockOutput(childOutputs)) {
-            childStage = buildBlockToRow(std::move(childStage), childOutputs);
-        }
-        std::tie(groupBySlots, groupByStage, idFinalExpr) =
-            generateGroupByObjKey(_state, idExprObj, childOutputs, std::move(childStage), nodeId);
-    } else {
-        // Attempt to use a block-enabled project stage.
-        if (hasBlockOutput(childOutputs)) {
-            // The group-by field may end up being 'Nothing' and in that case _id: null will be
-            // returned. Calling 'makeFillEmptyNull' for the group-by field takes care of that.
-            auto groupByBlockExpr = buildVectorizedExpr(
-                b.makeFillEmptyNull(generateExpression(
-                    _state, idExpr.get(), childOutputs.getResultObjIfExists(), &childOutputs)),
-                childOutputs,
-                false);
-            if (groupByBlockExpr.has_value() &&
-                TypeSignature::kBlockType.isSubset(groupByBlockExpr->typeSignature)) {
-
-                // Make up a temporary field name so that we can register the slot in the
-                // childOutputs, as buildBlockToRow below reads from it to get the slots to convert
-                // to scalar. Use a Base64-encoded UUID to minimize the chance of colliding with
-                // existing fields.
-                std::array<unsigned char, 16> nonce = UUID::gen().data();
-                auto groupIdFieldName = std::make_pair(PlanStageSlots::kField,
-                                                       base64::encode(nonce.data(), sizeof(nonce)));
-
-                auto slot = _state.slotId();
-                groupByStage = makeProject(
-                    std::move(childStage), nodeId, slot, std::move(groupByBlockExpr->expr));
-                groupBySlots = sbe::value::SlotVector{slot};
-                childOutputs.set(groupIdFieldName,
-                                 TypedSlot{slot, groupByBlockExpr->typeSignature});
-
-                // TODO: remove this section when $group is able to digest block values.
-                // For now, we have to close the block processing pipeline here, remove the
-                // slot we just added and replace the slot used as group id with the scalar
-                // result.
-                groupByStage = buildBlockToRow(std::move(groupByStage), childOutputs);
-                groupBySlots[0] = childOutputs.get(groupIdFieldName).slotId;
-                childOutputs.clear(groupIdFieldName);
-            } else {
-                // Vectorization is not possible, stop block processing now.
-                childStage = buildBlockToRow(std::move(childStage), childOutputs);
-            }
-        }
-
-        // If vectorization wasn't needed, or if it failed, create the scalar projection.
-        if (!groupByStage) {
-            std::tie(groupBySlots, groupByStage, idFinalExpr) = generateGroupBySingleKey(
-                _state, idExpr, childOutputs, std::move(childStage), nodeId);
-        }
-    }
-
-    auto [fieldNames, finalSlots, outStage] = buildGroupAggregation(_state,
-                                                                    *groupNode,
-                                                                    _cq.getExpCtx()->allowDiskUse,
-                                                                    std::move(idFinalExpr),
-                                                                    childOutputs,
-                                                                    std::move(groupByStage),
-                                                                    groupBySlots);
-    auto stage = std::move(outStage);
+    const std::vector<AccumulationStatement>& accStmts = groupNode->accumulators;
 
     tassert(5851605,
             "The number of final slots must be as 1 (the final group-by slot) + the number of acc "
             "slots",
             finalSlots.size() == 1 + accStmts.size());
 
-    // Clear all fields needed by this group stage from 'childOutputs' to avoid references to
-    // ExpressionFieldPath values that are no longer visible.
-    for (const auto& groupField : groupFieldMap) {
-        childOutputs.clear({PlanStageSlots::kPathExpr, StringData(groupField.first)});
-    }
-
     auto fieldNamesSet = StringDataSet{fieldNames.begin(), fieldNames.end()};
     auto [fields, additionalFields] =
         splitVector(reqs.getFields(), [&](const std::string& s) { return fieldNamesSet.count(s); });
     auto fieldsSet = StringDataSet{fields.begin(), fields.end()};
 
-    PlanStageSlots outputs;
     for (size_t i = 0; i < fieldNames.size(); ++i) {
         if (fieldsSet.count(fieldNames[i])) {
             outputs.set(std::make_pair(PlanStageSlots::kField, fieldNames[i]), finalSlots[i]);
@@ -900,21 +1264,338 @@ std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> SlotBasedStageBuilder
     // Builds a stage to create a result object out of a group-by slot and gathered accumulator
     // result slots if the parent node requests so.
     if (reqs.hasResult() || !additionalFields.empty()) {
-        SbExpr::Vector funcArgs;
-        for (size_t i = 0; i < fieldNames.size(); ++i) {
-            funcArgs.emplace_back(b.makeStrConstant(fieldNames[i]));
-            funcArgs.emplace_back(SbVar{finalSlots[i]});
-        }
+        auto [outStage, outSlot] =
+            generateGroupResultObject(std::move(stage), _state, groupNode, fieldNames, finalSlots);
+        stage = std::move(outStage);
 
-        StringData newObjFn = groupNode->shouldProduceBson ? "newBsonObj"_sd : "newObj"_sd;
-        auto outputExpr = b.makeFunction(newObjFn, std::move(funcArgs));
-
-        auto slot = _slotIdGenerator.generate();
-        stage = makeProject(std::move(stage), nodeId, slot, outputExpr.extractExpr(_state).expr);
-
-        outputs.setResultObj(TypedSlot{slot, TypeSignature::kObjectType});
+        outputs.setResultObj(outSlot);
     }
 
     return {std::move(stage), std::move(outputs)};
-}
+}  // SlotBasedStageBuilder::buildGroup
+
+/**
+ * This function is called by buildGroup() and it contains most of the implementation for $group.
+ *
+ * It takes the GroupNode, the child's SBE stage tree, and the PlanStageSlots generated by the child
+ * as input, and it returns a tuple containing the updated SBE stage tree, a list of output field
+ * names and a list of output field slots (corresponding to the accumulators from the GroupNode),
+ * and a new empty PlanStageSlots object.
+ */
+std::tuple<SbStage, std::vector<std::string>, SbSlotVector, PlanStageSlots>
+SlotBasedStageBuilder::buildGroupImpl(SbStage stage,
+                                      const PlanStageReqs& reqs,
+                                      PlanStageSlots childOutputs,
+                                      const GroupNode* groupNode) {
+    const auto fcvSnapshot = serverGlobalParams.featureCompatibility.acquireFCVSnapshot();
+    const bool sbeFullEnabled = feature_flags::gFeatureFlagSbeFull.isEnabled(fcvSnapshot);
+    const bool sbeBlockHashAggEnabled =
+        feature_flags::gFeatureFlagSbeBlockHashAgg.isEnabled(fcvSnapshot);
+    const bool featureFlagsAllowBlockHashAgg = sbeFullEnabled || sbeBlockHashAggEnabled;
+
+    boost::optional<sbe::value::SlotId> collatorSlot = _state.getCollatorSlot();
+    const auto& idExpr = groupNode->groupByExpression;
+    const auto nodeId = groupNode->nodeId();
+    SbBuilder b(_state, nodeId);
+
+    tassert(5851601, "GROUP should have had group-by key expression", idExpr);
+
+    {
+        // Collect all the ExpressionFieldPaths referenced by from 'groupNode'.
+        StringMap<const ExpressionFieldPath*> groupFieldMap = collectFieldPaths(groupNode);
+
+        // Evaluate all of the ExpressionFieldPaths in 'groupFieldMap', project the results to
+        // slots, and put the slots into 'childOutputs' as kPathExpr slots.
+        stage = makePathExprsAvailableInSlots(
+            _state, *groupNode, std::move(stage), childOutputs, groupFieldMap);
+    }
+
+    const std::vector<AccumulationStatement>& accs = groupNode->accumulators;
+
+    // Check if any of the accumulators have a variable initializer.
+    bool hasVariableGroupInit = false;
+    for (const auto& accStmt : accs) {
+        hasVariableGroupInit =
+            hasVariableGroupInit || !ExpressionConstant::isNullOrConstant(accStmt.expr.initializer);
+    }
+
+    // Generate expressions for the group by keys.
+    SbExpr::Vector groupByExprs = generateGroupByKeyExprs(_state, idExpr.get(), childOutputs);
+
+    auto idExprObj = dynamic_cast<ExpressionObject*>(idExpr.get());
+    bool idIsSingleKey = idExprObj == nullptr;
+    bool vectorizedGroupByExprs = false;
+
+    if (childOutputs.hasBlockOutput()) {
+        // Try to vectorize all the group keys.
+        for (auto& sbExpr : groupByExprs) {
+            sbExpr = buildVectorizedExpr(_state, std::move(sbExpr), childOutputs, false);
+        }
+
+        // If some expressions could not be vectorized, rebuild everything after transitioning to
+        // scalar.
+        if (std::any_of(groupByExprs.begin(), groupByExprs.end(), [](const SbExpr& expr) {
+                return expr.isNull();
+            })) {
+            stage = buildBlockToRow(std::move(stage), _state, childOutputs);
+
+            // buildBlockToRow() just made a bunch of changes to 'childOutputs', so we need
+            // to re-generate 'groupByExprs'.
+            groupByExprs = generateGroupByKeyExprs(_state, idExpr.get(), childOutputs);
+        } else {
+            vectorizedGroupByExprs = true;
+        }
+    }
+
+    if (!vectorizedGroupByExprs) {
+        // If we didn't vectorize the groupBy expressions call optimize() on them so that the call
+        // to "isConstantExpr()" below can recognize more cases where the groupBy expr is constant.
+        auto varTypes = buildVariableTypes(childOutputs);
+        for (auto& sbExpr : groupByExprs) {
+            sbExpr.optimize(_state, varTypes);
+        }
+    }
+
+    // If one or more accumulators has a variable initializer, then we will eventually need
+    // need to set up 'initRootSlot' later in this function.
+    //
+    // For now we just reserve a slot ID for 'initRootSlot' so that we can pass the slot ID to
+    // generateAllAccumAggs(). Later we will make sure that 'initRootSlot' actually gets
+    // populated.
+    auto slotIdForInitRoot =
+        hasVariableGroupInit ? boost::make_optional(SbSlot{_state.slotId()}) : boost::none;
+
+    // The 'individualSlots' vector is used to keep track of all the slots that are currently
+    // "active" that are not present in 'childOutputs'. This vector is used together with
+    // 'childOutputs' when we need to do constant-folding / type analysis and vectorization.
+    SbSlotVector individualSlots;
+
+    // Define a helper lambda for checking if all accumulators support buildAddBlockAggs().
+    auto canBuildBlockExprsAndBlockAggs = [&]() -> bool {
+        return std::all_of(accs.begin(), accs.end(), [&](auto&& acc) {
+            auto accOp = AccumOp{acc};
+            return accOp.hasBuildAddBlockExprs() && accOp.hasBuildAddBlockAggs();
+        });
+    };
+
+    // Below are the conditions for attempting to use BlockHashAggStage. When 'tryToUseBlockHashAgg'
+    // is true, we will try vectorize to the accumulator args, and if that succeeds then we will try
+    // to generate the block agg expressions. If all of that is successful, then we will set the
+    // 'useBlockHashAgg' flag to true and we will use BlockHashAggStage. Otherwise, we use the
+    // normal HashAggStage.
+    const bool tryToUseBlockHashAgg = featureFlagsAllowBlockHashAgg &&
+        childOutputs.hasBlockOutput() && !hasVariableGroupInit && !collatorSlot &&
+        canBuildBlockExprsAndBlockAggs();
+
+    bool useBlockHashAgg = false;
+
+    boost::optional<std::vector<AccumInputsPtr>> accExprsVec;
+    boost::optional<std::vector<SbAggExprVector>> sbAggExprs;
+    std::vector<SbExpr::Vector> blockAccExprs;
+    std::vector<SbSlotVector> accumulatorDataSlots;
+    boost::optional<SbSlot> bitmapInternalSlot;
+
+    if (tryToUseBlockHashAgg) {
+        // If 'tryToUseBlockHashAgg' is true, then generate block arg expressions for all of the
+        // accumulators.
+        boost::optional<std::vector<AddBlockExprs>> accumBlockExprsVec =
+            generateAllAccumBlockExprs(_state, *groupNode, childOutputs);
+
+        // If generating block arg exprs for all the accumulators was successful, then proceed to
+        // generating block agg expressions for all the accumulators.
+        if (accumBlockExprsVec) {
+            // Unpack 'accumBlockExprsVec' and populate 'accExprsVec', 'blockAccExprs', and
+            // 'accumulatorDataSlots'.
+            accExprsVec.emplace();
+
+            for (auto& accumBlockExprs : *accumBlockExprsVec) {
+                accExprsVec->emplace_back(std::move(accumBlockExprs.inputs));
+                blockAccExprs.emplace_back(std::move(accumBlockExprs.exprs));
+                accumulatorDataSlots.emplace_back(std::move(accumBlockExprs.slots));
+            }
+
+            // When calling generateAllAccumAggs() with genBlockAggs=true, we have to pass in two
+            // additional "internal" slots.
+            bitmapInternalSlot.emplace(SbSlot{_state.slotId()});
+
+            // Generate the SbAggExprs for all the accumulators from 'groupNode'.
+            sbAggExprs = generateAllAccumAggs(_state,
+                                              *groupNode,
+                                              childOutputs,
+                                              std::move(*accExprsVec),
+                                              slotIdForInitRoot,
+                                              true /* genBlockAggs */,
+                                              bitmapInternalSlot);
+        }
+    }
+
+    if (sbAggExprs) {
+        // If generating block agg expressions for all the accumulators was successful, then we
+        // can use BlockHashAggStage.
+        useBlockHashAgg = true;
+
+        // Assert that the 'blockAgg' field is non-null for all SbAggExprs in 'sbAggExprs'.
+        const bool hasNullBlockAggs =
+            std::any_of(sbAggExprs->begin(), sbAggExprs->end(), [](auto&& v) {
+                return std::any_of(
+                    v.begin(), v.end(), [](auto&& e) { return e.first.blockAgg.isNull(); });
+            });
+
+        tassert(8751305, "Expected all blockAgg fields to be defined", !hasNullBlockAggs);
+    }
+
+    // If we aren't not going to use BlockHashAggStage, then we need to close the block processing
+    // pipeline here.
+    if (!useBlockHashAgg) {
+        blockAccExprs.clear();
+        accumulatorDataSlots.clear();
+        bitmapInternalSlot = boost::none;
+
+        if (childOutputs.hasBlockOutput()) {
+            SbExprOptSbSlotVector projects;
+            for (size_t i = 0; i < groupByExprs.size(); ++i) {
+                projects.emplace_back(std::move(groupByExprs[i]), boost::none);
+            }
+
+            auto [projectStage, groupBySlots] = b.makeProject(
+                std::move(stage), buildVariableTypes(childOutputs), std::move(projects));
+
+            auto [outStage, outSlots] = buildBlockToRow(
+                std::move(projectStage), _state, childOutputs, std::move(groupBySlots));
+            stage = std::move(outStage);
+
+            for (size_t i = 0; i < groupByExprs.size(); ++i) {
+                groupByExprs[i] = outSlots[i];
+            }
+
+            individualSlots = outSlots;
+        }
+    }
+
+    // If we didn't try to generate block agg expressions for the accumulators, or if we tried
+    // and failed, then we need to generate scalar arg exprs and scalar agg expressions for all
+    // the accumulators.
+    if (!sbAggExprs) {
+        // Generate the scalar arg exprs.
+        accExprsVec = generateAllAccumExprs(_state, *groupNode, childOutputs);
+
+        tassert(8751300, "Expected accumulator arg exprs to be defined", accExprsVec.has_value());
+
+        // Generate the scalar agg expressions.
+        sbAggExprs = generateAllAccumAggs(_state,
+                                          *groupNode,
+                                          childOutputs,
+                                          std::move(*accExprsVec),
+                                          slotIdForInitRoot,
+                                          false /* genBlockAggs */,
+                                          boost::none /* bitmapInternalSlot */);
+    }
+
+    tassert(8751301, "Expected accumulator aggs to be defined", sbAggExprs.has_value());
+
+    // If one or more accumulators has a variable initializer, then we need to set up
+    // 'initRootSlot'.
+    boost::optional<SbSlot> initRootSlot;
+
+    if (hasVariableGroupInit) {
+        auto [outStage, outExprs, outSlot] = generateInitRootSlot(std::move(stage),
+                                                                  _state,
+                                                                  childOutputs,
+                                                                  individualSlots,
+                                                                  std::move(groupByExprs),
+                                                                  vectorizedGroupByExprs,
+                                                                  idExprObj,
+                                                                  slotIdForInitRoot,
+                                                                  nodeId);
+        stage = std::move(outStage);
+        groupByExprs = std::move(outExprs);
+        initRootSlot.emplace(outSlot);
+
+        idIsSingleKey = true;
+    }
+
+    // Generate merging expressions for all the accumulators.
+    std::vector<SbExprSbSlotVector> mergingExprs = generateAllMergingExprs(_state, *groupNode);
+
+    // If there is a single groupBy key that didn't get vectorized and is constant, and if none of
+    // the accumulators had a variable initializer, then we set 'idConstantValue' and we clear the
+    // the 'groupByExprs' vector.
+    SbExpr idConstantValue;
+
+    if (idIsSingleKey && !vectorizedGroupByExprs && groupByExprs[0].isConstantExpr() &&
+        !hasVariableGroupInit) {
+        idConstantValue = std::move(groupByExprs[0]);
+        groupByExprs.clear();
+    }
+
+    // Build the HashAggStage or the BlockHashAggStage.
+    auto [outStage, groupByOutSlots, aggOutSlots] =
+        buildGroupAggregation(_state,
+                              childOutputs,
+                              std::move(individualSlots),
+                              std::move(stage),
+                              _cq.getExpCtx()->allowDiskUse,
+                              std::move(groupByExprs),
+                              std::move(*sbAggExprs),
+                              std::move(mergingExprs),
+                              useBlockHashAgg,
+                              std::move(blockAccExprs),
+                              bitmapInternalSlot,
+                              accumulatorDataSlots,
+                              _yieldPolicy,
+                              nodeId);
+    stage = std::move(outStage);
+
+    // Initialize a new PlanStageSlots object ('outputs').
+    PlanStageSlots outputs;
+
+    // After the HashAgg/BlockHashAgg stage, the only slots that are "active" are the group-by slots
+    // ('groupByOutSlots') and the output slots for the accumulators from groupNode ('aggOutSlots').
+    individualSlots = groupByOutSlots;
+    individualSlots.insert(individualSlots.end(), aggOutSlots.begin(), aggOutSlots.end());
+
+    if (useBlockHashAgg) {
+        tassert(8448606,
+                "Expected at least one group by slot or agg out slot",
+                !groupByOutSlots.empty() || !aggOutSlots.empty());
+
+        // This stage re-maps the selectivity bitset slot.
+        outputs.set(PlanStageSlots::kBlockSelectivityBitmap,
+                    childOutputs.get(PlanStageSlots::kBlockSelectivityBitmap));
+    }
+
+    // For now we unconditionally end the block processing pipeline here.
+    if (outputs.hasBlockOutput()) {
+        auto hashAggOutSlots = groupByOutSlots;
+        hashAggOutSlots.insert(hashAggOutSlots.end(), aggOutSlots.begin(), aggOutSlots.end());
+
+        auto [outStage, blockToRowOutSlots] =
+            buildBlockToRow(std::move(stage), _state, outputs, std::move(hashAggOutSlots));
+        stage = std::move(outStage);
+
+        for (size_t i = 0; i < groupByOutSlots.size(); ++i) {
+            groupByOutSlots[i] = blockToRowOutSlots[i];
+        }
+        for (size_t i = 0; i < aggOutSlots.size(); ++i) {
+            size_t blockToRowOutSlotsIdx = groupByOutSlots.size() + i;
+            aggOutSlots[i] = blockToRowOutSlots[blockToRowOutSlotsIdx];
+        }
+
+        // buildBlockToRow() just made a bunch of changes to 'groupByOutSlots' and 'aggOutSlots',
+        // so we need to re-generate 'individualSlots'.
+        individualSlots = groupByOutSlots;
+        individualSlots.insert(individualSlots.end(), aggOutSlots.begin(), aggOutSlots.end());
+    }
+
+    // Builds the final stage(s) over the collected accumulators.
+    return generateGroupFinalStage(_state,
+                                   std::move(stage),
+                                   std::move(outputs),
+                                   individualSlots,
+                                   std::move(groupByOutSlots),
+                                   std::move(aggOutSlots),
+                                   *groupNode,
+                                   idIsSingleKey,
+                                   std::move(idConstantValue));
+}  // SlotBasedStageBuilder::buildGroupImpl
 }  // namespace mongo::stage_builder

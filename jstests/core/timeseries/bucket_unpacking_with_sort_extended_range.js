@@ -1,3 +1,4 @@
+
 /**
  * Test that sort queries work properly on dates ouside the 32 bit epoch range,
  *  [1970-01-01 00:00:00 UTC - 2038-01-29 03:13:07 UTC], when a collection scan is used.
@@ -13,6 +14,9 @@
  *     tenant_migration_incompatible,
  *     # We need a timeseries collection.
  *     requires_timeseries,
+ *     # TODO (SERVER-88539) the timeseries setup runs a migration. Remove the upgrade-downgrade
+ *     # incompatible tag once migrations  work during downgrade.
+ *     cannot_run_during_upgrade_downgrade,
  * ]
  */
 import {getAggPlanStages} from "jstests/libs/analyze_plan.js";

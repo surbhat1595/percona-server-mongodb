@@ -150,6 +150,7 @@ void TimeseriesUpsertStage::_performInsert(BSONObj newMeasurement) {
             auto newBucket =
                 timeseries::makeBucketDocument({newMeasurement},
                                                acq.nss(),
+                                               collectionPtr()->uuid(),
                                                *collectionPtr()->getTimeseriesOptions(),
                                                collectionPtr()->getDefaultCollator());
 
@@ -196,7 +197,9 @@ void TimeseriesUpsertStage::_performInsert(BSONObj newMeasurement) {
                                                  *_sideBucketCatalog,
                                                  _params.fromMigrate,
                                                  _params.stmtId,
-                                                 &_insertedBucketIds);
+                                                 &_insertedBucketIds,
+                                                 /*compressAndWriteBucketFunc=*/
+                                                 nullptr);
     });
 }
 

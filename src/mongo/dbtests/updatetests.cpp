@@ -55,6 +55,7 @@
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/query/find_command.h"
+#include "mongo/db/query/query_settings/query_settings_manager.h"
 #include "mongo/db/service_context.h"
 #include "mongo/dbtests/dbtests.h"  // IWYU pragma: keep
 #include "mongo/rpc/get_status_from_command_result.h"
@@ -68,7 +69,9 @@ namespace dps = ::mongo::dotted_path_support;
 
 class ClientBase {
 public:
-    ClientBase() : _client(&_opCtx) {}
+    ClientBase() : _client(&_opCtx) {
+        query_settings::QuerySettingsManager::create(_opCtx.getServiceContext(), {});
+    }
 
 protected:
     const ServiceContext::UniqueOperationContext _txnPtr = cc().makeOperationContext();
@@ -102,57 +105,57 @@ private:
 };
 
 class ModId : public Fail {
-    BSONObj doIt() {
+    BSONObj doIt() override {
         return _client.updateAcknowledged(nss(), BSONObj(), fromjson("{$set:{'_id':4}}"));
     }
 };
 
 class ModNonmodMix : public Fail {
-    BSONObj doIt() {
+    BSONObj doIt() override {
         return _client.updateAcknowledged(nss(), BSONObj(), fromjson("{$set:{a:4},z:3}"));
     }
 };
 
 class InvalidMod : public Fail {
-    BSONObj doIt() {
+    BSONObj doIt() override {
         return _client.updateAcknowledged(nss(), BSONObj(), fromjson("{$awk:{a:4}}"));
     }
 };
 
 class ModNotFirst : public Fail {
-    BSONObj doIt() {
+    BSONObj doIt() override {
         return _client.updateAcknowledged(nss(), BSONObj(), fromjson("{z:3,$set:{a:4}}"));
     }
 };
 
 class ModDuplicateFieldSpec : public Fail {
-    BSONObj doIt() {
+    BSONObj doIt() override {
         return _client.updateAcknowledged(nss(), BSONObj(), fromjson("{$set:{a:4},$inc:{a:1}}"));
     }
 };
 
 class IncNonNumber : public Fail {
-    BSONObj doIt() {
+    BSONObj doIt() override {
         return _client.updateAcknowledged(nss(), BSONObj(), fromjson("{$inc:{a:'d'}}"));
     }
 };
 
 class PushAllNonArray : public Fail {
-    BSONObj doIt() {
+    BSONObj doIt() override {
         _client.insert(nss(), fromjson("{a:[1]}"));
         return _client.updateAcknowledged(nss(), BSONObj(), fromjson("{$pushAll:{a:'d'}}"));
     }
 };
 
 class PullAllNonArray : public Fail {
-    BSONObj doIt() {
+    BSONObj doIt() override {
         _client.insert(nss(), fromjson("{a:[1]}"));
         return _client.updateAcknowledged(nss(), BSONObj(), fromjson("{$pullAll:{a:'d'}}"));
     }
 };
 
 class IncTargetNonNumber : public Fail {
-    BSONObj doIt() {
+    BSONObj doIt() override {
         _client.insert(nss(), fromjson("{a:'a'}"));
         return _client.updateAcknowledged(nss(), fromjson("{a:'a'}"), fromjson("{$inc:{a:1}}"));
     }
@@ -547,7 +550,7 @@ public:
 
 class InvalidEmbeddedSet : public Fail {
 public:
-    virtual BSONObj doIt() {
+    BSONObj doIt() override {
         return _client.updateAcknowledged(
             nss(), BSONObj{} /*filter*/, BSON("$set" << BSON("a." << 1)));
     }
@@ -1912,88 +1915,88 @@ class SingleTest : public Base {
     virtual BSONObj mod() = 0;
     virtual BSONObj after() = 0;
 
-    void dotest() {
+    void dotest() override {
         test(initial(), mod(), after());
     }
 };
 
 class inc1 : public SingleTest {
-    virtual BSONObj initial() {
+    BSONObj initial() override {
         return BSON("_id" << 1 << "x" << 1);
     }
-    virtual BSONObj mod() {
+    BSONObj mod() override {
         return BSON("$inc" << BSON("x" << 2));
     }
-    virtual BSONObj after() {
+    BSONObj after() override {
         return BSON("_id" << 1 << "x" << 3);
     }
-    virtual const char* ns() {
+    const char* ns() override {
         return "unittests.inc1";
     }
 };
 
 class inc2 : public SingleTest {
-    virtual BSONObj initial() {
+    BSONObj initial() override {
         return BSON("_id" << 1 << "x" << 1);
     }
-    virtual BSONObj mod() {
+    BSONObj mod() override {
         return BSON("$inc" << BSON("x" << 2.5));
     }
-    virtual BSONObj after() {
+    BSONObj after() override {
         return BSON("_id" << 1 << "x" << 3.5);
     }
-    virtual const char* ns() {
+    const char* ns() override {
         return "unittests.inc2";
     }
 };
 
 class inc3 : public SingleTest {
-    virtual BSONObj initial() {
+    BSONObj initial() override {
         return BSON("_id" << 1 << "x" << 537142123123LL);
     }
-    virtual BSONObj mod() {
+    BSONObj mod() override {
         return BSON("$inc" << BSON("x" << 2));
     }
-    virtual BSONObj after() {
+    BSONObj after() override {
         return BSON("_id" << 1 << "x" << 537142123125LL);
     }
-    virtual const char* ns() {
+    const char* ns() override {
         return "unittests.inc3";
     }
 };
 
 class inc4 : public SingleTest {
-    virtual BSONObj initial() {
+    BSONObj initial() override {
         return BSON("_id" << 1 << "x" << 537142123123LL);
     }
-    virtual BSONObj mod() {
+    BSONObj mod() override {
         return BSON("$inc" << BSON("x" << 2LL));
     }
-    virtual BSONObj after() {
+    BSONObj after() override {
         return BSON("_id" << 1 << "x" << 537142123125LL);
     }
-    virtual const char* ns() {
+    const char* ns() override {
         return "unittests.inc4";
     }
 };
 
 class inc5 : public SingleTest {
-    virtual BSONObj initial() {
+    BSONObj initial() override {
         return BSON("_id" << 1 << "x" << 537142123123LL);
     }
-    virtual BSONObj mod() {
+    BSONObj mod() override {
         return BSON("$inc" << BSON("x" << 2.0));
     }
-    virtual BSONObj after() {
+    BSONObj after() override {
         return BSON("_id" << 1 << "x" << 537142123125LL);
     }
-    virtual const char* ns() {
+    const char* ns() override {
         return "unittests.inc5";
     }
 };
 
 class inc6 : public Base {
-    virtual const char* ns() {
+    const char* ns() override {
         return "unittests.inc6";
     }
 
@@ -2008,7 +2011,7 @@ class inc6 : public Base {
         return BSONObj();
     }
 
-    void dotest() {
+    void dotest() override {
         long long start = std::numeric_limits<int>::max() - 5;
         long long max = std::numeric_limits<int>::max() + 5ll;
 
@@ -2026,10 +2029,10 @@ class inc6 : public Base {
 };
 
 class bit1 : public Base {
-    const char* ns() {
+    const char* ns() override {
         return "unittests.bit1";
     }
-    void dotest() {
+    void dotest() override {
         test(BSON("_id" << 1 << "x" << 3),
              BSON("$bit" << BSON("x" << BSON("and" << 2))),
              BSON("_id" << 1 << "x" << (3 & 2)));
@@ -2046,19 +2049,19 @@ class bit1 : public Base {
 };
 
 class unset : public Base {
-    const char* ns() {
+    const char* ns() override {
         return "unittests.unset";
     }
-    void dotest() {
+    void dotest() override {
         test("{_id:1,x:1}", "{$unset:{x:1}}", "{_id:1}");
     }
 };
 
 class setswitchint : public Base {
-    const char* ns() {
+    const char* ns() override {
         return "unittests.int1";
     }
-    void dotest() {
+    void dotest() override {
         test(BSON("_id" << 1 << "x" << 1),
              BSON("$set" << BSON("x" << 5.6)),
              BSON("_id" << 1 << "x" << 5.6));
@@ -2072,7 +2075,7 @@ class setswitchint : public Base {
 class All : public unittest::OldStyleSuiteSpecification {
 public:
     All() : OldStyleSuiteSpecification("update") {}
-    void setupTests() {
+    void setupTests() override {
         add<ModId>();
         add<ModNonmodMix>();
         add<InvalidMod>();

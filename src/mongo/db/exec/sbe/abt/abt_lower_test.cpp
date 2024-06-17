@@ -44,7 +44,6 @@
 #include "mongo/db/exec/sbe/abt/abt_lower.h"
 #include "mongo/db/exec/sbe/expressions/runtime_environment.h"
 #include "mongo/db/exec/sbe/util/debug_print.h"
-#include "mongo/db/query/cqf_get_executor.h"
 #include "mongo/db/query/optimizer/algebra/polyvalue.h"
 #include "mongo/db/query/optimizer/comparison_op.h"
 #include "mongo/db/query/optimizer/containers.h"
@@ -278,7 +277,7 @@ protected:
         bool changed = false;
         do {
             changed = false;
-            if (PathLowering{prefixId, env}.optimize(tree)) {
+            if (PathLowering{prefixId}.optimize(tree)) {
                 changed = true;
             }
             if (ConstEval{env}.optimize(tree)) {

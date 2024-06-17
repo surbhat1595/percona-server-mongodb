@@ -65,6 +65,7 @@
 #include "mongo/s/catalog/type_collection.h"
 #include "mongo/s/chunk_version.h"
 #include "mongo/s/client/shard.h"
+#include "mongo/s/cluster_commands_helpers.h"
 #include "mongo/s/request_types/merge_chunk_request_gen.h"
 #include "mongo/s/request_types/migration_secondary_throttle_options.h"
 #include "mongo/s/request_types/move_range_request_gen.h"
@@ -316,8 +317,11 @@ class MoveCollectionCommandInfo : public CommandInfo {
 public:
     MoveCollectionCommandInfo(const NamespaceString& nss,
                               const ShardId& toShardId,
-                              const ShardId& dbPrimaryShard)
-        : CommandInfo(dbPrimaryShard, nss, boost::none), _toShardId(toShardId) {}
+                              const ShardId& dbPrimaryShard,
+                              const DatabaseVersion& dbVersion)
+        : CommandInfo(dbPrimaryShard, nss, boost::none),
+          _toShardId(toShardId),
+          _dbVersion(dbVersion) {}
 
     BSONObj serialise() const override {
         ShardsvrReshardCollection shardsvrReshardCollection(getNameSpace());
@@ -333,11 +337,14 @@ public:
         reshardCollectionRequest.setNumInitialChunks(1);
 
         shardsvrReshardCollection.setReshardCollectionRequest(std::move(reshardCollectionRequest));
-        return shardsvrReshardCollection.toBSON({});
+        return appendDbVersionIfPresent(
+            CommandHelpers::appendMajorityWriteConcern(shardsvrReshardCollection.toBSON({})),
+            _dbVersion);
     }
 
 private:
     const ShardId _toShardId;
+    const DatabaseVersion _dbVersion;
 };
 
 /**
@@ -377,7 +384,7 @@ public:
           _completedOrAborted(false),
           _commandInfo(std::move(commandInfo)),
           _responsePromise{NonNullPromiseTag{}} {
-        invariant(_commandInfo);
+        tassert(8245210, "CommandInfo is be empty", _commandInfo);
     }
 
     RequestData(RequestData&& rhs)
@@ -397,7 +404,7 @@ public:
     }
 
     Status applySubmissionResult(CommandSubmissionResult&& submissionResult) {
-        invariant(_id == submissionResult.id);
+        tassert(8245211, "Result ID does not match request ID", _id == submissionResult.id);
         if (_completedOrAborted) {
             // A remote response was already received by the time the submission gets processed.
             // Keep the original outcome and continue the workflow.
@@ -454,7 +461,7 @@ class BalancerCommandsSchedulerImpl : public BalancerCommandsScheduler {
 public:
     BalancerCommandsSchedulerImpl();
 
-    ~BalancerCommandsSchedulerImpl();
+    ~BalancerCommandsSchedulerImpl() override;
 
     void start(OperationContext* opCtx) override;
 
@@ -489,7 +496,8 @@ public:
     SemiFuture<void> requestMoveCollection(OperationContext* opCtx,
                                            const NamespaceString& nss,
                                            const ShardId& toShardId,
-                                           const ShardId& dbPrimaryShardId) override;
+                                           const ShardId& dbPrimaryShardId,
+                                           const DatabaseVersion& dbVersion) override;
 
 private:
     enum class SchedulerState { Recovering, Running, Stopping, Stopped };

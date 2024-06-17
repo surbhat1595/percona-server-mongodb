@@ -189,7 +189,18 @@ public:
      * When all of the storage startup tasks are completed as a whole, then this function is called
      * by the external force managing the startup process.
      */
-    virtual void notifyStartupComplete(OperationContext* opCtx) {}
+    virtual void notifyStorageStartupRecoveryComplete() {}
+
+    /**
+     * Perform any operations in the storage layer that are unblocked now that the server has exited
+     * replication startup recovery and considers itself stable.
+     *
+     * This will be called during a node's transition to steady state replication.
+     *
+     * This function may race with shutdown. As a result, any steps within this function that should
+     * not race with shutdown should obtain the global lock.
+     */
+    virtual void notifyReplStartupRecoveryComplete(OperationContext* opCtx) {}
 
     /**
      * Returns a new interface to the storage engine's recovery unit.  The recovery
@@ -588,7 +599,7 @@ public:
      * Sets the oldest timestamp for which the storage engine must maintain snapshot history
      * through. Additionally, all future writes must be newer or equal to this value.
      */
-    virtual void setOldestTimestamp(Timestamp timestamp) = 0;
+    virtual void setOldestTimestamp(Timestamp timestamp, bool force) = 0;
 
     /**
      * Gets the oldest timestamp for which the storage engine must maintain snapshot history
@@ -728,20 +739,8 @@ public:
     virtual void dump() const = 0;
 
     /**
-     * Represents the options for background compaction.
-     */
-    struct AutoCompactOptions {
-        bool enable = false;
-        bool runOnce = false;
-        boost::optional<int64_t> freeSpaceTargetMB;
-        std::vector<StringData> excludedIdents;
-    };
-
-    /**
      * Toggles auto compact for a database. Auto compact periodically iterates through all of
-     * the files available and runs compaction if they are eligible. If the freeSpaceTargetMB is
-     * provided, compaction only proceeds if the free storage space available is greater than
-     * the provided value.
+     * the files available and runs compaction if they are eligible.
      */
     virtual Status autoCompact(OperationContext* opCtx, const AutoCompactOptions& options) = 0;
 };

@@ -8,8 +8,6 @@
 //   does_not_support_stepdowns,
 //   # Plan cache state is node-local and will not get migrated alongside tenant data.
 //   tenant_migration_incompatible,
-//   # TODO SERVER-67607: Test plan cache with CQF enabled.
-//   cqf_experimental_incompatible,
 // ]
 import {getPlanCacheKeyFromExplain} from "jstests/libs/analyze_plan.js";
 import {FixtureHelpers} from "jstests/libs/fixture_helpers.js";
@@ -25,7 +23,7 @@ assert.commandWorked(coll.insert({a: 2, b: 3}));
 assert.eq(1, coll.find({a: 2, b: 3}).itcount());
 
 const explain = coll.find({a: 2, b: 3}).explain();
-const planCacheKey = getPlanCacheKeyFromExplain(explain, db);
+const planCacheKey = getPlanCacheKeyFromExplain(explain);
 
 function filterPlanCacheEntriesByKey(planCacheKey, planCacheContents) {
     let filteredPlanCacheEntries = [];

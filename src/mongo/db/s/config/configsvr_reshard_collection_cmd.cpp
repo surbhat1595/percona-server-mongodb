@@ -123,14 +123,18 @@ public:
                 repl::ReadConcernArgs(repl::ReadConcernLevel::kLocalReadConcern);
 
             const auto catalogClient = ShardingCatalogManager::get(opCtx)->localCatalogClient();
-            try {
-                const auto collEntry = catalogClient->getCollection(opCtx, nss);
-                uassert(ErrorCodes::NotImplemented,
-                        "reshardCollection command of a sharded time-series collection is not "
-                        "supported",
-                        !collEntry.getTimeseriesFields());
-            } catch (const ExceptionFor<ErrorCodes::NamespaceNotFound>&) {
-                // collection doesn't exist or not sharded, skip check for time-series collection.
+            if (!mongo::resharding::gFeatureFlagReshardingForTimeseries.isEnabled(
+                    serverGlobalParams.featureCompatibility.acquireFCVSnapshot())) {
+                try {
+                    const auto collEntry = catalogClient->getCollection(opCtx, nss);
+                    uassert(ErrorCodes::NotImplemented,
+                            "reshardCollection command of a sharded time-series collection is not "
+                            "supported",
+                            !collEntry.getTimeseriesFields());
+                } catch (const ExceptionFor<ErrorCodes::NamespaceNotFound>&) {
+                    // collection doesn't exist or not sharded, skip check for time-series
+                    // collection.
+                }
             }
 
             uassert(ErrorCodes::BadValue,
@@ -238,11 +242,18 @@ public:
                         ->getTrackedCollectionRoutingInfoWithPlacementRefresh(opCtx, nss));
 
                 auto tempReshardingNss =
-                    resharding::constructTemporaryReshardingNss(nss.db_forSharding(), cm.getUUID());
+                    resharding::constructTemporaryReshardingNss(nss, cm.getUUID());
 
 
                 if (auto zones = request().getZones()) {
                     resharding::checkForOverlappingZones(*zones);
+
+                    for (const auto& zone : *zones) {
+                        uassertStatusOK(
+                            ShardKeyPattern::checkShardKeyIsValidForMetadataStorage(zone.getMin()));
+                        uassertStatusOK(
+                            ShardKeyPattern::checkShardKeyIsValidForMetadataStorage(zone.getMax()));
+                    }
                 }
 
                 auto coordinatorDoc =

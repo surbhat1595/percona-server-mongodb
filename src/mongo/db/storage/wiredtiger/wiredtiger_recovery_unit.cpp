@@ -114,6 +114,11 @@ WiredTigerRecoveryUnit::~WiredTigerRecoveryUnit() {
         auto wtSession = getSessionNoTxn()->getSession();
         invariantWTOK(wtSession->reconfigure(wtSession, "cache_max_wait_ms=0"), wtSession);
     }
+
+    if (_prefetchingSet) {
+        auto wtSession = getSessionNoTxn()->getSession();
+        invariantWTOK(wtSession->reconfigure(wtSession, "prefetch=(enabled=false)"), wtSession);
+    }
 }
 
 void WiredTigerRecoveryUnit::_commit() {
@@ -188,9 +193,24 @@ void WiredTigerRecoveryUnit::doAbortUnitOfWork() {
 }
 
 void WiredTigerRecoveryUnit::_ensureSession() {
-    if (!_session) {
-        _session = _sessionCache->getSession();
+    if (!_unique_session) {
+        invariant(!_session);
+        _unique_session = _sessionCache->getSession();
+        _session = _unique_session.get();
     }
+}
+
+void WiredTigerRecoveryUnit::setPrefetching(bool enable) {
+    invariant(!_inUnitOfWork(), toString(_getState()));
+    invariant(getSessionNoTxn()->cursorsOut() == 0);
+
+    auto wtSession = getSessionNoTxn()->getSession();
+
+    _prefetchingSet = enable;
+
+    StringBuilder config;
+    config << "prefetch=(enabled=" << (enable ? "true" : "false") << ")";
+    invariantWTOK(wtSession->reconfigure(wtSession, config.str().c_str()), wtSession);
 }
 
 bool WiredTigerRecoveryUnit::waitUntilDurable(OperationContext* opCtx) {
@@ -257,12 +277,12 @@ WiredTigerSession* WiredTigerRecoveryUnit::getSession() {
         _txnOpen();
         _setState(_inUnitOfWork() ? State::kActive : State::kActiveNotInUnitOfWork);
     }
-    return _session.get();
+    return _session;
 }
 
 WiredTigerSession* WiredTigerRecoveryUnit::getSessionNoTxn() {
     _ensureSession();
-    return _session.get();
+    return _session;
 }
 
 void WiredTigerRecoveryUnit::doAbandonSnapshot() {
@@ -365,15 +385,15 @@ void WiredTigerRecoveryUnit::_txnClose(bool commit) {
             22412, 3, "WT commit_transaction", "snapshotId"_attr = getSnapshotId().toNumber());
     } else {
         invariant(_abandonSnapshotMode == AbandonSnapshotMode::kAbort);
-        StringBuilder config;
+        const char* config = nullptr;
         if (_noEvictionAfterRollback) {
             // The only point at which rollback_transaction() can time out is in the bonus-eviction
             // phase. If the timeout expires here, the function will stop the eviction and return
             // success. It cannot return an error due to timeout.
-            config << "operation_timeout_ms=1,";
+            config = "operation_timeout_ms=1,";
         }
 
-        wtRet = s->rollback_transaction(s, config.str().c_str());
+        wtRet = s->rollback_transaction(s, config);
 
         LOGV2_DEBUG(
             22413, 3, "WT rollback_transaction", "snapshotId"_attr = getSnapshotId().toNumber());
@@ -403,7 +423,7 @@ void WiredTigerRecoveryUnit::_txnClose(bool commit) {
     // transaction on a RecoveryUnit to call setTimestamp() and another to call
     // setCommitTimestamp().
     _lastTimestampSet = boost::none;
-    _multiTimestampConstraintTracker = MultiTimestampConstraintTracker();
+    _multiTimestampConstraintTracker = {};
     _prepareTimestamp = Timestamp();
     _durableTimestamp = Timestamp();
     _roundUpPreparedTimestamps = RoundUpPreparedTimestamps::kNoRound;
@@ -501,12 +521,11 @@ void WiredTigerRecoveryUnit::_txnOpen() {
     if (shouldLog(MONGO_LOGV2_DEFAULT_COMPONENT, kSlowTransactionSeverity)) {
         _timer.reset(new Timer());
     }
-    WT_SESSION* session = _session->getSession();
 
     switch (_timestampReadSource) {
         case ReadSource::kNoTimestamp: {
             _oplogVisibleTs = static_cast<std::int64_t>(_oplogManager->getOplogReadTimestamp());
-            WiredTigerBeginTxnBlock(session,
+            WiredTigerBeginTxnBlock(_session,
                                     _prepareConflictBehavior,
                                     _roundUpPreparedTimestamps,
                                     RoundUpReadTimestamp::kNoRoundError,
@@ -515,7 +534,7 @@ void WiredTigerRecoveryUnit::_txnOpen() {
             break;
         }
         case ReadSource::kCheckpoint: {
-            WiredTigerBeginTxnBlock(session,
+            WiredTigerBeginTxnBlock(_session,
                                     _prepareConflictBehavior,
                                     _roundUpPreparedTimestamps,
                                     RoundUpReadTimestamp::kNoRoundError,
@@ -525,29 +544,29 @@ void WiredTigerRecoveryUnit::_txnOpen() {
         }
         case ReadSource::kMajorityCommitted: {
             _readAtTimestamp = _sessionCache->snapshotManager().beginTransactionOnCommittedSnapshot(
-                session,
+                _session,
                 _prepareConflictBehavior,
                 _roundUpPreparedTimestamps,
                 _untimestampedWriteAssertionLevel);
             break;
         }
         case ReadSource::kLastApplied: {
-            _beginTransactionAtLastAppliedTimestamp(session);
+            _beginTransactionAtLastAppliedTimestamp();
             break;
         }
         case ReadSource::kNoOverlap: {
-            _readAtTimestamp = _beginTransactionAtNoOverlapTimestamp(session);
+            _readAtTimestamp = _beginTransactionAtNoOverlapTimestamp();
             break;
         }
         case ReadSource::kAllDurableSnapshot: {
             if (_readAtTimestamp.isNull()) {
-                _readAtTimestamp = _beginTransactionAtAllDurableTimestamp(session);
+                _readAtTimestamp = _beginTransactionAtAllDurableTimestamp();
                 break;
             }
             [[fallthrough]];  // Continue to the next case to read at the _readAtTimestamp.
         }
         case ReadSource::kProvided: {
-            WiredTigerBeginTxnBlock txnOpen(session,
+            WiredTigerBeginTxnBlock txnOpen(_session,
                                             _prepareConflictBehavior,
                                             _roundUpPreparedTimestamps,
                                             RoundUpReadTimestamp::kNoRoundError,
@@ -575,8 +594,8 @@ void WiredTigerRecoveryUnit::_txnOpen() {
                 "readSource"_attr = toString(_timestampReadSource));
 }
 
-Timestamp WiredTigerRecoveryUnit::_beginTransactionAtAllDurableTimestamp(WT_SESSION* session) {
-    WiredTigerBeginTxnBlock txnOpen(session,
+Timestamp WiredTigerRecoveryUnit::_beginTransactionAtAllDurableTimestamp() {
+    WiredTigerBeginTxnBlock txnOpen(_session,
                                     _prepareConflictBehavior,
                                     _roundUpPreparedTimestamps,
                                     RoundUpReadTimestamp::kRound,
@@ -588,12 +607,12 @@ Timestamp WiredTigerRecoveryUnit::_beginTransactionAtAllDurableTimestamp(WT_SESS
     // Since this is not in a critical section, we might have rounded to oldest between
     // calling getAllDurable and setReadSnapshot.  We need to get the actual read timestamp we
     // used.
-    auto readTimestamp = _getTransactionReadTimestamp(session);
+    auto readTimestamp = _getTransactionReadTimestamp();
     txnOpen.done();
     return readTimestamp;
 }
 
-void WiredTigerRecoveryUnit::_beginTransactionAtLastAppliedTimestamp(WT_SESSION* session) {
+void WiredTigerRecoveryUnit::_beginTransactionAtLastAppliedTimestamp() {
     if (_readAtTimestamp.isNull()) {
         // When there is not a lastApplied timestamp available, read without a timestamp. Do not
         // round up the read timestamp to the oldest timestamp.
@@ -604,7 +623,7 @@ void WiredTigerRecoveryUnit::_beginTransactionAtLastAppliedTimestamp(WT_SESSION*
         // is only possible for readers that start immediately after an initial sync that did not
         // replicate any oplog entries. Future transactions will start reading at a timestamp once
         // timestamped writes have been made.
-        WiredTigerBeginTxnBlock txnOpen(session,
+        WiredTigerBeginTxnBlock txnOpen(_session,
                                         _prepareConflictBehavior,
                                         _roundUpPreparedTimestamps,
                                         RoundUpReadTimestamp::kNoRoundError,
@@ -614,7 +633,7 @@ void WiredTigerRecoveryUnit::_beginTransactionAtLastAppliedTimestamp(WT_SESSION*
         return;
     }
 
-    WiredTigerBeginTxnBlock txnOpen(session,
+    WiredTigerBeginTxnBlock txnOpen(_session,
                                     _prepareConflictBehavior,
                                     _roundUpPreparedTimestamps,
                                     RoundUpReadTimestamp::kRound,
@@ -624,12 +643,12 @@ void WiredTigerRecoveryUnit::_beginTransactionAtLastAppliedTimestamp(WT_SESSION*
 
     // We might have rounded to oldest between calling setTimestampReadSource and setReadSnapshot.
     // We need to get the actual read timestamp we used.
-    auto actualTimestamp = _getTransactionReadTimestamp(session);
+    auto actualTimestamp = _getTransactionReadTimestamp();
     txnOpen.done();
     _readAtTimestamp = actualTimestamp;
 }
 
-Timestamp WiredTigerRecoveryUnit::_beginTransactionAtNoOverlapTimestamp(WT_SESSION* session) {
+Timestamp WiredTigerRecoveryUnit::_beginTransactionAtNoOverlapTimestamp() {
 
     auto lastApplied = _sessionCache->snapshotManager().getLastApplied();
     Timestamp allDurable = Timestamp(_sessionCache->getKVEngine()->getAllDurableTimestamp());
@@ -670,7 +689,7 @@ Timestamp WiredTigerRecoveryUnit::_beginTransactionAtNoOverlapTimestamp(WT_SESSI
         // is only possible for readers that start immediately after an initial sync that did not
         // replicate any oplog entries. Future transactions will start reading at a timestamp once
         // timestamped writes have been made.
-        WiredTigerBeginTxnBlock txnOpen(session,
+        WiredTigerBeginTxnBlock txnOpen(_session,
                                         _prepareConflictBehavior,
                                         _roundUpPreparedTimestamps,
                                         RoundUpReadTimestamp::kNoRoundError,
@@ -680,7 +699,7 @@ Timestamp WiredTigerRecoveryUnit::_beginTransactionAtNoOverlapTimestamp(WT_SESSI
         return readTimestamp;
     }
 
-    WiredTigerBeginTxnBlock txnOpen(session,
+    WiredTigerBeginTxnBlock txnOpen(_session,
                                     _prepareConflictBehavior,
                                     _roundUpPreparedTimestamps,
                                     RoundUpReadTimestamp::kRound,
@@ -690,13 +709,14 @@ Timestamp WiredTigerRecoveryUnit::_beginTransactionAtNoOverlapTimestamp(WT_SESSI
 
     // We might have rounded to oldest between calling getAllDurable and setReadSnapshot. We
     // need to get the actual read timestamp we used.
-    readTimestamp = _getTransactionReadTimestamp(session);
+    readTimestamp = _getTransactionReadTimestamp();
     txnOpen.done();
     return readTimestamp;
 }
 
-Timestamp WiredTigerRecoveryUnit::_getTransactionReadTimestamp(WT_SESSION* session) {
+Timestamp WiredTigerRecoveryUnit::_getTransactionReadTimestamp() {
     char buf[(2 * 8 /*bytes in hex*/) + 1 /*nul terminator*/];
+    WT_SESSION* session = _session->getSession();
     auto wtstatus = session->query_timestamp(session, buf, "get=read");
     invariantWTOK(wtstatus, session);
     uint64_t read_timestamp;
@@ -705,7 +725,7 @@ Timestamp WiredTigerRecoveryUnit::_getTransactionReadTimestamp(WT_SESSION* sessi
 }
 
 void WiredTigerRecoveryUnit::_updateMultiTimestampConstraint(Timestamp timestamp) {
-    std::stack<Timestamp>& timestampOrder = _multiTimestampConstraintTracker.timestampOrder;
+    auto& timestampOrder = _multiTimestampConstraintTracker.timestampOrder;
     if (!timestampOrder.empty() && timestampOrder.top() == timestamp) {
         // We're still on the same timestamp.
         return;
@@ -852,6 +872,10 @@ void WiredTigerRecoveryUnit::setRoundUpPreparedTimestamps(bool value) {
                             << "when current state is " << toString(_getState()));
     _roundUpPreparedTimestamps =
         (value) ? RoundUpPreparedTimestamps::kRound : RoundUpPreparedTimestamps::kNoRound;
+}
+
+bool WiredTigerRecoveryUnit::getRoundUpPreparedTimestamps() {
+    return _roundUpPreparedTimestamps == RoundUpPreparedTimestamps::kRound;
 }
 
 void WiredTigerRecoveryUnit::setTimestampReadSource(ReadSource readSource,

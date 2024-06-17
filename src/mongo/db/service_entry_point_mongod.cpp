@@ -64,6 +64,7 @@
 #include "mongo/db/storage/recovery_unit.h"
 #include "mongo/db/transaction_resources.h"
 #include "mongo/db/write_concern.h"
+#include "mongo/idl/generic_argument_gen.h"
 #include "mongo/logv2/log.h"
 #include "mongo/logv2/log_attr.h"
 #include "mongo/logv2/log_component.h"
@@ -76,6 +77,7 @@
 #include "mongo/s/catalog_cache.h"
 #include "mongo/s/chunk_version.h"
 #include "mongo/s/database_version.h"
+#include "mongo/s/gossiped_routing_cache_gen.h"
 #include "mongo/s/grid.h"
 #include "mongo/s/service_entry_point_mongos.h"
 #include "mongo/s/shard_cannot_refresh_due_to_locks_held_exception.h"
@@ -84,6 +86,7 @@
 #include "mongo/util/assert_util.h"
 #include "mongo/util/decorable.h"
 #include "mongo/util/duration.h"
+#include "mongo/util/namespace_string_util.h"
 #include "mongo/util/polymorphic_scoped.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kCommand
@@ -125,7 +128,7 @@ public:
                 LOGV2_DEBUG(21975,
                             debugLevel,
                             "Command timed out waiting for read concern to be satisfied",
-                            "db"_attr = request.getDatabase(),
+                            "db"_attr = invocation->db(),
                             "command"_attr =
                                 redact(ServiceEntryPointCommon::getRedactedCopyForLogging(
                                     invocation->definition(), request.body)),
@@ -232,18 +235,19 @@ public:
         }
     }
 
-    void uassertCommandDoesNotSpecifyWriteConcern(const BSONObj& cmd) const override {
-        if (commandSpecifiesWriteConcern(cmd)) {
-            uasserted(ErrorCodes::InvalidOptions, "Command does not support writeConcern");
-        }
+    void uassertCommandDoesNotSpecifyWriteConcern(
+        const CommonRequestArgs& requestArgs) const override {
+        uassert(ErrorCodes::InvalidOptions,
+                "Command does not support writeConcern",
+                !commandSpecifiesWriteConcern(requestArgs));
     }
 
-    void attachCurOpErrInfo(OperationContext* opCtx, const BSONObj& replyObj) const override {
-        CurOp::get(opCtx)->debug().errInfo = getStatusFromCommandResult(replyObj);
+    void attachCurOpErrInfo(OperationContext* opCtx, const Status status) const override {
+        CurOp::get(opCtx)->debug().errInfo = std::move(status);
     }
 
     void appendReplyMetadata(OperationContext* opCtx,
-                             const OpMsgRequest& request,
+                             const CommonRequestArgs& requestArgs,
                              BSONObjBuilder* metadataBob) const override {
         auto const replCoord = repl::ReplicationCoordinator::get(opCtx);
         const bool isReplSet = replCoord->getSettings().isReplSet();
@@ -252,7 +256,33 @@ public:
             // Attach our own last opTime.
             repl::OpTime lastOpTimeFromClient =
                 repl::ReplClientInfo::forClient(opCtx->getClient()).getLastOp();
-            replCoord->prepareReplMetadata(request.body, lastOpTimeFromClient, metadataBob);
+            replCoord->prepareReplMetadata(requestArgs, lastOpTimeFromClient, metadataBob);
+        }
+
+        // Gossip back requested routing table cache versions.
+        if (requestArgs.getRequestGossipRoutingCache()) {
+            const auto collectionsToGossip = *requestArgs.getRequestGossipRoutingCache();
+
+            const auto catalogCache = Grid::get(opCtx)->catalogCache();
+
+            BSONArrayBuilder arrayBuilder;
+            for (const auto& collectionToGossip : collectionsToGossip) {
+                const auto nss =
+                    NamespaceStringUtil::deserialize(boost::none,
+                                                     collectionToGossip.getElement().String(),
+                                                     SerializationContext::stateDefault());
+                const auto cachedCollectionVersion = catalogCache->peekCollectionCacheVersion(nss);
+                if (cachedCollectionVersion) {
+                    GossipedRoutingCache gossipedRoutingCache(nss, *cachedCollectionVersion);
+                    arrayBuilder.append(gossipedRoutingCache.toBSON());
+                }
+            }
+
+            if (arrayBuilder.arrSize() > 0) {
+                metadataBob->appendArray(
+                    Generic_reply_fields_unstable_v1::kRoutingCacheGossipFieldName,
+                    arrayBuilder.obj());
+            }
         }
     }
 
@@ -301,6 +331,10 @@ public:
     }
 };
 
+ServiceEntryPointMongod::ServiceEntryPointMongod() : _hooks(std::make_unique<Hooks>()) {}
+
+ServiceEntryPointMongod::~ServiceEntryPointMongod() = default;
+
 Future<DbResponse> ServiceEntryPointMongod::_replicaSetEndpointHandleRequest(
     OperationContext* opCtx, const Message& m) noexcept try {
     // TODO (SERVER-81551): Move the OpMsgRequest parsing above ServiceEntryPoint::handleRequest().
@@ -310,19 +344,24 @@ Future<DbResponse> ServiceEntryPointMongod::_replicaSetEndpointHandleRequest(
     }
 
     auto shouldRoute = replica_set_endpoint::shouldRouteRequest(opCtx, opMsgReq);
-    LOGV2(8196801,
-          "Using replica set endpoint",
-          "opId"_attr = opCtx->getOpID(),
-          "cmdName"_attr = opMsgReq.getCommandName(),
-          "dbName"_attr = opMsgReq.getDatabaseNoThrow(),
-          "cmdObj"_attr = opMsgReq.body,
-          "shouldRoute"_attr = shouldRoute);
+    LOGV2_DEBUG(8555601,
+                3,
+                "Using replica set endpoint",
+                "opId"_attr = opCtx->getOpID(),
+                "cmdName"_attr = opMsgReq.getCommandName(),
+                "dbName"_attr = opMsgReq.readDatabaseForLogging(),
+                "cmdObj"_attr = redact(opMsgReq.body.toString()),
+                "shouldRoute"_attr = shouldRoute);
     if (shouldRoute) {
         replica_set_endpoint::ScopedSetRouterService service(opCtx);
         return ServiceEntryPointMongos::handleRequestImpl(opCtx, m);
     }
-    return ServiceEntryPointCommon::handleRequest(opCtx, m, std::make_unique<Hooks>());
+    return ServiceEntryPointCommon::handleRequest(opCtx, m, *_hooks);
 } catch (const DBException& ex) {
+    if (OpMsg::isFlagSet(m, OpMsg::kMoreToCome)) {
+        return DbResponse{};  // Don't reply.
+    }
+
     // Try to generate a response based on the status. If encounter another error (e.g.
     // UnsupportedFormat) while trying to generate the response, just return the status.
     try {
@@ -342,7 +381,7 @@ Future<DbResponse> ServiceEntryPointMongod::handleRequest(OperationContext* opCt
     if (replica_set_endpoint::isReplicaSetEndpointClient(opCtx->getClient())) {
         return _replicaSetEndpointHandleRequest(opCtx, m);
     }
-    return ServiceEntryPointCommon::handleRequest(opCtx, m, std::make_unique<Hooks>());
+    return ServiceEntryPointCommon::handleRequest(opCtx, m, *_hooks);
 }
 
 }  // namespace mongo

@@ -167,7 +167,7 @@ struct MockMongoInterface final : public StubMongoProcessInterface {
 
     // For tests of transactions that involve multiple oplog entries.
     std::unique_ptr<TransactionHistoryIteratorBase> createTransactionHistoryIterator(
-        repl::OpTime time) const {
+        repl::OpTime time) const override {
         auto iterator = std::make_unique<MockTransactionHistoryIterator>();
 
         // Simulate a lookup on the oplog timestamp by manually advancing the iterator until we
@@ -185,7 +185,7 @@ struct MockMongoInterface final : public StubMongoProcessInterface {
 
     // Called by DocumentSourceAddPreImage to obtain the UUID of the oplog. Since that's the only
     // piece of collection info we need for now, just return a BSONObj with the mock oplog UUID.
-    BSONObj getCollectionOptions(OperationContext* opCtx, const NamespaceString& nss) {
+    BSONObj getCollectionOptions(OperationContext* opCtx, const NamespaceString& nss) override {
         return BSON("uuid" << oplogUuid());
     }
 
@@ -1404,7 +1404,7 @@ TEST_F(ChangeStreamStageTest, TransformReshardBegin) {
 TEST_F(ChangeStreamStageTest, TransformReshardDoneCatchUp) {
     auto existingUuid = UUID::gen();
     auto reshardingUuid = UUID::gen();
-    auto temporaryNs = resharding::constructTemporaryReshardingNss(nss.db_forTest(), existingUuid);
+    auto temporaryNs = resharding::constructTemporaryReshardingNss(nss, existingUuid);
 
     ReshardDoneCatchUpChangeEventO2Field o2Field{temporaryNs, reshardingUuid};
     auto reshardDoneCatchUp = makeOplogEntry(OpTypeEnum::kNoop,
@@ -4447,7 +4447,7 @@ TEST_F(ChangeStreamStageTestNoSetup, RedactDocumentSourceChangeStreamAddPostImag
 
     ASSERT_BSONOBJ_EQ_AUTO(  // NOLINT
         R"({"$_internalChangeStreamAddPostImage":{"fullDocument":"updateLookup"}})",
-        docSource->serialize(SerializationOptions{}).getDocument().toBson());
+        docSource->serialize().getDocument().toBson());
     ASSERT_BSONOBJ_EQ_AUTO(  // NOLINT
         R"({"$_internalChangeStreamAddPostImage":{"fullDocument":"updateLookup"}})",
         redact(*docSource));
@@ -4463,7 +4463,7 @@ TEST_F(ChangeStreamStageTestNoSetup, RedactDocumentSourceChangeStreamAddPreImage
                 "fullDocumentBeforeChange": "whenAvailable"
             }
         })",
-        docSource.serialize(SerializationOptions{}).getDocument().toBson());
+        docSource.serialize().getDocument().toBson());
     ASSERT_BSONOBJ_EQ_AUTO(  // NOLINT
         R"({"$_internalChangeStreamAddPreImage":{"fullDocumentBeforeChange":"whenAvailable"}})",
         redact(docSource));
@@ -4488,7 +4488,7 @@ TEST_F(ChangeStreamStageTestNoSetup, RedactDocumentSourceChangeStreamCheckInvali
                 }
             }
         })",
-        docSource->serialize(SerializationOptions{}).getDocument().toBson());
+        docSource->serialize().getDocument().toBson());
     ASSERT_BSONOBJ_EQ_AUTO(  // NOLINT
         R"({"$_internalChangeStreamCheckInvalidate":{"startAfterInvalidate":{
                     "_data": "?string"
@@ -4524,7 +4524,7 @@ TEST_F(ChangeStreamStageTestNoSetup, RedactDocumentSourceChangeStreamCheckResuma
                 }
             }
         })",
-        docSource->serialize(SerializationOptions{}).getDocument().toBson());
+        docSource->serialize().getDocument().toBson());
     ASSERT_BSONOBJ_EQ_AUTO(  // NOLINT
         R"({"$_internalChangeStreamCheckResumability":{
                 "resumeToken": {
@@ -4551,7 +4551,7 @@ TEST_F(ChangeStreamStageTestNoSetup, RedactDocumentSourceChangeStreamCheckTopolo
 
     ASSERT_BSONOBJ_EQ_AUTO(  // NOLINT
         R"({"$_internalChangeStreamCheckTopologyChange":{}})",
-        docSource->serialize(SerializationOptions{}).getDocument().toBson());
+        docSource->serialize().getDocument().toBson());
     ASSERT_BSONOBJ_EQ_AUTO(  // NOLINT
         R"({"$_internalChangeStreamCheckTopologyChange":{}})",
         redact(*docSource));
@@ -4575,7 +4575,7 @@ TEST_F(ChangeStreamStageTestNoSetup, RedactDocumentSourceChangeStreamEnsureResum
                 }
             }
         })",
-        docSource->serialize(SerializationOptions{}).getDocument().toBson());
+        docSource->serialize().getDocument().toBson());
     ASSERT_BSONOBJ_EQ_AUTO(  // NOLINT
         R"({
             "$_internalChangeStreamEnsureResumeTokenPresent": {
@@ -4592,7 +4592,7 @@ TEST_F(ChangeStreamStageTestNoSetup, RedactDocumentSourceChangeStreamHandleTopol
 
     ASSERT_BSONOBJ_EQ_AUTO(  // NOLINT
         R"({"$_internalChangeStreamHandleTopologyChange":{}})",
-        docSource->serialize(SerializationOptions{}).getDocument().toBson());
+        docSource->serialize().getDocument().toBson());
     ASSERT_BSONOBJ_EQ_AUTO(  // NOLINT
         R"({"$_internalChangeStreamHandleTopologyChange":{}})",
         redact(*docSource));
@@ -4610,7 +4610,7 @@ TEST_F(ChangeStreamStageTestNoSetup, RedactDocumentSourceChangeStreamSplitLargeE
 
     ASSERT_BSONOBJ_EQ_AUTO(  // NOLINT
         R"({"$changeStreamSplitLargeEvent":{}})",
-        docSource->serialize(SerializationOptions{}).getDocument().toBson());
+        docSource->serialize().getDocument().toBson());
     ASSERT_BSONOBJ_EQ_AUTO(  // NOLINT
         R"({"$changeStreamSplitLargeEvent":{}})",
         redact(*docSource));
@@ -4636,7 +4636,7 @@ TEST_F(ChangeStreamStageTestNoSetup, RedactDocumentSourceChangeStreamTransform) 
                 "fullDocumentBeforeChange": "off"
             }
         })",
-        docSource->serialize(SerializationOptions{}).getDocument().toBson());
+        docSource->serialize().getDocument().toBson());
     ASSERT_BSONOBJ_EQ_AUTO(  // NOLINT
         R"({
             "$_internalChangeStreamTransform": {

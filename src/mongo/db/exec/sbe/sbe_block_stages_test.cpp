@@ -38,6 +38,7 @@
 #include <vector>
 
 #include "mongo/bson/bsonobj.h"
+#include "mongo/bson/json.h"
 #include "mongo/db/exec/sbe/sbe_plan_stage_test.h"
 #include "mongo/db/exec/sbe/sbe_unittest.h"
 #include "mongo/db/exec/sbe/stages/block_to_row.h"
@@ -61,7 +62,7 @@ protected:
     std::tuple<std::unique_ptr<PlanStage>, value::SlotVector /*outSlots*/> makeBlockToRow(
         std::unique_ptr<PlanStage> input,
         value::SlotVector blockSlots,
-        boost::optional<value::SlotId> bitsetSlotId) {
+        value::SlotId bitsetSlotId) {
         auto outSlots = generateMultipleSlotIds(blockSlots.size());
         auto blockToRowStage = makeS<BlockToRowStage>(std::move(input),
                                                       std::move(blockSlots),
@@ -74,6 +75,7 @@ protected:
 
     std::tuple<std::unique_ptr<PlanStage>,
                value::SlotVector /*blockSlots*/,
+               value::SlotId /*bitmapSlot*/,
                boost::optional<value::SlotId> /*metaSlot*/>
     makeTsBucketToCellBlock(std::unique_ptr<PlanStage> input,
                             value::SlotId inSlot,
@@ -84,6 +86,8 @@ protected:
         const auto metaSlot = tsOptions.getMetaField()
             ? boost::make_optional<value::SlotId>(generateSlotId())
             : boost::none;
+
+        auto bitmapSlot = generateSlotId();
 
         std::vector<value::CellBlock::PathRequest> pathRequests;
         for (const auto& cellPath : cellPaths) {
@@ -97,13 +101,17 @@ protected:
                                                              pathRequests,
                                                              blockSlots,
                                                              metaSlot,
+                                                             bitmapSlot,
                                                              tsOptions.getTimeField().toString(),
                                                              1 /*nodeId*/);
 
-        return {std::move(tsBucketStage), std::move(blockSlots), metaSlot};
+        return {std::move(tsBucketStage), std::move(blockSlots), bitmapSlot, metaSlot};
     }
 
-    std::tuple<std::unique_ptr<PlanStage>, value::SlotVector, boost::optional<value::SlotId>>
+    std::tuple<std::unique_ptr<PlanStage>,
+               value::SlotVector,
+               value::SlotId,
+               boost::optional<value::SlotId>>
     generateTsBucketToCellBlockOnVirtualScan(const BSONArray& inputDocs,
                                              const TimeseriesOptions& tsOptions,
                                              const std::vector<std::string>& cellPaths) {
@@ -122,12 +130,12 @@ protected:
         auto [scanSlot, scanStage] = generateVirtualScan(inputDocs);
 
         // Builds a TsBucketToCellBlockStage on top of the scan.
-        auto [tsBucketStage, blockSlots, metaSlot] =
+        auto [tsBucketStage, blockSlots, bitmapSlotId, metaSlot] =
             makeTsBucketToCellBlock(std::move(scanStage), scanSlot, cellPaths, tsOptions);
 
         // Builds a BlockToRowStage on top of the TsBucketToCellBlockStage.
         auto [bucketToRow, outSlots] =
-            makeBlockToRow(std::move(tsBucketStage), std::move(blockSlots), boost::none);
+            makeBlockToRow(std::move(tsBucketStage), std::move(blockSlots), bitmapSlotId);
 
         return {std::move(bucketToRow), std::move(outSlots), metaSlot};
     }
@@ -245,8 +253,9 @@ TEST_F(BlockStagesTest, TsBucketToCellBlockStageTest) {
     auto tsOptions =
         TimeseriesOptions::parse(IDLParserContext{"BlockStagesTest::TsBucketToCellBlockStageTest"},
                                  fromjson(R"({timeField: "time", metaField: "tag"})"));
-    auto [tsBucketStage, blockSlots, metaSlot] = generateTsBucketToCellBlockOnVirtualScan(
-        BSON_ARRAY(bucketWithMeta1 << bucketWithMeta2), tsOptions, cellPaths);
+    auto [tsBucketStage, blockSlots, bitmapSlot, metaSlot] =
+        generateTsBucketToCellBlockOnVirtualScan(
+            BSON_ARRAY(bucketWithMeta1 << bucketWithMeta2), tsOptions, cellPaths);
 
     // Prepares the execution tree.
     auto ctx = makeCompileCtx();
@@ -760,7 +769,7 @@ void BlockStagesTest::testBlockToBitmap(
         auto& bitset = bitsets[blockIdx];
 
         auto extracted = valBlock->extract();
-        invariant(extracted.count == bitset.size());
+        invariant(extracted.count() == bitset.size());
 
         value::HeterogeneousBlock bitsetBlock;
         for (size_t i = 0; i < bitset.size(); ++i) {
@@ -807,7 +816,7 @@ std::unique_ptr<value::ValueBlock> makeBlock(std::vector<int> ints) {
     return std::unique_ptr<value::ValueBlock>(out.release());
 }
 
-value::Array makeArray(std::vector<int> ints) {
+value::Array makeIntArray(std::vector<int> ints) {
 
     value::Array out;
     for (auto i : ints) {
@@ -821,7 +830,7 @@ TEST_F(BlockStagesTest, BlockToRowRespectsZerosBitmap) {
     blocks.push_back(makeBlock({1, 2, 3, 4, 5, 6}));
 
     testBlockToBitmap(
-        blocks, {std::vector<bool>{false, false, false, false, false, false}}, makeArray({}));
+        blocks, {std::vector<bool>{false, false, false, false, false, false}}, makeIntArray({}));
 }
 
 TEST_F(BlockStagesTest, BlockToRowSingleValueFiltered) {
@@ -829,7 +838,7 @@ TEST_F(BlockStagesTest, BlockToRowSingleValueFiltered) {
     blocks.push_back(makeBlock({1, 2, 3, 4, 5, 6}));
 
     testBlockToBitmap(
-        blocks, {std::vector<bool>{false, false, true, false, false, false}}, makeArray({3}));
+        blocks, {std::vector<bool>{false, false, true, false, false, false}}, makeIntArray({3}));
 }
 
 TEST_F(BlockStagesTest, MultipleBlocksWithSingleValueFilteredFromEach) {
@@ -839,7 +848,7 @@ TEST_F(BlockStagesTest, MultipleBlocksWithSingleValueFilteredFromEach) {
 
     testBlockToBitmap(blocks,
                       {std::vector<bool>{true, false, true}, std::vector<bool>{true, false, true}},
-                      makeArray({1, 3, 4, 6}));
+                      makeIntArray({1, 3, 4, 6}));
 }
 
 TEST_F(BlockStagesTest, MultipleBlocksWithMultipleValuesFilteredFromEach) {
@@ -850,7 +859,7 @@ TEST_F(BlockStagesTest, MultipleBlocksWithMultipleValuesFilteredFromEach) {
     testBlockToBitmap(
         blocks,
         {std::vector<bool>{false, false, true}, std::vector<bool>{true, false, true, false}},
-        makeArray({3, 4, 6}));
+        makeIntArray({3, 4, 6}));
 }
 
 TEST_F(BlockStagesTest, BlockToRowNoValuesFiltered) {
@@ -859,6 +868,6 @@ TEST_F(BlockStagesTest, BlockToRowNoValuesFiltered) {
 
     testBlockToBitmap(blocks,
                       {std::vector<bool>{true, true, true, true, true, true}},
-                      makeArray({1, 2, 3, 4, 5, 6}));
+                      makeIntArray({1, 2, 3, 4, 5, 6}));
 }
 }  // namespace mongo::sbe

@@ -4,13 +4,12 @@
  * the same as the optimizer for the "normal" pipeline. This assumption is not strictly true when
  * CQF is enabled.
  * @tags: [
- *   cqf_incompatible,
  *   do_not_wrap_aggregations_in_facets,
  * ]
  */
 
 import {anyEq, arrayEq, documentEq} from "jstests/aggregation/extras/utils.js";
-import {getAggPlanStage} from "jstests/libs/analyze_plan.js";
+import {getAggPlanStage, getExecutionStats} from "jstests/libs/analyze_plan.js";
 import {FixtureHelpers} from "jstests/libs/fixture_helpers.js";
 
 const testDB = db.getSiblingDB(jsTestName());
@@ -36,6 +35,7 @@ const executionStatsIngoredFields = [
 
 const stagesIgnoredFields = [
     "slots",
+    "optimizationTimeMillis",
 ];
 
 const mongosIgnoredFields = [
@@ -48,6 +48,7 @@ const mongosIgnoredFields = [
 
 const queryPlannerIgnoredFields = [
     "optimizedPipeline",
+    "optimizationTimeMillis",
 ].concat(stagesIgnoredFields);
 
 function getUnionWithStage(explain) {
@@ -232,9 +233,10 @@ if (!FixtureHelpers.isSharded(collB)) {
     assert.eq(unionStage.nReturned, docsPerColl + 1, unionStage);
     // TODO SERVER-50597 Fix the executionStats of $unionWith sub-pipeline, the actual result should
     // be 1 instead of docsPerColl.
-    assert.eq(unionStage.$unionWith.pipeline[0].$cursor.executionStats.nReturned,
-              docsPerColl,
-              unionStage);
+    const unionWithExecutionStats = unionStage.$unionWith.pipeline.shards
+        ? getExecutionStats(unionStage.$unionWith.pipeline)[0]
+        : unionStage.$unionWith.pipeline[0].$cursor.executionStats;
+    assert.eq(unionWithExecutionStats.nReturned, docsPerColl, unionStage);
 }
 
 // Test an index scan.

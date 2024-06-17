@@ -51,8 +51,10 @@ enums:
         type: string
         values:
             kUnset: "unset"
-            kEnterWriteCriticalSectionOnCoordinatorAndDataShard: "enterWriteCriticalSectionOnCoordinatorAndDataShard"
+            kEnterWriteCriticalSectionOnCoordinator: "enterWriteCriticalSectionOnCoordinator"
             kTranslateRequestParameters: "translateRequestParameters"
+            kEnterWriteCSOnDataShardAndCheckEmpty: "enterWriteCSOnDataShardAndCheckEmpty"
+            kSyncIndexesOnCoordinator: "syncIndexesOnCoordinator"
             kCreateCollectionOnCoordinator: "createCollectionOnCoordinator"
             kEnterCriticalSection: "enterCriticalSection"
             kCreateCollectionOnParticipants: "createCollectionOnParticipants"
@@ -78,6 +80,10 @@ structs:
                 type: object_owned
                 description: "Collation value from the targeted unsharded collection if this exists; otherwise, simple-collation"
                 optional: false
+            timeseries:
+                type: TimeseriesOptions
+                description: "The options to create the time-series collection with."
+                optional: true
 
     # TODO (SERVER-79304): Remove once 8.0 becomes last LTS.
     CreateCollectionCoordinatorDocumentLegacy:
@@ -113,14 +119,18 @@ structs:
                 type: TranslatedRequestParams
                 description: "The field is populated only once the kTranslateRequest phase is completed."
                 optional: true
+            collectionIsEmpty:
+                type: bool
+                description: "True if the collection has no data or does not exist. False otherwise."
+                optional: true
             shardIds:
                 type: array<shard_id>
                 description: "The list of shards involved in the create collection operation."
                 optional: true
-            selectedDataShard:
+            originalDataShard:
                 type: shard_id
                 description: >-
-                    The chosen data shard for the collection creation if creating a new unsharded collection.
-                    The current data shard for the unsharded collection if sharding an existing
-                    collection.
+                    The current data shard that the collection lives on. Will be the coordinator
+                    shard if the collection does not yet exist. Only guaranteed to be set after the
+                    enterWriteCSOnDataShardAndCheckEmpty phase completes.
                 optional: true

@@ -1,9 +1,15 @@
 /**
  * Tests that load-balanced connections are reported correctly in server status metrics.
+ * @tags: [
+ *   # TODO (SERVER-85629): Re-enable this test once redness is resolved in multiversion suites.
+ *   DISABLED_TEMPORARILY_DUE_TO_FCV_UPGRADE,
+ *   requires_fcv_80,
+ *   temp_disabled_embedded_router_uncategorized,
+ * ]
  */
 
-const kProxyIngressPort = 22064;
-const kProxyEgressPort = 22065;
+const kProxyIngressPort = allocatePort();
+const kProxyEgressPort = allocatePort();
 const kProxyVersion = 2;
 
 if (_isWindows()) {

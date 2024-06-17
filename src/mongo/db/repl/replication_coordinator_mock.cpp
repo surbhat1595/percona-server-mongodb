@@ -157,7 +157,11 @@ bool ReplicationCoordinatorMock::isInPrimaryOrSecondaryState_UNSAFE() const {
 }
 
 Seconds ReplicationCoordinatorMock::getSecondaryDelaySecs() const {
-    return Seconds(0);
+    return _secondaryDelaySecs;
+}
+
+void ReplicationCoordinatorMock::setSecondaryDelaySecs(Seconds sec) {
+    _secondaryDelaySecs = sec;
 }
 
 void ReplicationCoordinatorMock::clearSyncSourceDenylist() {}
@@ -336,9 +340,12 @@ void ReplicationCoordinatorMock::resetMyLastOpTimes() {
     _myLastDurableWallTime = Date_t();
 }
 
-OpTimeAndWallTime ReplicationCoordinatorMock::getMyLastWrittenOpTimeAndWallTime() const {
+OpTimeAndWallTime ReplicationCoordinatorMock::getMyLastWrittenOpTimeAndWallTime(
+    bool rollbackSafe) const {
     stdx::lock_guard<Mutex> lk(_mutex);
-
+    if (rollbackSafe && _memberState.rollback()) {
+        return {};
+    }
     return {_myLastWrittenOpTime, _myLastWrittenWallTime};
 }
 
@@ -348,12 +355,8 @@ OpTime ReplicationCoordinatorMock::getMyLastWrittenOpTime() const {
     return _myLastWrittenOpTime;
 }
 
-OpTimeAndWallTime ReplicationCoordinatorMock::getMyLastAppliedOpTimeAndWallTime(
-    bool rollbackSafe) const {
+OpTimeAndWallTime ReplicationCoordinatorMock::getMyLastAppliedOpTimeAndWallTime() const {
     stdx::lock_guard<Mutex> lk(_mutex);
-    if (rollbackSafe && _memberState.rollback()) {
-        return {};
-    }
     return {_myLastAppliedOpTime, _myLastAppliedWallTime};
 }
 
@@ -392,6 +395,12 @@ Status ReplicationCoordinatorMock::waitUntilOpTimeForReadUntil(OperationContext*
     return Status::OK();
 }
 
+Status ReplicationCoordinatorMock::waitUntilOpTimeWrittenUntil(OperationContext* opCtx,
+                                                               LogicalTime clusterTime,
+                                                               boost::optional<Date_t> deadline) {
+    return Status::OK();
+}
+
 Status ReplicationCoordinatorMock::awaitTimestampCommitted(OperationContext* opCtx, Timestamp ts) {
     return Status::OK();
 }
@@ -424,8 +433,13 @@ Status ReplicationCoordinatorMock::setFollowerModeRollback(OperationContext* opC
     return setFollowerMode(MemberState::RS_ROLLBACK);
 }
 
+void ReplicationCoordinatorMock::setApplierState(const ApplierState& newState) {
+    stdx::lock_guard<Mutex> lk(_mutex);
+    _applierState = newState;
+}
+
 ReplicationCoordinator::ApplierState ReplicationCoordinatorMock::getApplierState() {
-    return ApplierState::Running;
+    return _applierState;
 }
 
 void ReplicationCoordinatorMock::signalDrainComplete(OperationContext*, long long) noexcept {}
@@ -694,7 +708,7 @@ Status ReplicationCoordinatorMock::processReplSetRequestVotes(
     return Status::OK();
 }
 
-void ReplicationCoordinatorMock::prepareReplMetadata(const BSONObj& metadataRequestObj,
+void ReplicationCoordinatorMock::prepareReplMetadata(const CommonRequestArgs& requestArgs,
                                                      const OpTime& lastOpTimeFromClient,
                                                      BSONObjBuilder* builder) const {}
 

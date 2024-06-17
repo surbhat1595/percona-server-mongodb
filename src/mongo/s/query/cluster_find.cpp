@@ -84,6 +84,7 @@
 #include "mongo/db/query/query_feature_flags_gen.h"
 #include "mongo/db/query/query_planner_common.h"
 #include "mongo/db/query/query_request_helper.h"
+#include "mongo/db/query/query_stats/query_stats.h"
 #include "mongo/db/query/sort_pattern.h"
 #include "mongo/db/repl/read_concern_args.h"
 #include "mongo/db/service_context.h"
@@ -208,7 +209,8 @@ std::unique_ptr<FindCommandRequest> makeFindCommandForShards(OperationContext* o
                                                              const std::set<ShardId>& shardIds,
                                                              const CanonicalQuery& query,
                                                              const boost::optional<UUID> sampleId,
-                                                             bool appendGeoNearDistanceProjection) {
+                                                             bool appendGeoNearDistanceProjection,
+                                                             bool requestQueryStatsFromRemotes) {
     std::unique_ptr<FindCommandRequest> findCommand;
     if (shardIds.size() > 1) {
         findCommand = uassertStatusOK(transformQueryForShards(query.getFindCommandRequest(),
@@ -245,16 +247,12 @@ std::unique_ptr<FindCommandRequest> makeFindCommandForShards(OperationContext* o
         findCommand->setQuerySettings(query.getExpCtx()->getQuerySettings());
     }
 
-    // Set includeQueryStatsMetrics if necessary.
-    if (feature_flags::gFeatureFlagQueryStatsDataBearingNodes.isEnabled(
-            serverGlobalParams.featureCompatibility.acquireFCVSnapshot())) {
-        auto& opDebug = CurOp::get(opCtx)->debug();
+    // Request metrics if necessary.
+    {
+        // We'll set includeQueryStatsMetrics if our configuration (e.g., feature flag, sample
+        // rate) dictates we should gather metrics, or the user sent the flag to us.
         auto origValue = query.getFindCommandRequest().getIncludeQueryStatsMetrics();
-        if (origValue.has_value()) {
-            // If the original command specified includeQueryStatsMetrics, just pass it through.
-            findCommand->setIncludeQueryStatsMetrics(origValue);
-        } else if (!opDebug.queryStatsInfo.wasRateLimited) {
-            // If the query wasn't rate limited, we can add the field.
+        if (origValue.value_or(false) || requestQueryStatsFromRemotes) {
             findCommand->setIncludeQueryStatsMetrics(true);
         }
     }
@@ -272,7 +270,9 @@ std::vector<AsyncRequestsSender::Request> constructRequestsForShards(
     const std::set<ShardId>& shardIds,
     const CanonicalQuery& query,
     const boost::optional<UUID> sampleId,
-    bool appendGeoNearDistanceProjection) {
+    bool appendGeoNearDistanceProjection,
+    bool requestQueryStatsFromRemotes,
+    const auto& opKey) {
     const auto& cm = cri.cm;
 
     // Choose the shard to sample the query on if needed.
@@ -281,13 +281,7 @@ std::vector<AsyncRequestsSender::Request> constructRequestsForShards(
         : boost::none;
 
     // Helper methods for appending additional attributes to the shard command.
-    auto appendTxnNumber = [&](auto& cmdBuilder) {
-        if (opCtx->getTxnNumber()) {
-            cmdBuilder.append(OperationSessionInfoFromClient::kTxnNumberFieldName,
-                              *opCtx->getTxnNumber());
-        }
-    };
-    auto appendShardVersion = [&](auto shardId, auto& cmdBuilder) {
+    auto appendShardVersion = [&](const auto& shardId, auto& cmdBuilder) {
         if (cm.hasRoutingTable()) {
             cri.getShardVersion(shardId).serialize(ShardVersion::kShardVersionField, &cmdBuilder);
         } else if (!query.nss().isOnInternalDb()) {
@@ -295,7 +289,7 @@ std::vector<AsyncRequestsSender::Request> constructRequestsForShards(
             cmdBuilder.append("databaseVersion", cm.dbVersion().toBSON());
         }
     };
-    auto appendSampleId = [&](auto shardId, auto& cmdBuilder) {
+    auto appendSampleId = [&](const auto& shardId, auto& cmdBuilder) {
         if (shardId == sampleShardId) {
             analyze_shard_key::appendSampleId(&cmdBuilder, *sampleId);
         }
@@ -303,8 +297,12 @@ std::vector<AsyncRequestsSender::Request> constructRequestsForShards(
 
     // Constructs the shard request by appending additional attributes to the serialized
     // 'findCommandToForward'.
-    auto findCommandToForward =
-        makeFindCommandForShards(opCtx, shardIds, query, sampleId, appendGeoNearDistanceProjection);
+    auto findCommandToForward = makeFindCommandForShards(opCtx,
+                                                         shardIds,
+                                                         query,
+                                                         sampleId,
+                                                         appendGeoNearDistanceProjection,
+                                                         requestQueryStatsFromRemotes);
     auto shardRegistry = Grid::get(opCtx)->shardRegistry();
     auto makeShardRequest = [&](const auto& shardId) {
         const auto shard = uassertStatusOK(shardRegistry->getShard(opCtx, shardId));
@@ -312,11 +310,12 @@ std::vector<AsyncRequestsSender::Request> constructRequestsForShards(
 
         BSONObjBuilder cmdBuilder;
         findCommandToForward->serialize(BSONObj(), &cmdBuilder);
-        appendTxnNumber(cmdBuilder);
+        logical_session_id_helpers::serializeLsidAndTxnNumber(opCtx, &cmdBuilder);
+        appendOpKey(opKey, &cmdBuilder);
         appendShardVersion(shardId, cmdBuilder);
         appendSampleId(shardId, cmdBuilder);
 
-        return AsyncRequestsSender::Request(shardId, cmdBuilder.obj());
+        return AsyncRequestsSender::Request(shardId, cmdBuilder.obj(), std::move(shard));
     };
 
     std::vector<AsyncRequestsSender::Request> requests;
@@ -345,10 +344,12 @@ CursorId runQueryWithoutRetrying(OperationContext* opCtx,
                                  bool* partialResultsReturned) {
     const auto& cm = cri.cm;
 
-    auto findCommand = query.getFindCommandRequest();
+    const auto& findCommand = query.getFindCommandRequest();
     // Get the set of shards on which we will run the query.
-    auto shardIds = getTargetedShardsForQuery(
-        query.getExpCtx(), cm, findCommand.getFilter(), findCommand.getCollation());
+    auto shardIds = getTargetedShardsForCanonicalQuery(query, cm);
+
+    bool requestQueryStatsFromRemotes =
+        query_stats::shouldRequestRemoteMetrics(CurOp::get(opCtx)->debug());
 
     // Construct the query and parameters. Defer setting skip and limit here until
     // we determine if the query is targeting multi-shards or a single shard below.
@@ -370,6 +371,7 @@ CursorId runQueryWithoutRetrying(OperationContext* opCtx,
     params.isAllowPartialResults = findCommand.getAllowPartialResults();
     params.originatingPrivileges = {
         Privilege(ResourcePattern::forExactNamespace(query.nss()), ActionType::find)};
+    params.requestQueryStatsFromRemotes = requestQueryStatsFromRemotes;
 
     // This is the batchSize passed to each subsequent getMore command issued by the cursor. We
     // usually use the batchSize associated with the initial find, but as it is illegal to send a
@@ -430,21 +432,33 @@ CursorId runQueryWithoutRetrying(OperationContext* opCtx,
                 "deadline"_attr = deadline);
         }
 
+        // Construct the requests that we will use to establish cursors on the targeted
+        // shards, attaching the shardVersion and session info, if necessary. Attach our own
+        // OperationKey as well so establishCursors won't copy each request.
+        std::vector<OperationKey> opKeys{UUID::gen()};
+        auto requests = constructRequestsForShards(opCtx,
+                                                   cri,
+                                                   shardIds,
+                                                   query,
+                                                   sampleId,
+                                                   appendGeoNearDistanceProjection,
+                                                   requestQueryStatsFromRemotes,
+                                                   opKeys.front());
+
         // The call to establishCursors has its own timeout mechanism that is controlled by the
         // opCtx, so we don't expect runWithDeadline to throw a timeout at this level. We use
         // runWithDeadline because it has the side effect of pushing a temporary (artificial)
         // deadline onto the opCtx used by establishCursors.
         opCtx->runWithDeadline(deadline, ErrorCodes::MaxTimeMSExpired, [&]() -> void {
-            params.remotes = establishCursors(
-                opCtx,
-                Grid::get(opCtx)->getExecutorPool()->getArbitraryExecutor(),
-                query.nss(),
-                readPref,
-                // Construct the requests that we will use to establish cursors on the targeted
-                // shards, attaching the shardVersion and txnNumber, if necessary.
-                constructRequestsForShards(
-                    opCtx, cri, shardIds, query, sampleId, appendGeoNearDistanceProjection),
-                findCommand.getAllowPartialResults());
+            params.remotes =
+                establishCursors(opCtx,
+                                 Grid::get(opCtx)->getExecutorPool()->getArbitraryExecutor(),
+                                 query.nss(),
+                                 readPref,
+                                 std::move(requests),
+                                 findCommand.getAllowPartialResults(),
+                                 Shard::RetryPolicy::kIdempotent,
+                                 std::move(opKeys));
         });
     } catch (const DBException& ex) {
         if (ex.code() == ErrorCodes::CollectionUUIDMismatch &&
@@ -566,6 +580,9 @@ CursorId runQueryWithoutRetrying(OperationContext* opCtx,
         if (shardIds.size() > 0) {
             updateNumHostsTargetedMetrics(opCtx, cm, shardIds.size());
         }
+        if (const auto remoteMetrics = ccc->takeRemoteMetrics()) {
+            opDebug.additiveMetrics.aggregateDataBearingNodeMetrics(*remoteMetrics);
+        }
         collectQueryStatsMongos(opCtx, ccc->getKey());
         return CursorId(0);
     }
@@ -675,7 +692,7 @@ CursorId ClusterFind::runQuery(OperationContext* opCtx,
     // We must always have a BSONObj vector into which to output our results.
     invariant(results);
 
-    auto findCommand = query.getFindCommandRequest();
+    const auto& findCommand = query.getFindCommandRequest();
     // Projection on the reserved sort key field is illegal in mongos.
     if (findCommand.getProjection().hasField(AsyncResultsMerger::kSortKeyField)) {
         uasserted(ErrorCodes::BadValue,
@@ -757,7 +774,6 @@ CursorId ClusterFind::runQuery(OperationContext* opCtx,
                               << "Failed to run query after " << kMaxRetries << " retries");
                 throw;
             } else if (!ErrorCodes::isStaleShardVersionError(ex.code()) &&
-                       ex.code() != ErrorCodes::ShardInvalidatedForTargeting &&
                        ex.code() != ErrorCodes::ShardNotFound) {
 
                 if (ErrorCodes::isRetriableError(ex.code())) {
@@ -779,23 +795,15 @@ CursorId ClusterFind::runQuery(OperationContext* opCtx,
                         "maxRetries"_attr = kMaxRetries,
                         "error"_attr = redact(ex));
 
-            if (ex.code() != ErrorCodes::ShardInvalidatedForTargeting) {
-                if (auto staleInfo = ex.extraInfo<StaleConfigInfo>()) {
-                    catalogCache->invalidateShardOrEntireCollectionEntryForShardedCollection(
-                        query.nss(), staleInfo->getVersionWanted(), staleInfo->getShardId());
-                } else {
-                    catalogCache->invalidateCollectionEntry_LINEARIZABLE(query.nss());
-                }
+            if (auto staleInfo = ex.extraInfo<StaleConfigInfo>()) {
+                catalogCache->invalidateShardOrEntireCollectionEntryForShardedCollection(
+                    query.nss(), staleInfo->getVersionWanted(), staleInfo->getShardId());
+            } else {
+                catalogCache->invalidateCollectionEntry_LINEARIZABLE(query.nss());
             }
-
-            catalogCache->setOperationShouldBlockBehindCatalogCacheRefresh(opCtx, true);
 
             if (auto txnRouter = TransactionRouter::get(opCtx)) {
                 if (!txnRouter.canContinueOnStaleShardOrDbError(kFindCmdName, ex.toStatus())) {
-                    if (ex.code() == ErrorCodes::ShardInvalidatedForTargeting) {
-                        (void)catalogCache->getCollectionRoutingInfoWithPlacementRefresh(
-                            opCtx, query.nss());
-                    }
                     throw;
                 }
 

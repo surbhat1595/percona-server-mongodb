@@ -63,9 +63,6 @@ public:
     static void fassertInitializedAfterStartup(OperationContext* opCtx);
 
     /**
-     * TODO (SERVER-74847): Remove this function once we remove testing around downgrading from
-     * latest to last continuous.
-     *
      * Adds a transition that allows users to downgrade from latest FCV to last continuous FCV.
      * This function should only be called if the 'disableTransitionFromLatestToLastContinuous'
      * server parameter is set to 'false'. That parameter is test-only and defaulted to 'true'.
@@ -73,10 +70,10 @@ public:
     static void addTransitionFromLatestToLastContinuous();
 
     /**
-     * Returns the on-disk feature compatibility version document if it exists.
+     * Returns the on-disk feature compatibility version document if it can be found.
+     * If there was an error finding the document, returns the error reason.
      */
-    static boost::optional<BSONObj> findFeatureCompatibilityVersionDocument(
-        OperationContext* opCtx);
+    static StatusWith<BSONObj> findFeatureCompatibilityVersionDocument(OperationContext* opCtx);
 
     /**
      * uassert that a transition from fromVersion to newVersion is permitted. Different rules apply

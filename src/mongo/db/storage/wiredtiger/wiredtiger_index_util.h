@@ -54,10 +54,10 @@ public:
                                   double scale,
                                   const std::string& uri);
 
-    static Status compact(Interruptible&,
-                          WiredTigerRecoveryUnit&,
-                          const std::string& uri,
-                          boost::optional<int64_t> freeSpaceTargetMB);
+    static StatusWith<int64_t> compact(Interruptible&,
+                                       WiredTigerRecoveryUnit&,
+                                       const std::string& uri,
+                                       const CompactOptions& options);
 
     static bool isEmpty(OperationContext* opCtx, const std::string& uri, uint64_t tableId);
 

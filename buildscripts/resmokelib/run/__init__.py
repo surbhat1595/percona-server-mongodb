@@ -317,7 +317,8 @@ class TestRunner(Subcommand):
         if task is None:
             for current_task in evg_conf.tasks:
                 func = current_task.find_func_command("run tests") \
-                    or current_task.find_func_command("generate resmoke tasks")
+                    or current_task.find_func_command("generate resmoke tasks") \
+                    or current_task.find_func_command("run benchmark tests")
                 if func and get_dict_value(func, ["vars", "suite"]) == suite_name:
                     task = current_task
                     break
@@ -1206,6 +1207,10 @@ class RunPlugin(PluginInterface):
             "--configShard", dest="config_shard", metavar="CONFIG",
             help="If set, specifies which node is the config shard. Can also be set to 'any'.")
 
+        mongodb_server_options.add_argument(
+            "--embeddedRouter", dest="embedded_router", metavar="CONFIG",
+            help="If set, uses embedded routers instead of dedicated mongos.")
+
         internal_options = parser.add_argument_group(
             title=_INTERNAL_OPTIONS_TITLE,
             description=("Internal options for advanced users and resmoke developers."
@@ -1234,10 +1239,6 @@ class RunPlugin(PluginInterface):
         #     actually running analysis, which can be time and resource intensive.
         internal_options.add_argument("--internalParam", action="append", dest="internal_params",
                                       help=argparse.SUPPRESS)
-
-        internal_options.add_argument("--perfReportFile", dest="perf_report_file",
-                                      metavar="PERF_REPORT",
-                                      help="Writes a JSON file with performance test results.")
 
         internal_options.add_argument("--cedarReportFile", dest="cedar_report_file",
                                       metavar="CEDAR_REPORT",
@@ -1336,6 +1337,9 @@ class RunPlugin(PluginInterface):
 
         evergreen_options.add_argument("--versionId", dest="version_id", metavar="VERSION_ID",
                                        help="Sets the version ID of the task.")
+
+        evergreen_options.add_argument("--taskWorkDir", dest="work_dir", metavar="TASK_WORK_DIR",
+                                       help="Sets the working directory of the task.")
 
         evergreen_options.add_argument(
             "--projectConfigPath", dest="evg_project_config_path",

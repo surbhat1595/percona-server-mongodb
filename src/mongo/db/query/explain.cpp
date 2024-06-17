@@ -56,11 +56,12 @@
 #include "mongo/db/query/plan_cache.h"
 #include "mongo/db/query/plan_cache_debug_info.h"
 #include "mongo/db/query/plan_cache_key_factory.h"
-#include "mongo/db/query/plan_enumerator_explain_info.h"
+#include "mongo/db/query/plan_enumerator/plan_enumerator_explain_info.h"
 #include "mongo/db/query/plan_executor.h"
 #include "mongo/db/query/plan_explainer_impl.h"
 #include "mongo/db/query/plan_ranking_decision.h"
 #include "mongo/db/query/plan_summary_stats.h"
+#include "mongo/db/query/query_knob_configuration.h"
 #include "mongo/db/query/query_settings.h"
 #include "mongo/db/query/query_settings_decoration.h"
 #include "mongo/db/stats/resource_consumption_metrics.h"
@@ -89,34 +90,27 @@ void generatePlannerInfo(PlanExecutor* exec,
                          const MultipleCollectionAccessor& collections,
                          BSONObj extraInfo,
                          const SerializationContext& serializationContext,
-                         BSONObjBuilder* out) {
+                         BSONObjBuilder* out,
+                         ExplainOptions::Verbosity verbosity) {
     BSONObjBuilder plannerBob(out->subobjStart("queryPlanner"));
 
     plannerBob.append("namespace",
                       NamespaceStringUtil::serialize(exec->nss(), serializationContext));
 
-    // Find whether there is an index filter set for the query shape. The 'indexFilterSet' field
-    // will always be false in the case of EOF or idhack plans.
+    auto framework = exec->getQueryFramework();
+
     boost::optional<uint32_t> queryHash;
     boost::optional<uint32_t> planCacheKeyHash;
     const auto& mainCollection = collections.getMainCollection();
-    auto indexFilterSet = [&]() {
-        if (!mainCollection || !exec->getCanonicalQuery()) {
-            return false;
-        }
-        const QuerySettings* querySettings =
-            QuerySettingsDecoration::get(mainCollection->getSharedDecorations());
-        return querySettings
-            ->getAllowedIndicesFilter(exec->getCanonicalQuery()->encodeKeyForPlanCacheCommand())
-            .has_value();
-    }();
-    if (mainCollection && exec->getCanonicalQuery()) {
-        if (exec->getCanonicalQuery()->isSbeCompatible() &&
-            !exec->getCanonicalQuery()->getForceClassicEngine()) {
-            const auto planCacheKeyInfo =
-                plan_cache_key_factory::make(*exec->getCanonicalQuery(),
-                                             collections,
-                                             canonical_query_encoder::Optimizer::kSbeStageBuilders);
+    if (auto* cq = exec->getCanonicalQuery(); mainCollection && cq) {
+        if (cq->isSbeCompatible() &&
+            !cq->getExpCtx()->getQueryKnobConfiguration().isForceClassicEngineEnabled()) {
+            const auto planCacheKeyInfo = plan_cache_key_factory::make(
+                *exec->getCanonicalQuery(),
+                collections,
+                framework == PlanExecutor::QueryFramework::kCQF
+                    ? canonical_query_encoder::Optimizer::kBonsai
+                    : canonical_query_encoder::Optimizer::kSbeStageBuilders);
             planCacheKeyHash = planCacheKeyInfo.planCacheKeyHash();
             queryHash = planCacheKeyInfo.queryHash();
         } else {
@@ -126,14 +120,11 @@ void generatePlannerInfo(PlanExecutor* exec,
             queryHash = planCacheKeyInfo.queryHash();
         }
     }
-    plannerBob.append("indexFilterSet", indexFilterSet);
 
     // In general we should have a canonical query, but sometimes we may avoid creating a canonical
     // query as an optimization (specifically, the update system does not canonicalize for idhack
     // updates). In these cases, 'query' is NULL.
     auto query = exec->getCanonicalQuery();
-
-    auto framework = exec->getQueryFramework();
 
     // For CQF explains, we serialize the entire input MQL (via CanonicalQuery or Pipeline) under
     // "parsedQuery". For classic explains, we serialize just the match expression.
@@ -149,7 +140,7 @@ void generatePlannerInfo(PlanExecutor* exec,
         }
 
         parsedQueryBob.doneFast();
-    } else if (nullptr != query) {
+    } else if (query) {
         BSONObjBuilder parsedQueryBob(plannerBob.subobjStart("parsedQuery"));
         query->getPrimaryMatchExpression()->serialize(&parsedQueryBob, {});
         parsedQueryBob.doneFast();
@@ -158,9 +149,22 @@ void generatePlannerInfo(PlanExecutor* exec,
             plannerBob.append("collation", query->getCollator()->getSpec().toBSON());
         }
 
+        // If there exists a matching index filter, set 'indexFilterSet' to false if query settings
+        // set, as they have higher priority.
         auto& querySettings = query->getExpCtx()->getQuerySettings();
         if (auto querySettingsBSON = querySettings.toBSON(); !querySettingsBSON.isEmpty()) {
             plannerBob.append("querySettings", querySettingsBSON);
+            plannerBob.append("indexFilterSet", false);
+        } else {
+            const bool existsMatchingIndexFilter = [&]() {
+                if (!mainCollection) {
+                    return false;
+                }
+                const auto* indexFilters =
+                    QuerySettingsDecoration::get(mainCollection->getSharedDecorations());
+                return indexFilters->getAllowedIndicesFilter(*query).has_value();
+            }();
+            plannerBob.append("indexFilterSet", existsMatchingIndexFilter);
         }
     }
 
@@ -192,11 +196,12 @@ void generatePlannerInfo(PlanExecutor* exec,
 
         plannerBob.append("queryFramework", "cqf");
     } else {
-        // Classic-only fields.
+        // Classic optimizer-only fields.
         auto&& enumeratorInfo = explainer.getEnumeratorInfo();
         plannerBob.append("maxIndexedOrSolutionsReached", enumeratorInfo.hitIndexedOrLimit);
         plannerBob.append("maxIndexedAndSolutionsReached", enumeratorInfo.hitIndexedAndLimit);
         plannerBob.append("maxScansToExplodeReached", enumeratorInfo.hitScanLimit);
+        plannerBob.append("prunedSimilarIndexes", enumeratorInfo.prunedAnyIndexes);
     }
 
     auto&& [winningStats, _] =
@@ -209,6 +214,11 @@ void generatePlannerInfo(PlanExecutor* exec,
         bab.append(rejectedStats);
     }
     bab.doneFast();
+
+    if (verbosity == ExplainOptions::Verbosity::kQueryPlannerDebug) {
+        plannerBob.appendArray("optimizerPhases", explainer.getOptimizerDebugInfo());
+    }
+
     plannerBob.doneFast();
 }
 
@@ -406,7 +416,8 @@ void Explain::explainStages(PlanExecutor* exec,
     out->appendElements(explainVersionToBson(explainer.getVersion()));
 
     if (verbosity >= ExplainOptions::Verbosity::kQueryPlanner) {
-        generatePlannerInfo(exec, command, collections, extraInfo, serializationContext, out);
+        generatePlannerInfo(
+            exec, command, collections, extraInfo, serializationContext, out, verbosity);
     }
 
     if (verbosity >= ExplainOptions::Verbosity::kExecStats) {
@@ -439,7 +450,12 @@ void Explain::explainPipeline(PlanExecutor* exec,
     *out << "stages" << Value(pipelineExec->writeExplainOps(verbosity));
 
     explain_common::generateServerInfo(out);
-    explain_common::generateServerParameters(exec->getOpCtx(), out);
+
+    auto* cq = exec->getCanonicalQuery();
+    const auto& expCtx = cq
+        ? cq->getExpCtx()
+        : ExpressionContext::makeBlankExpressionContext(exec->getOpCtx(), exec->nss());
+    explain_common::generateServerParameters(expCtx, out);
 
     explain_common::appendIfRoom(command, "command", out);
 }
@@ -484,7 +500,11 @@ void Explain::explainStages(PlanExecutor* exec,
                   out);
 
     explain_common::generateServerInfo(out);
-    explain_common::generateServerParameters(exec->getOpCtx(), out);
+    auto* cq = exec->getCanonicalQuery();
+    const auto& expCtx = cq
+        ? cq->getExpCtx()
+        : ExpressionContext::makeBlankExpressionContext(exec->getOpCtx(), exec->nss());
+    explain_common::generateServerParameters(expCtx, out);
 }
 
 void Explain::explainStages(PlanExecutor* exec,

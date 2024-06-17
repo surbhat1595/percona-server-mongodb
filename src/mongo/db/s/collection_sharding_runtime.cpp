@@ -33,7 +33,6 @@
 #include <boost/optional.hpp>
 #include <boost/smart_ptr.hpp>
 #include <boost/smart_ptr/intrusive_ptr.hpp>
-#include <tuple>
 
 #include <absl/container/node_hash_map.h>
 #include <boost/move/utility_core.hpp>
@@ -48,16 +47,13 @@
 #include "mongo/db/client.h"
 #include "mongo/db/concurrency/lock_manager_defs.h"
 #include "mongo/db/feature_flag.h"
-#include "mongo/db/global_settings.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/query/plan_cache.h"
 #include "mongo/db/query/sbe_plan_cache.h"
 #include "mongo/db/repl/read_concern_args.h"
 #include "mongo/db/repl/read_concern_level.h"
-#include "mongo/db/repl/repl_settings.h"
 #include "mongo/db/s/operation_sharding_state.h"
 #include "mongo/db/s/range_deleter_service.h"
-#include "mongo/db/s/sharding_runtime_d_params_gen.h"
 #include "mongo/db/server_options.h"
 #include "mongo/db/transaction_resources.h"
 #include "mongo/executor/task_executor_pool.h"
@@ -118,20 +114,52 @@ ShardVersion ShardVersionPlacementIgnoredNoIndexes() {
                                      boost::optional<CollectionIndexes>(boost::none));
 }
 
-}  // namespace
+// Checks that the overall collection 'timestamp' is valid for the current transaction (i.e. this
+// is, that the collection 'timestamp' is not greater than the transaction atClusterTime or
+// placementConflictTime).
+void checkShardingMetadataWasValidAtTxnClusterTime(
+    OperationContext* opCtx,
+    const NamespaceString& nss,
+    const boost::optional<LogicalTime>& placementConflictTime,
+    const CollectionMetadata& collectionMetadata) {
+    const auto& atClusterTime = repl::ReadConcernArgs::get(opCtx).getArgsAtClusterTime();
 
-CollectionShardingRuntime::ScopedSharedCollectionShardingRuntime::
-    ScopedSharedCollectionShardingRuntime(ScopedCollectionShardingState&& scopedCss)
-    : _scopedCss(std::move(scopedCss)) {}
-CollectionShardingRuntime::ScopedExclusiveCollectionShardingRuntime::
-    ScopedExclusiveCollectionShardingRuntime(ScopedCollectionShardingState&& scopedCss)
-    : _scopedCss(std::move(scopedCss)) {}
+    if (atClusterTime &&
+        atClusterTime->asTimestamp() <
+            collectionMetadata.getCollPlacementVersion().getTimestamp()) {
+        uasserted(ErrorCodes::SnapshotUnavailable,
+                  str::stream() << "Collection " << nss.toStringForErrorMsg()
+                                << " has undergone a catalog change operation at time "
+                                << collectionMetadata.getCollPlacementVersion().getTimestamp()
+                                << " and no longer satisfies the requirements for the current "
+                                   "transaction which requires "
+                                << atClusterTime->asTimestamp()
+                                << ". Transaction will be aborted.");
+    }
+
+    if (placementConflictTime &&
+        placementConflictTime->asTimestamp() <
+            collectionMetadata.getCollPlacementVersion().getTimestamp()) {
+        uasserted(ErrorCodes::SnapshotUnavailable,
+                  str::stream() << "Collection " << nss.toStringForErrorMsg()
+                                << " has undergone a catalog change operation at time "
+                                << collectionMetadata.getCollPlacementVersion().getTimestamp()
+                                << " and no longer satisfies the requirements for the current "
+                                   "transaction which requires "
+                                << placementConflictTime->asTimestamp()
+                                << ". Transaction will be aborted.");
+    }
+}
+
+}  // namespace
 
 CollectionShardingRuntime::CollectionShardingRuntime(ServiceContext* service, NamespaceString nss)
     : _serviceContext(service),
       _nss(std::move(nss)),
-      _metadataType(_nss.isNamespaceAlwaysUntracked() ? MetadataType::kUntracked
-                                                      : MetadataType::kUnknown) {}
+      _metadataType(_nss.isNamespaceAlwaysUntracked() ||
+                            !ShardingState::get(_serviceContext)->enabled()
+                        ? MetadataType::kUntracked
+                        : MetadataType::kUnknown) {}
 
 CollectionShardingRuntime::ScopedSharedCollectionShardingRuntime
 CollectionShardingRuntime::assertCollectionLockedAndAcquireShared(OperationContext* opCtx,
@@ -197,11 +225,6 @@ ScopedCollectionDescription CollectionShardingRuntime::getCollectionDescription(
 
 ScopedCollectionDescription CollectionShardingRuntime::getCollectionDescription(
     OperationContext* opCtx, bool operationIsVersioned) const {
-    // If the server has been started with --shardsvr, but hasn't been added to a cluster we should
-    // consider all collections as untracked
-    if (!ShardingState::get(opCtx)->enabled())
-        return {kUntrackedCollection};
-
     // Present the collection as unsharded to internal or direct commands against shards
     if (!operationIsVersioned)
         return {kUntrackedCollection};
@@ -430,19 +453,12 @@ SharedSemiFuture<void> CollectionShardingRuntime::getOngoingQueriesCompletionFut
     return _metadataManager->getOngoingQueriesCompletionFuture(range);
 }
 
-
 std::shared_ptr<ScopedCollectionDescription::Impl>
 CollectionShardingRuntime::_getCurrentMetadataIfKnown(
     const boost::optional<LogicalTime>& atClusterTime, bool preserveRange) const {
     stdx::lock_guard lk(_metadataManagerLock);
     switch (_metadataType) {
         case MetadataType::kUnknown:
-            // Until user collections can be sharded in serverless, the sessions collection will be
-            // the only sharded collection.
-            if (getGlobalReplSettings().isServerless() &&
-                _nss != NamespaceString::kLogicalSessionsNamespace) {
-                return kUntrackedCollection;
-            }
             return nullptr;
         case MetadataType::kUntracked:
             return kUntrackedCollection;
@@ -459,11 +475,6 @@ CollectionShardingRuntime::_getMetadataWithVersionCheckAt(
     const boost::optional<ShardVersion>& optReceivedShardVersion,
     bool preserveRange,
     bool supportNonVersionedOperations) const {
-    // If the server has been started with --shardsvr, but hasn't been added to a cluster we should
-    // consider all collections as unsharded
-    if (!ShardingState::get(opCtx)->enabled())
-        return kUntrackedCollection;
-
     if (repl::ReadConcernArgs::get(opCtx).getLevel() ==
         repl::ReadConcernLevel::kAvailableReadConcern)
         return kUntrackedCollection;
@@ -543,6 +554,9 @@ CollectionShardingRuntime::_getMetadataWithVersionCheckAt(
                                     << placementConflictTime->asTimestamp()
                                     << ". Transaction will be aborted.");
         }
+
+        checkShardingMetadataWasValidAtTxnClusterTime(
+            opCtx, _nss, placementConflictTime, currentMetadata);
         return optCurrentMetadata;
     }
 
@@ -766,9 +780,6 @@ void CollectionShardingRuntime::_cleanupBeforeInstallingNewCollectionMetadata(
 }
 
 void CollectionShardingRuntime::_checkCritSecForIndexMetadata(OperationContext* opCtx) const {
-    if (!ShardingState::get(opCtx)->enabled())
-        return;
-
     if (repl::ReadConcernArgs::get(opCtx).getLevel() ==
         repl::ReadConcernLevel::kAvailableReadConcern)
         return;
@@ -797,5 +808,12 @@ void CollectionShardingRuntime::_checkCritSecForIndexMetadata(OperationContext* 
                           << " is acquired with reason: " << reason,
             !criticalSectionSignal);
 }
+
+CollectionShardingRuntime::ScopedSharedCollectionShardingRuntime::
+    ScopedSharedCollectionShardingRuntime(ScopedCollectionShardingState&& scopedCss)
+    : _scopedCss(std::move(scopedCss)) {}
+CollectionShardingRuntime::ScopedExclusiveCollectionShardingRuntime::
+    ScopedExclusiveCollectionShardingRuntime(ScopedCollectionShardingState&& scopedCss)
+    : _scopedCss(std::move(scopedCss)) {}
 
 }  // namespace mongo

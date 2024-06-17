@@ -120,7 +120,6 @@
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kTest
 
-
 namespace mongo {
 namespace {
 
@@ -128,9 +127,6 @@ class ReshardingOplogCrudApplicationTest : public ServiceContextMongoDTest {
 public:
     void setUp() override {
         ServiceContextMongoDTest::setUp();
-
-        // Initialize sharding components as a shard server.
-        serverGlobalParams.clusterRole = ClusterRole::ShardServer;
 
         auto serviceContext = getServiceContext();
 
@@ -415,11 +411,13 @@ private:
     const ShardId _otherDonorId{"otherDonorId"};
 
     const NamespaceString _outputNss =
-        resharding::constructTemporaryReshardingNss(_sourceNss.db_forTest(), _sourceUUID);
+        resharding::constructTemporaryReshardingNss(_sourceNss, _sourceUUID);
     const NamespaceString _myStashNss =
         resharding::getLocalConflictStashNamespace(_sourceUUID, _myDonorId);
     const NamespaceString _otherStashNss =
         resharding::getLocalConflictStashNamespace(_sourceUUID, _otherDonorId);
+
+    service_context_test::ShardRoleOverride _shardRole;
 
     std::unique_ptr<ReshardingOplogApplicationRules> _applier;
     std::unique_ptr<ReshardingMetrics> _metrics;

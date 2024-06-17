@@ -17,8 +17,6 @@
 //   tenant_migration_incompatible,
 //   # The SBE plan cache was first enabled in 6.3.
 //   requires_fcv_63,
-//   # TODO SERVER-67607: Test plan cache with CQF enabled.
-//   cqf_experimental_incompatible,
 //   references_foreign_collection,
 // ]
 
@@ -48,7 +46,7 @@ function addToQueryCache(
     let keyHash = '';
     if (queryArg instanceof Array) {
         assert.eq(resCount, collArg.aggregate(queryArg).toArray().length);
-        keyHash = getPlanCacheKeyFromPipeline(queryArg, collArg, db);
+        keyHash = getPlanCacheKeyFromPipeline(queryArg, collArg);
     } else {
         assert.eq(resCount, collArg.find(queryArg, projectArg).itcount());
         keyHash = getPlanCacheKeyFromShape(

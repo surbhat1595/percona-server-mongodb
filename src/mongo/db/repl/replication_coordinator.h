@@ -46,6 +46,7 @@
 #include "mongo/bson/oid.h"
 #include "mongo/bson/timestamp.h"
 #include "mongo/client/connection_string.h"
+#include "mongo/db/common_request_args_gen.h"
 #include "mongo/db/database_name.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
@@ -141,7 +142,7 @@ public:
         StatusAndDuration(const Status& stat, Milliseconds ms) : status(stat), duration(ms) {}
     };
 
-    virtual ~ReplicationCoordinator();
+    ~ReplicationCoordinator() override;
 
     /**
      * Does any initial bookkeeping needed to start replication, and instructs the other
@@ -439,8 +440,13 @@ public:
     /*
      * Returns the same as getMyLastWrittenOpTime() and additionally returns the wall clock time
      * corresponding to that OpTime.
+     *
+     * When rollbackSafe is true, this returns an empty OpTimeAndWallTime if the node is in ROLLBACK
+     * state. The lastWrittenOpTime during ROLLBACK might be temporarily pointing to an oplog entry
+     * in the divergent branch of history which would become invalid after the rollback finishes.
      */
-    virtual OpTimeAndWallTime getMyLastWrittenOpTimeAndWallTime() const = 0;
+    virtual OpTimeAndWallTime getMyLastWrittenOpTimeAndWallTime(
+        bool rollbackSafe = false) const = 0;
 
     /**
      * Returns the last optime recorded by setMyLastAppliedOpTime.
@@ -450,13 +456,8 @@ public:
     /*
      * Returns the same as getMyLastAppliedOpTime() and additionally returns the wall clock time
      * corresponding to that OpTime.
-     *
-     * When rollbackSafe is true, this returns an empty OpTimeAndWallTime if the node is in ROLLBACK
-     * state. The lastAppliedOpTime during ROLLBACK might be temporarily pointing to an oplog entry
-     * in the divergent branch of history which would become invalid after the rollback finishes.
      */
-    virtual OpTimeAndWallTime getMyLastAppliedOpTimeAndWallTime(
-        bool rollbackSafe = false) const = 0;
+    virtual OpTimeAndWallTime getMyLastAppliedOpTimeAndWallTime() const = 0;
 
     /**
      * Returns the last optime recorded by setMyLastDurableOpTime.
@@ -492,6 +493,9 @@ public:
      */
     virtual Status waitUntilOpTimeForReadUntil(OperationContext* opCtx,
                                                const ReadConcernArgs& settings,
+                                               boost::optional<Date_t> deadline) = 0;
+    virtual Status waitUntilOpTimeWrittenUntil(OperationContext* opCtx,
+                                               LogicalTime clusterTime,
                                                boost::optional<Date_t> deadline) = 0;
 
     /**
@@ -964,7 +968,7 @@ public:
      * Prepares a metadata object with the ReplSetMetadata and the OplogQueryMetadata depending
      * on what has been requested.
      */
-    virtual void prepareReplMetadata(const BSONObj& metadataRequestObj,
+    virtual void prepareReplMetadata(const CommonRequestArgs& requestArgs,
                                      const OpTime& lastOpTimeFromClient,
                                      BSONObjBuilder* builder) const = 0;
 

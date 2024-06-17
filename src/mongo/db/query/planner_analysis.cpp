@@ -68,7 +68,7 @@
 #include "mongo/db/query/interval_evaluation_tree.h"
 #include "mongo/db/query/optimizer/algebra/polyvalue.h"
 #include "mongo/db/query/projection.h"
-#include "mongo/db/query/query_decorations.h"
+#include "mongo/db/query/query_knob_configuration.h"
 #include "mongo/db/query/query_planner_common.h"
 #include "mongo/db/query/query_request_helper.h"
 #include "mongo/db/query/query_solution.h"
@@ -691,9 +691,7 @@ std::unique_ptr<QuerySolutionNode> tryPushdownProjectBeneathSort(
     return ownedProjectionInput;
 }
 
-bool canUseSimpleSort(const QuerySolutionNode& solnRoot,
-                      const CanonicalQuery& cq,
-                      const QueryPlannerParams& plannerParams) {
+bool canUseSimpleSort(const QuerySolutionNode& solnRoot, const CanonicalQuery& cq) {
     // The simple sort stage discards any metadata other than sort key metadata. It can only be used
     // if there are no metadata dependencies, or the only metadata dependency is a 'kSortKey'
     // dependency.
@@ -816,7 +814,8 @@ bool shouldReverseScanForSort(QuerySolutionNode* solnRoot,
     const bool hasNaturalHint =
         findCommand.getHint()[query_request_helper::kNaturalSortField].ok() &&
         !params.querySettingsApplied;
-    const bool hasQuerySettingsEnforcedDirection = params.collscanDirection.has_value();
+    const bool hasQuerySettingsEnforcedDirection =
+        params.mainCollectionInfo.collscanDirection.has_value();
     if (isCollscan && (hasNaturalHint || hasQuerySettingsEnforcedDirection)) {
         return false;
     }
@@ -828,7 +827,7 @@ bool shouldReverseScanForSort(QuerySolutionNode* solnRoot,
 }
 }  // namespace
 
-bool QueryPlannerAnalysis::isEligibleForHashJoin(const SecondaryCollectionInfo& foreignCollInfo) {
+bool QueryPlannerAnalysis::isEligibleForHashJoin(const CollectionInfo& foreignCollInfo) {
     return !internalQueryDisableLookupExecutionUsingHashJoin.load() && foreignCollInfo.exists &&
         foreignCollInfo.stats.noOfRecords <=
         internalQueryCollectionMaxNoOfDocumentsToChooseHashJoin.load() &&
@@ -888,7 +887,7 @@ void QueryPlannerAnalysis::removeUselessColumnScanRowStoreExpression(QuerySoluti
 // static
 void QueryPlannerAnalysis::removeImpreciseInternalExprFilters(const QueryPlannerParams& params,
                                                               QuerySolutionNode& root) {
-    if (params.collectionStats.isTimeseries) {
+    if (params.mainCollectionInfo.stats.isTimeseries) {
         // For timeseries collections, the imprecise filters are able to get rid of an entire
         // bucket's worth of data, and save us from unpacking potentially thousands of documents.
         // In this case, we decide not to prune the imprecise filters.
@@ -920,11 +919,11 @@ std::pair<EqLookupNode::LookupStrategy, boost::optional<IndexEntry>>
 QueryPlannerAnalysis::determineLookupStrategy(
     const NamespaceString& foreignCollName,
     const std::string& foreignField,
-    const std::map<NamespaceString, SecondaryCollectionInfo>& collectionsInfo,
+    const std::map<NamespaceString, CollectionInfo>& collectionsInfo,
     bool allowDiskUse,
     const CollatorInterface* collator) {
     auto foreignCollItr = collectionsInfo.find(foreignCollName);
-    if (foreignCollItr == collectionsInfo.end()) {
+    if (foreignCollItr == collectionsInfo.end() || !foreignCollItr->second.exists) {
         return {EqLookupNode::LookupStrategy::kNonExistentForeignCollection, boost::none};
     }
 
@@ -957,9 +956,9 @@ QueryPlannerAnalysis::determineLookupStrategy(
         return boost::none;
     }();
 
-    if (!foreignCollItr->second.exists) {
-        return {EqLookupNode::LookupStrategy::kNonExistentForeignCollection, boost::none};
-    } else if (foreignIndex) {
+    // TODO SERVER-88629 Throw 'ErrorCodes::NoQueryExecutionPlans' if 'NO_TABLE_SCAN' option is set
+    // for HashJoin and NestedLoopJoin.
+    if (foreignIndex) {
         return {EqLookupNode::LookupStrategy::kIndexedLoopJoin, std::move(foreignIndex)};
     } else if (allowDiskUse && isEligibleForHashJoin(foreignCollItr->second)) {
         return {EqLookupNode::LookupStrategy::kHashJoin, boost::none};
@@ -973,7 +972,7 @@ void QueryPlannerAnalysis::analyzeGeo(const QueryPlannerParams& params,
                                       QuerySolutionNode* solnRoot) {
     // Get field names of all 2dsphere indexes with version >= 3.
     std::set<StringData> twoDSphereFields;
-    for (const IndexEntry& indexEntry : params.indices) {
+    for (const IndexEntry& indexEntry : params.mainCollectionInfo.indexes) {
         if (indexEntry.type != IndexType::INDEX_2DSPHERE) {
             continue;
         }
@@ -1015,7 +1014,6 @@ BSONObj QueryPlannerAnalysis::getSortPattern(const BSONObj& indexKeyPattern) {
 
 // static
 bool QueryPlannerAnalysis::explodeForSort(const CanonicalQuery& query,
-                                          const QueryPlannerParams& params,
                                           std::unique_ptr<QuerySolutionNode>* solnRoot) {
     vector<QuerySolutionNode*> explodableNodes;
 
@@ -1142,7 +1140,7 @@ bool QueryPlannerAnalysis::explodeForSort(const CanonicalQuery& query,
 
     // Too many ixscans spoil the performance.
     if (totalNumScans >
-        QueryKnobConfiguration::decoration(query.getOpCtx()).getMaxScansToExplodeForOp()) {
+        query.getExpCtx()->getQueryKnobConfiguration().getMaxScansToExplodeForOp()) {
         (*solnRoot)->hitScanLimit = true;
         LOGV2_DEBUG(
             20950,
@@ -1271,7 +1269,7 @@ std::unique_ptr<QuerySolutionNode> QueryPlannerAnalysis::analyzeSort(
     // Sort not provided, can't reverse scans to get the sort.  One last trick: We can "explode"
     // index scans over point intervals to an OR of sub-scans in order to pull out a sort.
     // Let's try this.
-    if (explodeForSort(query, params, &solnRoot)) {
+    if (explodeForSort(query, &solnRoot)) {
         return solnRoot;
     }
 
@@ -1301,7 +1299,7 @@ std::unique_ptr<QuerySolutionNode> QueryPlannerAnalysis::analyzeSort(
     size_t sortLimit = findCommand.getLimit() ? static_cast<size_t>(*findCommand.getLimit()) +
             static_cast<size_t>(findCommand.getSkip().value_or(0))
                                               : 0;
-    if (canUseSimpleSort(*solnRoot, query, params)) {
+    if (canUseSimpleSort(*solnRoot, query)) {
         sortNode = std::make_unique<SortNodeSimple>(
             std::move(solnRoot),
             sortObj,
@@ -1343,7 +1341,7 @@ std::unique_ptr<QuerySolution> QueryPlannerAnalysis::analyzeDataAccess(
 
     // If we're answering a query on a sharded system, we need to drop documents that aren't
     // logically part of our shard.
-    if (params.options & QueryPlannerParams::INCLUDE_SHARD_FILTER) {
+    if (params.mainCollectionInfo.options & QueryPlannerParams::INCLUDE_SHARD_FILTER) {
         if (!solnRoot->fetched()) {
             // See if we need to fetch information for our shard key.
             // NOTE: Solution nodes only list ordinary, non-transformed index keys for now

@@ -40,7 +40,7 @@ const checkEqual = function(before, expectedDiff, after, errorMessage) {
 // Helper class for the bulkwrite_metrics tests.
 export class BulkWriteMetricChecker {
     constructor(testDB,
-                namespace,
+                namespaces,
                 bulkWrite,
                 isMongos,
                 fle,
@@ -49,7 +49,7 @@ export class BulkWriteMetricChecker {
                 timeseries = false,
                 defaultTimestamp = undefined) {
         this.testDB = testDB;
-        this.namespace = namespace;
+        this.namespaces = namespaces;
         this.bulkWrite = bulkWrite;
         this.isMongos = isMongos;
         this.fle = fle;
@@ -61,24 +61,46 @@ export class BulkWriteMetricChecker {
 
     // Metrics corresponding to
     // Top::get(opCtx->getClient()->getServiceContext()).record(...).
-    _checkTopMetrics(top0, top1, inserted, retriedInsert, updated, deleted) {
+    _checkTopMetrics(top0,
+                     top1,
+                     inserted,
+                     retriedInsert,
+                     updateCount,
+                     deleted,
+                     perNamespaceMetrics,
+                     nsIndicesInRequest) {
         if (this.fle) {
             // FLE do not set those in Top due to redaction.
-            assert.eq(top0.update, undefined);
-            assert.eq(top1.update, undefined);
+            for (const ns of this.namespaces) {
+                assert.eq(top0[ns].update, undefined);
+                assert.eq(top1[ns].update, undefined);
 
-            assert.eq(top0.remove, undefined);
-            assert.eq(top1.remove, undefined);
+                assert.eq(top0[ns].remove, undefined);
+                assert.eq(top1[ns].remove, undefined);
 
-            assert.eq(top0.insert, undefined);
-            assert.eq(top1.insert, undefined);
+                assert.eq(top0[ns].insert, undefined);
+                assert.eq(top1[ns].insert, undefined);
+            }
         } else {
-            checkEqual(top0.update.count, updated, top1.update.count, "update.count mismatch");
-            checkEqual(top0.remove.count, deleted, top1.remove.count, "remove.count mismatch");
-            checkEqual(top0.insert.count,
-                       inserted + retriedInsert,
-                       top1.insert.count,
-                       "insert.count mismatch");
+            for (const idx of nsIndicesInRequest) {
+                const ns = this.namespaces[idx];
+                if (perNamespaceMetrics != undefined) {
+                    inserted = perNamespaceMetrics[ns].inserted ?? 0;
+                    updateCount = perNamespaceMetrics[ns].updateCount ?? 0;
+                    deleted = perNamespaceMetrics[ns].deleted ?? 0;
+                    retriedInsert = perNamespaceMetrics[ns].retriedInsert ?? 0;
+                }
+                checkEqual(top0[ns].update.count,
+                           updateCount,
+                           top1[ns].update.count,
+                           `update.count mismatch for ${ns}`);
+                checkEqual(
+                    top0[ns].remove.count, deleted, top1[ns].remove.count, "remove.count mismatch");
+                checkEqual(top0[ns].insert.count,
+                           inserted + retriedInsert,
+                           top1[ns].insert.count,
+                           `insert.count mismatch for ${ns}`);
+            }
         }
     }
 
@@ -101,7 +123,7 @@ export class BulkWriteMetricChecker {
                               status1,
                               inserted,
                               actualInserts,
-                              updated,
+                              updateCount,
                               fleSafeContentUpdates,
                               deleted,
                               retryCount) {
@@ -123,16 +145,14 @@ export class BulkWriteMetricChecker {
             // All calls are done with {writeConcern: {w: "majority"}} so "none" count should be
             // unchanged, except for timeseries.
             // TODO SERVER-84799 timeseries condition below and comment above.
-            const [uNone, uMaj] = (this.timeseries && retryCount > 1) ? [updated, 0] : [0, updated];
+            const [uNone, uMaj] =
+                (this.timeseries && retryCount > 1) ? [updateCount, 0] : [0, updateCount];
             checkEqual(
                 wC0.update.wmajority, uMaj, wC1.update.wmajority, "update.wmajority mismatch");
             checkEqual(
                 wC0.delete.wmajority, deleted, wC1.delete.wmajority, "delete.wmajority mismatch");
-            // TODO SERVER-84737 timeseries opWriteConcernCounters.insert.
-            checkEqual(wC0.insert.wmajority,
-                       (this.timeseries ? 0 : inserted),
-                       wC1.insert.wmajority,
-                       "insert.wmajority mismatch");
+            checkEqual(
+                wC0.insert.wmajority, inserted, wC1.insert.wmajority, "insert.wmajority mismatch");
 
             checkEqual(wC0.update.none, uNone, wC1.update.none, "update.none mismatch");
             checkEqual(wC0.delete.none, 0, wC1.delete.none, "delete.none mismatch");
@@ -172,15 +192,22 @@ export class BulkWriteMetricChecker {
     }
 
     // Metrics corresponding to globalOpCounters.gotInsert() / gotDelete() / gotUpdate()
-    _checkOpCounters(
-        op0, op1, inserted, actualInserts, updated, fleSafeContentUpdates, deleted, retryCount) {
+    _checkOpCounters(op0,
+                     op1,
+                     inserted,
+                     actualInserts,
+                     updateCount,
+                     opcounterFactor,
+                     fleSafeContentUpdates,
+                     deleted,
+                     retryCount) {
         // For BulkWrite, each statement is always a single insert/update so `inserted` and
         // `updated` also are the number of statements. Also BulkWrite FLE does not support mixing
         // updates with inserts.
         let numberOfInsertStatements = inserted;
-        let numberOfUpdateStatements = updated;
+        let numberOfUpdateStatements = updateCount;
 
-        let opUpdated = updated;
+        let opUpdated = updateCount;
         let opDeleted = deleted;
         let opInserted = actualInserts;
 
@@ -192,7 +219,6 @@ export class BulkWriteMetricChecker {
             opDeleted *= retryCount;
             opUpdated *= retryCount;
             if (this.fle) {
-                // TODO SERVER-83979 fix the expected opcounter changes with FLE.
                 // On Mongos, there is one extra opcounter increment per statement.
                 opDeleted *= 2;
                 if (numberOfInsertStatements >= 0) {
@@ -207,7 +233,8 @@ export class BulkWriteMetricChecker {
             opUpdated = fleSafeContentUpdates;
         }
 
-        checkEqual(op0.update, opUpdated, op1.update, "opcounters.update mismatch");
+        checkEqual(
+            op0.update, opUpdated * opcounterFactor, op1.update, "opcounters.update mismatch");
         checkEqual(op0.delete, opDeleted, op1.delete, "opcounters.delete mismatch");
         checkEqual(op0.insert, opInserted, op1.insert, "opcounters.insert mismatch");
     }
@@ -217,6 +244,7 @@ export class BulkWriteMetricChecker {
                             status1,
                             top1,
                             updated,
+                            updateCount,
                             inserted,
                             deleted,
                             retriedInsert,
@@ -224,7 +252,9 @@ export class BulkWriteMetricChecker {
                             retriedStatementsCount,
                             fleSafeContentUpdates,
                             actualInserts,
-                            retryCount) {
+                            retryCount,
+                            perNamespaceMetrics,
+                            nsIndicesInRequest) {
         this._checkAdditiveMetrics(
             status0, status1, actualInserts, updated, fleSafeContentUpdates, deleted);
 
@@ -233,20 +263,27 @@ export class BulkWriteMetricChecker {
         // metrics.queryExecutor.scanned is stable but the FLE logic for it is very complicated
         // to maintain here.
 
-        this._checkTopMetrics(top0, top1, inserted, retriedInsert, updated, deleted);
+        this._checkTopMetrics(top0,
+                              top1,
+                              inserted,
+                              retriedInsert,
+                              updateCount,
+                              deleted,
+                              perNamespaceMetrics,
+                              nsIndicesInRequest);
 
         this._checkWriteConcernMetrics(status0,
                                        status1,
                                        inserted,
                                        actualInserts,
-                                       updated,
+                                       updateCount,
                                        fleSafeContentUpdates,
                                        deleted,
                                        retryCount);
 
         // Metrics corresponding to
-        // RetryableWritesStats::get(opCtx)->incrementRetriedCommandsCount and
-        // incrementRetriedStatementsCount.
+        // RetryableWritesStats::get(opCtx)->incrementRetriedCommandsCount
+        // and incrementRetriedStatementsCount.
         let t0 = status0.transactions;
         let t1 = status1.transactions;
         checkEqual(t0.retriedCommandsCount,
@@ -261,7 +298,7 @@ export class BulkWriteMetricChecker {
 
     _checkMongosOnlyMetrics(status0,
                             status1,
-                            updated,
+                            updateCount,
                             inserted,
                             deleted,
                             eqIndexedEncryptedFields,
@@ -276,7 +313,7 @@ export class BulkWriteMetricChecker {
         const targeted0 = status0.shardingStatistics.numHostsTargeted;
         const targeted1 = status1.shardingStatistics.numHostsTargeted;
 
-        let targetedUpdate = updated * retryCount;
+        let targetedUpdate = updateCount * retryCount;
         let targetedInsert = actualInserts;
         let unshardedInsert = 0;
 
@@ -284,7 +321,7 @@ export class BulkWriteMetricChecker {
             targetedUpdate = fleSafeContentUpdates;
             // BulkWrite FLE does not allow mixing insert and update so updated != 0 means
             // it is an FLE update.
-            if (updated != 0) {
+            if (updateCount != 0) {
                 targetedInsert = 0;
             } else {
                 targetedInsert = inserted;
@@ -292,13 +329,17 @@ export class BulkWriteMetricChecker {
             // The FLE inserts in the state collection are batched in a single command so they count
             // as 1 here, unlike for opcounters. eqIndexedEncryptedFields is per insert/update and
             // we don't allow mixing insert and update for FLE bulkWrite.
-            unshardedInsert = 2 * (inserted + updated) * (eqIndexedEncryptedFields > 0 ? 1 : 0);
+            unshardedInsert = 2 * (inserted + updateCount) * (eqIndexedEncryptedFields > 0 ? 1 : 0);
             unshardedInsert *= retryCount;
         }
 
         // TODO SERVER-84798 timeseries should increase by retryCount too.
         if (!this.timeseries) {
             targetedInsert *= retryCount;
+        }
+
+        if (this.timeseries && !this.bulkWrite && updateShardField === "manyShards") {
+            targetedUpdate = targetedUpdate * 2;
         }
 
         if (this.bulkWrite) {
@@ -333,8 +374,9 @@ export class BulkWriteMetricChecker {
     }
 
     // eqIndexedEncryptedFields is per insert/update in the command.
-    _checkMetricsImpl(status0, top0, {
+    _checkMetricsImpl(status0, top0, nsIndicesInRequest, {
         updated = 0,
+        updateCount = undefined,
         inserted = 0,
         deleted = 0,
         eqIndexedEncryptedFields = 0,
@@ -344,10 +386,17 @@ export class BulkWriteMetricChecker {
         singleUpdateForBulkWrite = false,
         singleInsertForBulkWrite = false,
         insertShardField = "oneShard",
-        updateShardField = this.timeseries ? "manyShards" : "allShards",
+        updateShardField = this.timeseries ? "oneShard" : "allShards",
         deleteShardField = this.timeseries ? "oneShard" : "allShards",
-        retryCount = 0
+        retryCount = 0,
+        opcounterFactor = 1,
+        perNamespaceMetrics = undefined
     }) {
+        // updateCount is the number of update commands, it is different from updated when
+        // multi: true.
+        if (updateCount == undefined) {
+            updateCount = updated;
+        }
         const status1 = this.testDB.serverStatus();
 
         // An FLE update causes one findAndModify followed by an optional (absent if
@@ -368,7 +417,7 @@ export class BulkWriteMetricChecker {
         if (this.isMongos) {
             this._checkMongosOnlyMetrics(status0,
                                          status1,
-                                         updated,
+                                         updateCount,
                                          inserted,
                                          deleted,
                                          eqIndexedEncryptedFields,
@@ -381,7 +430,7 @@ export class BulkWriteMetricChecker {
                                          retryCount,
                                          actualInserts);
         } else {
-            const top1 = this.testDB.adminCommand({top: 1}).totals[this.namespace];
+            const top1 = this.testDB.adminCommand({top: 1}).totals;
             // See comment on unshardedInsert for the ternary.
             const retriedCommandsCount =
                 (1 + 2 * (eqIndexedEncryptedFields > 0 ? 1 : 0) + (this.bulkWrite && this.fle)) *
@@ -392,6 +441,7 @@ export class BulkWriteMetricChecker {
                                          status1,
                                          top1,
                                          updated,
+                                         updateCount,
                                          inserted,
                                          deleted,
                                          retriedInsert,
@@ -399,14 +449,17 @@ export class BulkWriteMetricChecker {
                                          retriedStatementsCount,
                                          fleSafeContentUpdates,
                                          actualInserts,
-                                         retryCount);
+                                         retryCount,
+                                         perNamespaceMetrics,
+                                         nsIndicesInRequest);
         }
 
         this._checkOpCounters(status0.opcounters,
                               status1.opcounters,
                               inserted,
                               actualInserts,
-                              updated,
+                              updateCount,
+                              opcounterFactor,
                               fleSafeContentUpdates,
                               deleted,
                               retryCount);
@@ -455,24 +508,42 @@ export class BulkWriteMetricChecker {
         }
     }
 
+    _findNsIndicesInRequest(bulkWriteOps) {
+        const nsIndicesInRequest = new Set();
+        for (const op of bulkWriteOps) {
+            var idx = op.insert;
+            if (op.update != undefined) {
+                idx = op.update;
+            } else if (op.delete != undefined) {
+                idx = op.delete;
+            }
+
+            nsIndicesInRequest.add(idx);
+        }
+        return nsIndicesInRequest;
+    }
+
     checkMetrics(testcaseName, bulkWriteOps, normalCommands, expectedMetrics) {
         print(`Testcase: ${testcaseName} (on a ${
             this.isMongos ? "ShardingTest"
                           : "ReplSetTest"} with bulkWrite = ${this.bulkWrite}, errorsOnly = ${
             this.errorsOnly} and timeseries = ${this.timeseries}).`);
         const statusBefore = this.testDB.serverStatus();
-        const topBefore =
-            this.isMongos ? undefined : this.testDB.adminCommand({top: 1}).totals[this.namespace];
+        const topBefore = this.isMongos ? undefined : this.testDB.adminCommand({top: 1}).totals;
 
         if (this.bulkWrite) {
             if (this.timeseries) {
                 this._addTimestamp(bulkWriteOps);
             }
 
+            const namespaces = this.namespaces.map(namespace => {
+                return {ns: namespace};
+            });
+
             assert.commandWorked(this.testDB.adminCommand({
                 bulkWrite: 1,
                 ops: bulkWriteOps,
-                nsInfo: [{ns: this.namespace}],
+                nsInfo: namespaces,
                 writeConcern: {w: 'majority'},
                 errorsOnly: this.errorsOnly
             }));
@@ -482,7 +553,8 @@ export class BulkWriteMetricChecker {
             }
         }
         expectedMetrics.retryCount = 1;
-        this._checkMetricsImpl(statusBefore, topBefore, expectedMetrics);
+        this._checkMetricsImpl(
+            statusBefore, topBefore, this._findNsIndicesInRequest(bulkWriteOps), expectedMetrics);
     }
 
     checkMetricsWithRetries(
@@ -492,24 +564,36 @@ export class BulkWriteMetricChecker {
                           : "ReplSetTest"} with bulkWrite = ${this.bulkWrite}, errorsOnly = ${
             this.errorsOnly} and timeseries = ${this.timeseries}).`);
 
-        let statusBefore = this.testDB.serverStatus();
-        let topBefore =
-            this.isMongos ? undefined : this.testDB.adminCommand({top: 1}).totals[this.namespace];
+        if (this.timeseries && this.isMongos) {
+            // For sharded timeseries updates we will get an extra opcounter for a retryable write
+            // since we execute them as an internal transaction which does an additional opcounter.
+            expectedMetrics.opcounterFactor = 2;
+            if (expectedMetrics.updateArrayFilters) {
+                expectedMetrics.updateArrayFilters = expectedMetrics.updateArrayFilters * 2;
+            }
+        }
 
+        let statusBefore = this.testDB.serverStatus();
+        let topBefore = this.isMongos ? undefined : this.testDB.adminCommand({top: 1}).totals;
         if (this.bulkWrite) {
             if (this.timeseries) {
                 this._addTimestamp(bulkWriteOps);
             }
 
+            const namespaces = this.namespaces.map(namespace => {
+                return {ns: namespace};
+            });
+
             for (let i = 0; i < this.retryCount; ++i) {
-                assert.commandWorked(this.testDB.adminCommand({
+                let res = assert.commandWorked(this.testDB.adminCommand({
                     bulkWrite: 1,
                     ops: bulkWriteOps,
-                    nsInfo: [{ns: this.namespace}],
+                    nsInfo: namespaces,
                     lsid: lsid,
                     txnNumber: txnNumber,
                     writeConcern: {w: "majority"}
                 }));
+                assert.eq(res.cursor.firstBatch[0].ok, 1);
             }
         } else {
             normalCommand.writeConcern = {w: "majority"};
@@ -521,6 +605,7 @@ export class BulkWriteMetricChecker {
             }
         }
         expectedMetrics.retryCount = this.retryCount;
-        this._checkMetricsImpl(statusBefore, topBefore, expectedMetrics);
+        this._checkMetricsImpl(
+            statusBefore, topBefore, this._findNsIndicesInRequest(bulkWriteOps), expectedMetrics);
     }
 }

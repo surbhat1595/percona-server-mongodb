@@ -32,7 +32,6 @@
 #include <boost/none.hpp>
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 #include <iterator>
-#include <memory>
 #include <variant>
 #include <vector>
 
@@ -48,27 +47,20 @@
 #include "mongo/db/client.h"
 #include "mongo/db/logical_time.h"
 #include "mongo/db/pipeline/expression_context.h"
-#include "mongo/db/pipeline/expression_context_for_test.h"
-#include "mongo/db/query/find_command.h"
 #include "mongo/db/query/index_hint.h"
-#include "mongo/db/query/parsed_find_command.h"
 #include "mongo/db/query/query_knobs_gen.h"
 #include "mongo/db/query/query_settings/query_settings_cluster_parameter_gen.h"
 #include "mongo/db/query/query_settings/query_settings_gen.h"
 #include "mongo/db/query/query_settings/query_settings_manager.h"
 #include "mongo/db/query/query_settings/query_settings_utils.h"
-#include "mongo/db/query/query_shape/find_cmd_shape.h"
 #include "mongo/db/query/query_shape/query_shape.h"
-#include "mongo/db/query/query_shape/serialization_options.h"
 #include "mongo/db/server_parameter.h"
 #include "mongo/db/service_context_test_fixture.h"
 #include "mongo/db/tenant_id.h"
-#include "mongo/idl/idl_parser.h"
 #include "mongo/idl/server_parameter_test_util.h"
 #include "mongo/unittest/assert.h"
 #include "mongo/unittest/bson_test_util.h"
 #include "mongo/unittest/framework.h"
-#include "mongo/util/intrusive_counter.h"
 #include "mongo/util/namespace_string_util.h"
 #include "mongo/util/serialization_context.h"
 
@@ -79,7 +71,9 @@ QueryShapeConfiguration makeQueryShapeConfiguration(const QuerySettings& setting
                                                     OperationContext* opCtx,
                                                     boost::optional<TenantId> tenantId) {
     auto queryShapeHash = createRepresentativeInfo(query, opCtx, tenantId).queryShapeHash;
-    return QueryShapeConfiguration(queryShapeHash, settings, query);
+    QueryShapeConfiguration result(queryShapeHash, settings);
+    result.setRepresentativeQuery(query);
+    return result;
 }
 
 // QueryShapeConfiguration is not comparable, therefore comparing the corresponding
@@ -104,21 +98,29 @@ void assertQueryShapeConfigurationsEquals(
 
 }  // namespace
 
+static auto const kSerializationContext =
+    SerializationContext{SerializationContext::Source::Command,
+                         SerializationContext::CallerType::Request,
+                         SerializationContext::Prefix::ExcludePrefix};
+
 class QuerySettingsManagerTest : public ServiceContextTest {
 public:
     static constexpr StringData kCollName = "exampleCol"_sd;
     static constexpr StringData kDbName = "foo"_sd;
 
     static std::vector<QueryShapeConfiguration> getExampleQueryShapeConfigurations(
-        OperationContext* opCtx, boost::optional<TenantId> tenantId) {
+        OperationContext* opCtx, TenantId tenantId) {
+        NamespaceSpec ns;
+        ns.setDb(DatabaseNameUtil::deserialize(tenantId, kDbName, kSerializationContext));
+        ns.setColl(kCollName);
+
         QuerySettings settings;
         settings.setQueryFramework(QueryFrameworkControlEnum::kTrySbeEngine);
-        settings.setIndexHints({{IndexHintSpec({IndexHint("a_1")})}});
-        QueryInstance queryA = BSON("find" << kCollName << "$db" << kDbName << "filter"
-                                           << BSON("a" << 2) << "$tenant" << TenantId{OID::gen()});
+        settings.setIndexHints({{IndexHintSpec(ns, {IndexHint("a_1")})}});
+        QueryInstance queryA =
+            BSON("find" << kCollName << "$db" << kDbName << "filter" << BSON("a" << 2));
         QueryInstance queryB =
-            BSON("find" << kCollName << "$db" << kDbName << "filter" << BSON("a" << BSONNULL)
-                        << "$tenant" << TenantId{OID::gen()});
+            BSON("find" << kCollName << "$db" << kDbName << "filter" << BSON("a" << BSONNULL));
         return {makeQueryShapeConfiguration(settings, queryA, opCtx, tenantId),
                 makeQueryShapeConfiguration(settings, queryB, opCtx, tenantId)};
     }
@@ -146,8 +148,7 @@ public:
         static auto const kSerializationContext =
             SerializationContext{SerializationContext::Source::Command,
                                  SerializationContext::CallerType::Request,
-                                 SerializationContext::Prefix::Default,
-                                 true /* nonPrefixedTenantId */};
+                                 SerializationContext::Prefix::ExcludePrefix};
 
         return NamespaceStringUtil::deserialize(
             tenantId, kDbName, kCollName, kSerializationContext);
@@ -224,7 +225,7 @@ TEST_F(QuerySettingsManagerTest, QuerySettingsSetAndReset) {
 }
 
 TEST_F(QuerySettingsManagerTest, QuerySettingsLookup) {
-    using Result = boost::optional<std::pair<QuerySettings, QueryInstance>>;
+    using Result = boost::optional<std::pair<QuerySettings, boost::optional<QueryInstance>>>;
     RAIIServerParameterControllerForTest multitenanyController("multitenancySupport", true);
 
     // Helper function for ensuring that two
@@ -240,58 +241,30 @@ TEST_F(QuerySettingsManagerTest, QuerySettingsLookup) {
 
         // Otherwise, ensure that both pair components are equal.
         ASSERT_BSONOBJ_EQ(r0->first.toBSON(), r1->first.toBSON());
-        ASSERT_BSONOBJ_EQ(r0->second, r1->second);
+        ASSERT_EQ(r0->second.has_value(), r1->second.has_value());
+
+        // Early exit if query instances are missing.
+        if (!r0->second.has_value()) {
+            return;
+        }
+        ASSERT_BSONOBJ_EQ(*r0->second, *r1->second);
     };
 
-    // Helper function to perform the same lookup using both the cold & hot path methods. Also booby
-    // traps the lazy query shape hash computation function on the hot path, so it can later be
-    // reasoned whether the computation happened or not.
-    auto doTest = [&](boost::optional<TenantId> tenantId,
-                      query_shape::QueryShapeHash hash,
-                      std::function<void(Result, bool)> assertionFn) {
-        auto slowResult = manager().getQuerySettingsForQueryShapeHash(opCtx(), hash, tenantId);
-        bool wasHashComputed = false;
-        auto fastResult = manager().getQuerySettingsForQueryShapeHash(
-            opCtx(),
-            [&]() {
-                wasHashComputed = true;
-                return hash;
-            },
-            nss(tenantId));
+    TenantId tenantId(OID::fromTerm(1));
+    auto configs = getExampleQueryShapeConfigurations(opCtx(), tenantId);
 
-        // Ensure that both code paths returned identical results, and pass the result to the
-        // `assertionFn` callback.
-        assertResultsEq(fastResult, slowResult);
-        assertionFn(fastResult, wasHashComputed);
-    };
-
-    TenantId firstTenantId(OID::fromTerm(1)), secondTenantId(OID::fromTerm(2));
-    auto configs = getExampleQueryShapeConfigurations(opCtx(), firstTenantId);
     manager().setQueryShapeConfigurations(
-        opCtx(), std::vector<QueryShapeConfiguration>(configs), LogicalTime(), firstTenantId);
+        opCtx(), std::vector<QueryShapeConfiguration>(configs), LogicalTime(), tenantId);
 
-    // Ensure QuerySettingsManager returns boost::none when QuerySettings are not found. Expect the
-    // hash to be computed since there are some settings set on this collection.
-    const auto emptyQueryShapeHash = query_shape::QueryShapeHash();
-    doTest(firstTenantId, emptyQueryShapeHash, [&](Result result, bool wasHashComputed) {
-        ASSERT_TRUE(wasHashComputed);
-        assertResultsEq(result, boost::none);
-    });
+    // Ensure QuerySettingsManager returns boost::none when QuerySettings are not found.
+    assertResultsEq(manager().getQuerySettingsForQueryShapeHash(
+                        opCtx(), query_shape::QueryShapeHash(), tenantId),
+                    boost::none);
 
     // Ensure QuerySettingsManager returns a valid (QuerySettings, QueryInstance) pair on lookup.
-    doTest(firstTenantId, configs[1].getQueryShapeHash(), [&](Result result, bool wasHashComputed) {
-        ASSERT_TRUE(wasHashComputed);
-        assertResultsEq(
-            result, std::make_pair(configs[1].getSettings(), configs[1].getRepresentativeQuery()));
-    });
-
-    // Ensure QuerySettingsManager returns boost::none when no QuerySettings are set for the given
-    // tenant, however, exists for other tenant. There's no query settings set for this collection,
-    // so no query shape hash should be computed.
-    doTest(secondTenantId, emptyQueryShapeHash, [&](Result result, bool wasHashComputed) {
-        ASSERT_FALSE(wasHashComputed);
-        assertResultsEq(result, boost::none);
-    });
+    assertResultsEq(manager().getQuerySettingsForQueryShapeHash(
+                        opCtx(), configs[1].getQueryShapeHash(), tenantId),
+                    std::make_pair(configs[1].getSettings(), configs[1].getRepresentativeQuery()));
 }
 
 }  // namespace mongo::query_settings

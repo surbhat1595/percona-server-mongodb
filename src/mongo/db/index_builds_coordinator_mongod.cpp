@@ -389,15 +389,15 @@ IndexBuildsCoordinatorMongod::_startIndexBuild(OperationContext* opCtx,
             return status;
         }
     } else {
-        if (MONGO_unlikely(hangAfterRegisteringIndexBuild.shouldFail())) {
-            LOGV2(8296700, "Hanging due to hangAfterRegisteringIndexBuild");
-            hangAfterRegisteringIndexBuild.pauseWhileSet(opCtx);
-        }
-
         auto statusWithOptionalResult =
             _filterSpecsAndRegisterBuild(opCtx, dbName, collectionUUID, specs, buildUUID, protocol);
         if (!statusWithOptionalResult.isOK()) {
             return statusWithOptionalResult.getStatus();
+        }
+
+        if (MONGO_unlikely(hangAfterRegisteringIndexBuild.shouldFail())) {
+            LOGV2(8296700, "Hanging due to hangAfterRegisteringIndexBuild");
+            hangAfterRegisteringIndexBuild.pauseWhileSet(opCtx);
         }
 
         if (statusWithOptionalResult.getValue()) {
@@ -580,7 +580,7 @@ IndexBuildsCoordinatorMongod::_startIndexBuild(OperationContext* opCtx,
 Status IndexBuildsCoordinatorMongod::voteAbortIndexBuild(OperationContext* opCtx,
                                                          const UUID& buildUUID,
                                                          const HostAndPort& votingNode,
-                                                         const StringData& reason) {
+                                                         StringData reason) {
 
     const auto replCoord = repl::ReplicationCoordinator::get(opCtx);
     auto memberConfig = replCoord->findConfigMemberByHostAndPort_deprecated(votingNode);
@@ -919,7 +919,7 @@ void IndexBuildsCoordinatorMongod::_waitForNextIndexBuildActionAndCommit(
                                 << replState->buildUUID);
 
         auto const nextAction = [&] {
-            indexBuildsSSS.waitForCommitQuorum.addAndFetch(1);
+            _incWaitForCommitQuorum();
             // Future wait can be interrupted.
             return _drainSideWritesUntilNextActionIsAvailable(opCtx, replState);
         }();

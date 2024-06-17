@@ -50,6 +50,7 @@
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/timestamp.h"
+#include "mongo/db/admission/execution_admission_context.h"
 #include "mongo/db/catalog/collection.h"
 #include "mongo/db/catalog/collection_write_path.h"
 #include "mongo/db/catalog_raii.h"
@@ -114,13 +115,13 @@ MONGO_FAIL_POINT_DEFINE(pauseBatchApplicationAfterWritingOplogEntries);
 MONGO_FAIL_POINT_DEFINE(hangAfterRecordingOpApplicationStartTime);
 
 // The oplog entries applied
-CounterMetric opsAppliedStats("repl.apply.ops");
+auto& opsAppliedStats = *MetricBuilder<Counter64>{"repl.apply.ops"};
 
 // Tracks the oplog application batch size.
-CounterMetric oplogApplicationBatchSize("repl.apply.batchSize");
+auto& oplogApplicationBatchSize = *MetricBuilder<Counter64>{"repl.apply.batchSize"};
 
 // Number and time of each ApplyOps worker pool round
-auto& applyBatchStats = makeServerStatusMetric<TimerStats>("repl.apply.batches");
+auto& applyBatchStats = *MetricBuilder<TimerStats>("repl.apply.batches");
 
 /**
  * Used for logging a report of ops that take longer than "slowMS" to apply. This is called
@@ -346,7 +347,7 @@ Status _insertDocumentsToOplogAndChangeCollections(
     std::vector<InsertStatement>::const_iterator end,
     bool skipWritesToOplog) {
     WriteUnitOfWork wunit(opCtx);
-    boost::optional<AutoGetOplog> autoOplog;
+    boost::optional<AutoGetOplogFastPath> autoOplog;
     boost::optional<ChangeStreamChangeCollectionManager::ChangeCollectionsWriter>
         changeCollectionWriter;
 
@@ -404,12 +405,6 @@ void _setOplogApplicationWorkerOpCtxStates(OperationContext* opCtx) {
     shard_role_details::getRecoveryUnit(opCtx)->setPrepareConflictBehavior(
         PrepareConflictBehavior::kIgnoreConflictsAllowWrites);
 
-    // Applying an Oplog batch is crucial to the stability of the Replica Set. We
-    // mark it as having Immediate priority so that it skips waiting for ticket
-    // acquisition and flow control.
-    shard_role_details::getLocker(opCtx)->setAdmissionPriority(
-        AdmissionContext::Priority::kImmediate);
-
     // Ensure future transactions read without a timestamp.
     invariant(RecoveryUnit::ReadSource::kNoTimestamp ==
               shard_role_details::getRecoveryUnit(opCtx)->getTimestampReadSource());
@@ -449,7 +444,7 @@ public:
     ApplyBatchFinalizerForJournal(ReplicationCoordinator* replCoord)
         : ApplyBatchFinalizer(replCoord),
           _waiterThread{&ApplyBatchFinalizerForJournal::_run, this} {};
-    ~ApplyBatchFinalizerForJournal();
+    ~ApplyBatchFinalizerForJournal() override;
 
     void record(const OpTimeAndWallTime& newOpTimeAndWallTime) override;
 
@@ -546,8 +541,13 @@ void OplogApplierImpl::_run(OplogBuffer* oplogBuffer) {
     // arbiterOnly field for any member.
     invariant(!_replCoord->getMemberState().arbiter());
 
+    const auto useOplogWriter = feature_flags::gReduceMajorityWriteLatency.isEnabled(
+        serverGlobalParams.featureCompatibility.acquireFCVSnapshot());
+
+    // The OplogWriter will take care of journaling when featureFlagReduceMajorityWriteLatency
+    // is enabled.
     std::unique_ptr<ApplyBatchFinalizer> finalizer{
-        getGlobalServiceContext()->getStorageEngine()->isEphemeral()
+        (useOplogWriter || getGlobalServiceContext()->getStorageEngine()->isEphemeral())
             ? new ApplyBatchFinalizer(_replCoord)
             : new ApplyBatchFinalizerForJournal(_replCoord)};
 
@@ -560,11 +560,11 @@ void OplogApplierImpl::_run(OplogBuffer* oplogBuffer) {
         // The oplog applier is crucial for stability of the replica set. As a result we mark it as
         // having Immediate priority. This makes the operation skip waiting for ticket acquisition
         // and flow control.
-        ScopedAdmissionPriorityForLock priority(shard_role_details::getLocker(&opCtx),
-                                                AdmissionContext::Priority::kImmediate);
+        ScopedAdmissionPriority<ExecutionAdmissionContext> priority(
+            &opCtx, AdmissionContext::Priority::kExempt);
 
         // For pausing replication in tests.
-        if (MONGO_unlikely(rsSyncApplyStop.shouldFail())) {
+        if (MONGO_unlikely(!useOplogWriter && rsSyncApplyStop.shouldFail())) {
             LOGV2(21229,
                   "Oplog Applier - rsSyncApplyStop fail point enabled. Blocking until fail "
                   "point is disabled");
@@ -576,13 +576,13 @@ void OplogApplierImpl::_run(OplogBuffer* oplogBuffer) {
 
         // Blocks up to a second waiting for a batch to be ready to apply. If one doesn't become
         // ready in time, we'll loop again so we can do the above checks periodically.
-        OplogBatch ops = _oplogBatcher->getNextBatch(Seconds(1));
+        OplogApplierBatch ops = _oplogBatcher->getNextBatch(Seconds(1));
         if (ops.empty()) {
             if (ops.mustShutdown()) {
                 // Shut down and exit oplog application loop.
                 return;
             }
-            if (MONGO_unlikely(rsSyncApplyStop.shouldFail())) {
+            if (MONGO_unlikely(!useOplogWriter && rsSyncApplyStop.shouldFail())) {
                 continue;
             }
             if (ops.termWhenExhausted()) {
@@ -641,9 +641,13 @@ void OplogApplierImpl::_run(OplogBuffer* oplogBuffer) {
                                 << " in the middle of batch application");
 
         // 2. Update oplog visibility by notifying the storage engine of the new oplog entries.
-        const bool orderedCommit = true;
-        _storageInterface->oplogDiskLocRegister(
-            &opCtx, lastOpTimeInBatch.getTimestamp(), orderedCommit);
+        // The OplogWriter will take care of visibility when featureFlagReduceMajorityWriteLatency
+        // is enabled.
+        if (!useOplogWriter) {
+            const bool orderedCommit = true;
+            _storageInterface->oplogDiskLocRegister(
+                &opCtx, lastOpTimeInBatch.getTimestamp(), orderedCommit);
+        }
 
         // 3. Finalize this batch. The finalizer advances the global timestamp to lastOpTimeInBatch.
         finalizer->record({lastOpTimeInBatch, lastWallTimeInBatch});
@@ -676,8 +680,8 @@ void OplogApplierImpl::scheduleWritesToOplogAndChangeCollection(OperationContext
             // Oplog writes are crucial to the stability of the replica set. We mark the operations
             // as having Immediate priority so that it skips waiting for ticket acquisition and flow
             // control.
-            ScopedAdmissionPriorityForLock priority(shard_role_details::getLocker(opCtx.get()),
-                                                    AdmissionContext::Priority::kImmediate);
+            ScopedAdmissionPriority<ExecutionAdmissionContext> priority(
+                opCtx.get(), AdmissionContext::Priority::kExempt);
 
             UnreplicatedWritesBlock uwb(opCtx.get());
 
@@ -734,9 +738,8 @@ StatusWith<OpTime> OplogApplierImpl::_applyOplogBatch(OperationContext* opCtx,
                                                       std::vector<OplogEntry> ops) {
     invariant(!ops.empty());
 
-    LOGV2_DEBUG(21230, 2, "Replication batch size", "size"_attr = ops.size());
+    LOGV2_DEBUG(21230, 2, "Oplog application batch size", "size"_attr = ops.size());
 
-    invariant(_replCoord);
     if (_replCoord->getApplierState() == ReplicationCoordinator::ApplierState::Stopped) {
         LOGV2_FATAL_CONTINUE(21234, "Attempting to replicate ops while primary");
         return {ErrorCodes::CannotApplyOplogWhilePrimary,
@@ -761,8 +764,10 @@ StatusWith<OpTime> OplogApplierImpl::_applyOplogBatch(OperationContext* opCtx,
                 opCtx, _replCoord->getMyLastAppliedOpTime().getTimestamp());
         }
 
-        scheduleWritesToOplogAndChangeCollection(
-            opCtx, _storageInterface, _writerPool, ops, getOptions().skipWritesToOplog);
+        if (!getOptions().skipWritesToOplog || !getOptions().skipWritesToChangeCollection) {
+            scheduleWritesToOplogAndChangeCollection(
+                opCtx, _storageInterface, _writerPool, ops, getOptions().skipWritesToOplog);
+        }
 
         // Holds 'pseudo operations' generated by secondaries to aid in replication.
         // Keep in scope until all operations in 'ops' and 'derivedOps' have been applied.
@@ -1004,8 +1009,7 @@ void OplogApplierImpl::_deriveOpsAndFillWriterVectors(
 
         // Extract applyOps operations and fill writers with extracted operations.
         if (op.isTerminalApplyOps()) {
-            // applyOps entries generated by a transaction must have a prevOpTime.
-            if (auto prevOpTime = op.getPrevWriteOpTimeInTransaction()) {
+            if (op.applyOpsIsLinkedTransactionally()) {
                 // On commit of unprepared transactions, get transactional operations from the
                 // oplog and fill writers with those operations.
                 // Flush partialTxnList operations for current transaction.
@@ -1020,8 +1024,6 @@ void OplogApplierImpl::_deriveOpsAndFillWriterVectors(
                 invariant(partialTxnList->empty(), op.toStringForLogging());
             } else {
                 // The applyOps entry was not generated as part of a transaction.
-                invariant(!op.getPrevWriteOpTimeInTransaction());
-
                 auto& extractedOps = retryImageRectifier.storeExtractedOpsAndDeletes(
                     ApplyOps::extractOperations(op), derivedOps, false /* isPrepared */);
 
@@ -1106,6 +1108,12 @@ Status applyOplogEntryOrGroupedInserts(OperationContext* opCtx,
                                        const OplogEntryOrGroupedInserts& entryOrGroupedInserts,
                                        OplogApplication::Mode oplogApplicationMode,
                                        const bool isDataConsistent) {
+    // Applying an Oplog batch is crucial to the stability of the Replica Set. We
+    // mark it as having Immediate priority so that it skips waiting for ticket
+    // acquisition and flow control.
+    ScopedAdmissionPriority<ExecutionAdmissionContext> skipTicketAcquisition(
+        opCtx, AdmissionContext::Priority::kExempt);
+
     // Certain operations like prepareTransaction might reset the recovery unit or lock state
     // due to doing things like stashTransactionResources. So we restore the necessary states
     // here every time before applying a new entry or grouped inserts.
@@ -1159,6 +1167,12 @@ Status OplogApplierImpl::applyOplogBatchPerWorker(OperationContext* opCtx,
                                                   std::vector<ApplierOperation>* ops,
                                                   WorkerMultikeyPathInfo* workerMultikeyPathInfo,
                                                   const bool isDataConsistent) {
+    // Applying an Oplog batch is crucial to the stability of the Replica Set. We
+    // mark it as having Immediate priority so that it skips waiting for ticket
+    // acquisition and flow control.
+    ScopedAdmissionPriority<ExecutionAdmissionContext> skipTicketAcquisition(
+        opCtx, AdmissionContext::Priority::kExempt);
+
     UnreplicatedWritesBlock uwb(opCtx);
     _setOplogApplicationWorkerOpCtxStates(opCtx);
 

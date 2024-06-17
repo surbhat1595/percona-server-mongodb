@@ -39,6 +39,8 @@
 #include "mongo/db/query/search/mongot_cursor.h"
 #include "mongo/db/query/search/search_task_executors.h"
 
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kQuery
+
 namespace mongo {
 
 using boost::intrusive_ptr;
@@ -53,19 +55,15 @@ REGISTER_DOCUMENT_SOURCE_CONDITIONALLY(searchMeta,
                                        true);
 
 Value DocumentSourceSearchMeta::serialize(const SerializationOptions& opts) const {
-    if (!pExpCtx->explain && pExpCtx->inMongos) {
+    if (!pExpCtx->explain) {
         return Value(Document{{getSourceName(), serializeWithoutMergePipeline(opts)}});
     }
     return DocumentSourceInternalSearchMongotRemote::serialize(opts);
 }
 
 executor::TaskExecutorCursor DocumentSourceSearchMeta::establishCursor() {
-    auto cursors = mongot_cursor::establishSearchCursors(pExpCtx,
-                                                         getSearchQuery(),
-                                                         getTaskExecutor(),
-                                                         getMongotDocsRequested(),
-                                                         nullptr /* augmentGetMore */,
-                                                         getIntermediateResultsProtocolVersion());
+    auto cursors = mongot_cursor::establishCursorsForSearchMetaStage(
+        pExpCtx, getSearchQuery(), getTaskExecutor(), getIntermediateResultsProtocolVersion());
     if (cursors.size() == 1) {
         const auto& cursor = *cursors.begin();
         tassert(6448010,
@@ -127,10 +125,12 @@ std::list<intrusive_ptr<DocumentSource>> DocumentSourceSearchMeta::createFromBso
         return {make_intrusive<DocumentSourceSearchMeta>(specObj.getOwned(), expCtx, executor)};
     }
 
-    if (expCtx->needsMerge) {
-        // If we need to merge output later, we just need to produce this shard's metadata and
-        // that's it. Expect to parse the long form.
+    // If we have this field it suggests we were serialized from a mongos process. We should parse
+    // out of the IDL spec format, rather than just expecting only the mongot query (as a user would
+    // provide).
+    if (specObj.hasField(InternalSearchMongotRemoteSpec::kMongotQueryFieldName)) {
         auto params = InternalSearchMongotRemoteSpec::parse(IDLParserContext(kStageName), specObj);
+        LOGV2_DEBUG(8569405, 4, "Parsing as $internalSearchMongotRemote", "params"_attr = params);
         auto executor = executor::getMongotTaskExecutor(expCtx->opCtx->getServiceContext());
         return {make_intrusive<DocumentSourceSearchMeta>(std::move(params), expCtx, executor)};
     }

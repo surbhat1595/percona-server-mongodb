@@ -57,7 +57,7 @@ MONGO_FAIL_POINT_DEFINE(searchReturnEofImmediately);
 
 namespace search_helpers {
 namespace {
-void prepareSearchPipeline(Pipeline* pipeline, bool applyShardFilter) {
+void prepareSearchPipelineLegacyExecutor(Pipeline* pipeline, bool applyShardFilter) {
     auto searchStage = pipeline->popFrontWithName(DocumentSourceSearch::kStageName);
     auto& sources = pipeline->getSources();
     if (searchStage) {
@@ -213,119 +213,13 @@ parseMongotResponseCursors(std::vector<executor::TaskExecutorCursor> cursors) {
 }
 }  // namespace
 
-/**
- * Creates an additional pipeline to be run during a query if the query needs to generate metadata.
- * Does not take ownership of the passed in pipeline, and returns a pipeline containing only a
- * metadata generating $search stage. Can return null if no metadata pipeline is required.
- */
-std::unique_ptr<Pipeline, PipelineDeleter> generateMetadataPipelineForSearch(
-    OperationContext* opCtx,
-    boost::intrusive_ptr<ExpressionContext> expCtx,
-    const AggregateCommandRequest& request,
-    Pipeline* origPipeline,
-    boost::optional<UUID> uuid) {
-    if (expCtx->explain || !isSearchPipeline(origPipeline)) {
-        // $search doesn't return documents or metadata from explain regardless of the verbosity.
-        return nullptr;
-    }
-
-    auto origSearchStage =
-        dynamic_cast<DocumentSourceInternalSearchMongotRemote*>(origPipeline->peekFront());
-    tassert(6253727, "Expected search stage", origSearchStage);
-
-    // We only want to return multiple cursors if we are not in mongos and we plan on getting
-    // unmerged metadata documents back from mongot.
-    auto shouldBuildMetadataPipeline =
-        !expCtx->inMongos && origSearchStage->getIntermediateResultsProtocolVersion();
-
-    uassert(
-        6253506, "Cannot have exchange specified in a $search pipeline", !request.getExchange());
-
-    // Some tests build $search pipelines without actually setting up a mongot. In this case either
-    // return a dummy stage or nothing depending on the environment. Note that in this case we don't
-    // actually make any queries, the document source will return eof immediately.
-    if (MONGO_unlikely(searchReturnEofImmediately.shouldFail())) {
-        if (shouldBuildMetadataPipeline) {
-            // Construct a duplicate ExpressionContext for our cloned pipeline. This is necessary
-            // so that the duplicated pipeline and the cloned pipeline do not accidentally
-            // share an OperationContext.
-            auto newExpCtx = expCtx->copyWith(expCtx->ns, expCtx->uuid);
-            return Pipeline::create({origSearchStage->clone(newExpCtx)}, newExpCtx);
-        }
-        return nullptr;
-    }
-
-    // The search stage has not yet established its cursor on mongoT. Establish the cursor for it.
-    auto cursors = mongot_cursor::establishSearchCursors(
-        expCtx,
-        origSearchStage->getSearchQuery(),
-        origSearchStage->getTaskExecutor(),
-        origSearchStage->getMongotDocsRequested(),
-        buildSearchGetMoreFunc([origSearchStage] { return origSearchStage->calcDocsNeeded(); }),
-        origSearchStage->getIntermediateResultsProtocolVersion(),
-        origSearchStage->getPaginationFlag());
-
-    // mongot can return zero cursors for an empty collection, one without metadata, or two for
-    // results and metadata.
-    tassert(6253500, "Expected less than or exactly two cursors from mongot", cursors.size() <= 2);
-
-    if (cursors.size() == 0) {
-        origSearchStage->markCollectionEmpty();
-    }
-
-    std::unique_ptr<Pipeline, PipelineDeleter> newPipeline = nullptr;
-    for (auto it = cursors.begin(); it != cursors.end(); it++) {
-        auto maybeCursorLabel = it->getType();
-        if (!maybeCursorLabel) {
-            // If a cursor is unlabeled mongot does not support metadata cursors. $$SEARCH_META
-            // should not be supported in this query.
-            tassert(6253301,
-                    "Expected cursors to be labeled if there are more than one",
-                    cursors.size() == 1);
-            origSearchStage->setCursor(std::move(cursors.front()));
-            return nullptr;
-        }
-        switch (*maybeCursorLabel) {
-            case CursorTypeEnum::DocumentResult:
-                origSearchStage->setCursor(std::move(*it));
-                origPipeline->pipelineType = CursorTypeEnum::DocumentResult;
-                break;
-            case CursorTypeEnum::SearchMetaResult:
-                // If we don't think we're in a sharded environment, mongot should not have sent
-                // metadata.
-                tassert(6253303,
-                        "Didn't expect metadata cursor from mongot",
-                        shouldBuildMetadataPipeline);
-                tassert(6253726,
-                        "Expected to not already have created a metadata pipeline",
-                        !newPipeline);
-
-                // Construct a duplicate ExpressionContext for our cloned pipeline. This is
-                // necessary so that the duplicated pipeline and the cloned pipeline do not
-                // accidentally share an OperationContext.
-                auto newExpCtx = expCtx->copyWith(expCtx->ns, expCtx->uuid);
-
-                // Clone the MongotRemote stage and set the metadata cursor.
-                auto newStage = origSearchStage->copyForAlternateSource(std::move(*it), newExpCtx);
-
-                // Build a new pipeline with the metadata source as the only stage.
-                newPipeline = Pipeline::create({newStage}, newExpCtx);
-                newPipeline->pipelineType = *maybeCursorLabel;
-                break;
-        }
-    }
-
-    // Can return null if we did not build a metadata pipeline.
-    return newPipeline;
-}
-
 InternalSearchMongotRemoteSpec planShardedSearch(
     const boost::intrusive_ptr<ExpressionContext>& expCtx, const BSONObj& searchRequest) {
     // Mongos issues the 'planShardedSearch' command rather than 'search' in order to:
     // * Create the merging pipeline.
     // * Get a sortSpec.
     const auto cmdObj = [&]() {
-        PlanShardedSearchSpec cmd(expCtx->ns.coll().rawData() /* planShardedSearch */,
+        PlanShardedSearchSpec cmd(std::string(expCtx->ns.coll()) /* planShardedSearch */,
                                   searchRequest /* query */);
 
         if (expCtx->explain) {
@@ -373,12 +267,17 @@ bool isSearchMetaPipeline(const Pipeline* pipeline) {
     return isSearchMetaStage(pipeline->peekFront());
 }
 
+bool isMongotPipeline(const Pipeline* pipeline) {
+    if (!pipeline || pipeline->getSources().empty()) {
+        return false;
+    }
+    return isMongotStage(pipeline->peekFront());
+}
+
 /** Because 'DocumentSourceSearchMeta' inherits from 'DocumentSourceInternalSearchMongotRemote',
  *  to make sure a DocumentSource is a $search stage and not $searchMeta check it is either:
  *    - a 'DocumentSourceSearch'.
  *    - a 'DocumentSourceInternalSearchMongotRemote' and not a 'DocumentSourceSearchMeta'.
- * TODO: SERVER-78159 refactor after DocumentSourceInternalSearchMongotRemote and
- * DocumentSourceInternalIdLookup are merged into into DocumentSourceSearch.
  */
 bool isSearchStage(DocumentSource* stage) {
     return stage &&
@@ -391,6 +290,13 @@ bool isSearchMetaStage(DocumentSource* stage) {
     return stage && dynamic_cast<mongo::DocumentSourceSearchMeta*>(stage);
 }
 
+bool isMongotStage(DocumentSource* stage) {
+    return stage &&
+        (dynamic_cast<mongo::DocumentSourceSearch*>(stage) ||
+         dynamic_cast<mongo::DocumentSourceInternalSearchMongotRemote*>(stage) ||
+         dynamic_cast<mongo::DocumentSourceVectorSearch*>(stage));
+}
+
 void assertSearchMetaAccessValid(const Pipeline::SourceContainer& pipeline,
                                  ExpressionContext* expCtx) {
     if (pipeline.empty()) {
@@ -398,8 +304,10 @@ void assertSearchMetaAccessValid(const Pipeline::SourceContainer& pipeline,
     }
 
     // If we already validated this pipeline on mongos, no need to do it again on a shard. Check
-    // mergeCursors because we could be on a shard doing the merge.
-    if ((expCtx->inMongos || !expCtx->needsMerge) &&
+    // for $mergeCursors because we could be on a shard doing the merge and only want to validate if
+    // we have the whole pipeline.
+    bool alreadyValidated = !expCtx->inMongos && expCtx->needsMerge;
+    if (!alreadyValidated ||
         pipeline.front()->getSourceName() != DocumentSourceMergeCursors::kStageName) {
         assertSearchMetaAccessValidHelper({&pipeline});
     }
@@ -411,32 +319,143 @@ void assertSearchMetaAccessValid(const Pipeline::SourceContainer& shardsPipeline
     assertSearchMetaAccessValidHelper({&shardsPipeline, &mergePipeline});
 }
 
-void prepareSearchForTopLevelPipeline(Pipeline* pipeline) {
-    prepareSearchPipeline(pipeline, true);
+std::unique_ptr<Pipeline, PipelineDeleter> prepareSearchForTopLevelPipelineLegacyExecutor(
+    OperationContext* opCtx,
+    boost::intrusive_ptr<ExpressionContext> expCtx,
+    const AggregateCommandRequest& request,
+    Pipeline* origPipeline,
+    boost::optional<UUID> uuid) {
+    // First, desuguar $search, and inject shard filterer.
+    prepareSearchPipelineLegacyExecutor(origPipeline, true);
+
+    if (expCtx->explain || !isSearchPipeline(origPipeline)) {
+        // $search doesn't return documents or metadata from explain regardless of the verbosity.
+        // $searchMeta or $vectorSearch pipelines won't need an additional pipeline since they
+        // only need one cursor.
+        return nullptr;
+    }
+
+    auto origSearchStage =
+        dynamic_cast<DocumentSourceInternalSearchMongotRemote*>(origPipeline->peekFront());
+    tassert(6253727, "Expected search stage", origSearchStage);
+
+    // We expect to receive unmerged metadata documents from mongot if we are not in mongos and have
+    // a metadata merge protocol version. However, we can ignore the meta cursor if the pipeline
+    // doesn't have a downstream reference to $$SEARCH_META.
+    auto expectsMetaCursorFromMongot =
+        !expCtx->inMongos && origSearchStage->getIntermediateResultsProtocolVersion();
+    auto shouldBuildMetadataPipeline =
+        expectsMetaCursorFromMongot && origSearchStage->queryReferencesSearchMeta();
+
+    uassert(
+        6253506, "Cannot have exchange specified in a $search pipeline", !request.getExchange());
+
+    // Some tests build $search pipelines without actually setting up a mongot. In this case either
+    // return a dummy stage or nothing depending on the environment. Note that in this case we don't
+    // actually make any queries, the document source will return eof immediately.
+    if (MONGO_unlikely(searchReturnEofImmediately.shouldFail())) {
+        if (shouldBuildMetadataPipeline) {
+            // Construct a duplicate ExpressionContext for our cloned pipeline. This is necessary
+            // so that the duplicated pipeline and the cloned pipeline do not accidentally
+            // share an OperationContext.
+            auto newExpCtx = expCtx->copyWith(expCtx->ns, expCtx->uuid);
+            return Pipeline::create({origSearchStage->clone(newExpCtx)}, newExpCtx);
+        }
+        return nullptr;
+    }
+
+    // The search stage has not yet established its cursor on mongoT. Establish the cursor for it.
+    auto cursors = mongot_cursor::establishCursorsForSearchStage(
+        expCtx,
+        origSearchStage->getSearchQuery(),
+        origSearchStage->getTaskExecutor(),
+        origSearchStage->getMongotDocsRequested(),
+        buildSearchGetMoreFunc([origSearchStage] { return origSearchStage->calcDocsNeeded(); }),
+        origSearchStage->getIntermediateResultsProtocolVersion(),
+        origSearchStage->getPaginationFlag());
+
+    // mongot can return zero cursors for an empty collection, one without metadata, or two for
+    // results and metadata.
+    tassert(6253500, "Expected less than or exactly two cursors from mongot", cursors.size() <= 2);
+
+    if (cursors.size() == 0) {
+        origSearchStage->markCollectionEmpty();
+    }
+
+    std::unique_ptr<Pipeline, PipelineDeleter> newPipeline = nullptr;
+    for (auto it = cursors.begin(); it != cursors.end(); it++) {
+        auto maybeCursorLabel = it->getType();
+        if (!maybeCursorLabel) {
+            // If a cursor is unlabeled mongot does not support metadata cursors. $$SEARCH_META
+            // should not be supported in this query.
+            tassert(6253301,
+                    "Expected cursors to be labeled if there are more than one",
+                    cursors.size() == 1);
+            origSearchStage->setCursor(std::move(cursors.front()));
+            return nullptr;
+        }
+        switch (*maybeCursorLabel) {
+            case CursorTypeEnum::DocumentResult:
+                origSearchStage->setCursor(std::move(*it));
+                origPipeline->pipelineType = CursorTypeEnum::DocumentResult;
+                break;
+            case CursorTypeEnum::SearchMetaResult:
+                // If we don't think we're in a sharded environment, mongot should not have sent
+                // metadata.
+                tassert(6253303,
+                        "Didn't expect metadata cursor from mongot",
+                        expectsMetaCursorFromMongot);
+                tassert(6253726,
+                        "Expected to not already have created a metadata pipeline",
+                        !newPipeline);
+
+                // Only create the new metadata pipeline if the original pipeline needs it. If we
+                // don't create this new pipeline, the meta cursor returned from mongot will be
+                // killed by the task_executor_cursor destructor when it goes out of scope below.
+                if (shouldBuildMetadataPipeline) {
+                    // Construct a duplicate ExpressionContext for our cloned pipeline. This is
+                    // necessary so that the duplicated pipeline and the cloned pipeline do not
+                    // accidentally share an OperationContext.
+                    auto newExpCtx = expCtx->copyWith(expCtx->ns, expCtx->uuid);
+
+                    // Clone the MongotRemote stage and set the metadata cursor.
+                    auto newStage =
+                        origSearchStage->copyForAlternateSource(std::move(*it), newExpCtx);
+
+                    // Build a new pipeline with the metadata source as the only stage.
+                    newPipeline = Pipeline::create({newStage}, newExpCtx);
+                    newPipeline->pipelineType = *maybeCursorLabel;
+                }
+                break;
+        }
+    }
+
+    // Can return null if we did not build a metadata pipeline.
+    return newPipeline;
 }
 
-void prepareSearchForNestedPipeline(Pipeline* pipeline) {
-    prepareSearchPipeline(pipeline, false);
+void prepareSearchForNestedPipelineLegacyExecutor(Pipeline* pipeline) {
+    prepareSearchPipelineLegacyExecutor(pipeline, false);
 }
 
-void establishSearchQueryCursors(boost::intrusive_ptr<ExpressionContext> expCtx,
-                                 DocumentSource* stage,
-                                 std::unique_ptr<PlanYieldPolicy> yieldPolicy) {
+void establishSearchCursorsSBE(boost::intrusive_ptr<ExpressionContext> expCtx,
+                               DocumentSource* stage,
+                               std::unique_ptr<PlanYieldPolicy> yieldPolicy) {
     if (!expCtx->uuid || !isSearchStage(stage) ||
         MONGO_unlikely(searchReturnEofImmediately.shouldFail())) {
         return;
     }
     auto searchStage = dynamic_cast<mongo::DocumentSourceSearch*>(stage);
     auto executor = executor::getMongotTaskExecutor(expCtx->opCtx->getServiceContext());
-    auto cursors =
-        mongot_cursor::establishSearchCursors(expCtx,
-                                              searchStage->getSearchQuery(),
-                                              executor,
-                                              searchStage->getLimit(),
-                                              nullptr,
-                                              searchStage->getIntermediateResultsProtocolVersion(),
-                                              searchStage->getSearchPaginationFlag(),
-                                              std::move(yieldPolicy));
+    auto cursors = mongot_cursor::establishCursorsForSearchStage(
+        expCtx,
+        searchStage->getSearchQuery(),
+        executor,
+        searchStage->getLimit(),
+        nullptr,
+        searchStage->getIntermediateResultsProtocolVersion(),
+        searchStage->getSearchPaginationFlag(),
+        std::move(yieldPolicy));
 
     auto [documentCursor, metaCursor] = parseMongotResponseCursors(std::move(cursors));
 
@@ -455,9 +474,9 @@ void establishSearchQueryCursors(boost::intrusive_ptr<ExpressionContext> expCtx,
     }
 }
 
-void establishSearchMetaCursor(const boost::intrusive_ptr<ExpressionContext>& expCtx,
-                               DocumentSource* stage,
-                               std::unique_ptr<PlanYieldPolicy> yieldPolicy) {
+void establishSearchMetaCursorSBE(const boost::intrusive_ptr<ExpressionContext>& expCtx,
+                                  DocumentSource* stage,
+                                  std::unique_ptr<PlanYieldPolicy> yieldPolicy) {
     if (!expCtx->uuid || !isSearchMetaStage(stage) ||
         MONGO_unlikely(searchReturnEofImmediately.shouldFail())) {
         return;
@@ -465,15 +484,12 @@ void establishSearchMetaCursor(const boost::intrusive_ptr<ExpressionContext>& ex
 
     auto searchStage = dynamic_cast<mongo::DocumentSourceSearchMeta*>(stage);
     auto executor = executor::getMongotTaskExecutor(expCtx->opCtx->getServiceContext());
-    auto cursors =
-        mongot_cursor::establishSearchCursors(expCtx,
-                                              searchStage->getSearchQuery(),
-                                              executor,
-                                              boost::none,
-                                              nullptr,
-                                              searchStage->getIntermediateResultsProtocolVersion(),
-                                              false /* requiresSearchSequenceToken */,
-                                              std::move(yieldPolicy));
+    auto cursors = mongot_cursor::establishCursorsForSearchMetaStage(
+        expCtx,
+        searchStage->getSearchQuery(),
+        executor,
+        searchStage->getIntermediateResultsProtocolVersion(),
+        std::move(yieldPolicy));
 
     auto [documentCursor, metaCursor] = parseMongotResponseCursors(std::move(cursors));
 
@@ -489,7 +505,7 @@ void establishSearchMetaCursor(const boost::intrusive_ptr<ExpressionContext>& ex
     }
 }
 
-bool encodeSearchForSbeCache(const ExpressionContext* expCtx,
+bool encodeSearchForSbeCache(const boost::intrusive_ptr<ExpressionContext>& expCtx,
                              DocumentSource* ds,
                              BufBuilder* bufBuilder) {
     if ((!isSearchStage(ds) && !isSearchMetaStage(ds))) {
@@ -523,7 +539,6 @@ boost::optional<executor::TaskExecutorCursor> getSearchMetadataCursor(DocumentSo
     return boost::none;
 }
 
-// TODO this one could move i guess
 std::function<void(BSONObjBuilder& bob)> buildSearchGetMoreFunc(
     std::function<boost::optional<long long>()> calcDocsNeeded) {
     if (!calcDocsNeeded) {

@@ -138,8 +138,6 @@ public:
 
         auto serviceContext = getServiceContext();
 
-        // Initialize sharding components as a shard server.
-        serverGlobalParams.clusterRole = ClusterRole::ShardServer;
 
         {
             auto opCtx = makeOperationContext();
@@ -258,8 +256,10 @@ public:
         auto mongoDSessionCatalog = MongoDSessionCatalog::get(opCtx);
         auto ocs = mongoDSessionCatalog->checkOutSession(opCtx);
         auto txnParticipant = TransactionParticipant::get(opCtx);
-        txnParticipant.beginOrContinue(
-            opCtx, {txnNumber}, false /* autocommit */, true /* startTransaction */);
+        txnParticipant.beginOrContinue(opCtx,
+                                       {txnNumber},
+                                       false /* autocommit */,
+                                       TransactionParticipant::TransactionActions::kStart);
 
         txnParticipant.unstashTransactionResources(opCtx, "prepareTransaction");
 
@@ -291,8 +291,10 @@ public:
         auto mongoDSessionCatalog = MongoDSessionCatalog::get(opCtx);
         auto ocs = mongoDSessionCatalog->checkOutSession(opCtx);
         auto txnParticipant = TransactionParticipant::get(opCtx);
-        txnParticipant.beginOrContinue(
-            opCtx, {txnNumber}, false /* autocommit */, boost::none /* startTransaction */);
+        txnParticipant.beginOrContinue(opCtx,
+                                       {txnNumber},
+                                       false /* autocommit */,
+                                       TransactionParticipant::TransactionActions::kContinue);
 
         txnParticipant.unstashTransactionResources(opCtx, "abortTransaction");
         txnParticipant.abortTransaction(opCtx);
@@ -424,13 +426,15 @@ private:
     const ShardId _otherDonorId{"otherDonorId"};
 
     const NamespaceString _outputNss =
-        resharding::constructTemporaryReshardingNss(_sourceNss.db_forTest(), _sourceUUID);
+        resharding::constructTemporaryReshardingNss(_sourceNss, _sourceUUID);
     const NamespaceString _myStashNss =
         resharding::getLocalConflictStashNamespace(_sourceUUID, _myDonorId);
     const NamespaceString _otherStashNss =
         resharding::getLocalConflictStashNamespace(_sourceUUID, _otherDonorId);
     const NamespaceString _myOplogBufferNss =
         resharding::getLocalOplogBufferNamespace(_sourceUUID, _myDonorId);
+
+    service_context_test::ShardRoleOverride _shardRole;
 
     std::unique_ptr<ReshardingMetrics> _metrics;
     std::unique_ptr<ReshardingOplogApplierMetrics> _applierMetrics;

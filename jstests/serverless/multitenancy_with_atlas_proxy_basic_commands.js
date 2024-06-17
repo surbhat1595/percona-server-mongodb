@@ -38,6 +38,7 @@ const testDb = primary.getDB(kPrefixedDbName);
 const otherTestDb = primary.getDB(kDbOtherName);
 const testColl = testDb.getCollection(kCollName);
 
+TestData.multitenancyExpectPrefix = true;
 const securityToken = _createTenantToken({tenant: kTenant, expectPrefix: true});
 const otherSecurityToken = _createTenantToken({tenant: kOtherTenant, expectPrefix: true});
 
@@ -552,42 +553,6 @@ const otherSecurityToken = _createTenantToken({tenant: kOtherTenant, expectPrefi
     assert.commandFailedWithCode(
         testDb.runCommand({mapReduce: kCollA, map: mapFunc, reduce: reduceFunc, out: {inline: 1}}),
         31264);
-}
-
-// TODO: SERVER-82748 Remove $tenant in failpoint test
-// Test the fail command failpoint
-{
-    primary._setSecurityToken(undefined);
-    // enable the failCommand failpoint for kTenant on myDb.myColl for the find command.
-    assert.commandWorked(adminDb.runCommand({
-        configureFailPoint: "failCommand",
-        mode: "alwaysOn",
-        '$tenant': kTenant,
-        data: {
-            errorCode: ErrorCodes.InternalError,
-            failCommands: ["find"],
-            namespace: kDbName + "." + kCollName,
-        }
-    }));
-    primary._setSecurityToken(securityToken);
-
-    // same tenant and same namespace should fail.
-    assert.commandFailedWithCode(testDb.runCommand({find: kCollName}), ErrorCodes.InternalError);
-
-    // same tenant different namespace.
-    assert.commandWorked(testDb.runCommand({find: "foo"}));
-
-    // different tenant passed and same namespace.
-    primary._setSecurityToken(otherSecurityToken);
-    assert.commandWorked(otherTestDb.runCommand({find: kCollName}));
-
-    // different tenant passed and different namespace.
-    assert.commandWorked(otherTestDb.runCommand({find: "foo"}));
-
-    // disable the failCommand failpoint.
-    primary._setSecurityToken(securityToken);
-    assert.commandWorked(adminDb.runCommand({configureFailPoint: "failCommand", mode: "off"}));
-    assert.commandWorked(testDb.runCommand({find: kCollName}));
 }
 
 primary._setSecurityToken(undefined);

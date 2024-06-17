@@ -111,16 +111,15 @@ namespace repl {
 
 namespace {
 constexpr StringData kInternalIncludeNewlyAddedFieldName = "$_internalIncludeNewlyAdded"_sd;
-}  // namespace
 
-class ReplExecutorSSM : public ServerStatusMetric {
-public:
-    void appendTo(BSONObjBuilder& b, StringData leafName) const override {
+struct ExecutorMetricPolicy {
+    void appendTo(BSONObjBuilder& b, StringData leafName) const {
         ReplicationCoordinator::get(getGlobalServiceContext())->appendDiagnosticBSON(&b, leafName);
     }
 };
 
-auto& replExecutorSSM = addMetricToTree("repl.executor", std::make_unique<ReplExecutorSSM>());
+auto& replExecutorSSM = *CustomMetricBuilder<ExecutorMetricPolicy>{"repl.executor"};
+}  // namespace
 
 // Test-only, enabled via command-line. See docs/test_commands.md.
 class CmdReplSetTest : public ReplSetCommand {
@@ -169,8 +168,8 @@ public:
             return true;
         } else if (cmdObj.hasElement("getLastStableRecoveryTimestamp")) {
             try {
-                shard_role_details::getLocker(opCtx)->setAdmissionPriority(
-                    AdmissionContext::Priority::kImmediate);
+                ScopedAdmissionPriority<ExecutionAdmissionContext> admissionPriority(
+                    opCtx, AdmissionContext::Priority::kExempt);
                 // We need to hold the lock so that we don't run when storage is being shutdown.
                 Lock::GlobalLock lk(opCtx,
                                     MODE_IS,
@@ -222,10 +221,10 @@ MONGO_REGISTER_COMMAND(CmdReplSetTest).testOnly().forShard();
 class CmdReplSetGetRBID : public ReplSetCommand {
 public:
     CmdReplSetGetRBID() : ReplSetCommand("replSetGetRBID") {}
-    virtual bool run(OperationContext* opCtx,
-                     const DatabaseName&,
-                     const BSONObj& cmdObj,
-                     BSONObjBuilder& result) {
+    bool run(OperationContext* opCtx,
+             const DatabaseName&,
+             const BSONObj& cmdObj,
+             BSONObjBuilder& result) override {
         Status status = ReplicationCoordinator::get(opCtx)->checkReplEnabledForCommand(&result);
         uassertStatusOK(status);
 
@@ -243,10 +242,10 @@ public:
                "http://dochub.mongodb.org/core/replicasetcommands";
     }
     CmdReplSetGetConfig() : ReplSetCommand("replSetGetConfig") {}
-    virtual bool run(OperationContext* opCtx,
-                     const DatabaseName&,
-                     const BSONObj& cmdObj,
-                     BSONObjBuilder& result) {
+    bool run(OperationContext* opCtx,
+             const DatabaseName&,
+             const BSONObj& cmdObj,
+             BSONObjBuilder& result) override {
         Status status = ReplicationCoordinator::get(opCtx)->checkReplEnabledForCommand(&result);
         uassertStatusOK(status);
 
@@ -372,10 +371,10 @@ public:
         return "Initiate/christen a replica set.\n"
                "http://dochub.mongodb.org/core/replicasetcommands";
     }
-    virtual bool run(OperationContext* opCtx,
-                     const DatabaseName&,
-                     const BSONObj& cmdObj,
-                     BSONObjBuilder& result) {
+    bool run(OperationContext* opCtx,
+             const DatabaseName&,
+             const BSONObj& cmdObj,
+             BSONObjBuilder& result) override {
         BSONObj configObj;
         if (cmdObj["replSetInitiate"].type() == Object) {
             configObj = cmdObj["replSetInitiate"].Obj();
@@ -536,10 +535,10 @@ public:
                "http://dochub.mongodb.org/core/replicasetcommands";
     }
     CmdReplSetFreeze() : ReplSetCommand("replSetFreeze") {}
-    virtual bool run(OperationContext* opCtx,
-                     const DatabaseName&,
-                     const BSONObj& cmdObj,
-                     BSONObjBuilder& result) {
+    bool run(OperationContext* opCtx,
+             const DatabaseName&,
+             const BSONObj& cmdObj,
+             BSONObjBuilder& result) override {
         Status status = ReplicationCoordinator::get(opCtx)->checkReplEnabledForCommand(&result);
         uassertStatusOK(status);
 
@@ -554,6 +553,15 @@ private:
     }
 };
 MONGO_REGISTER_COMMAND(CmdReplSetFreeze).forShard();
+
+namespace {
+auto& stepDownCmdsWithForceExecuted =
+    *MetricBuilder<Counter64>{"commands.replSetStepDownWithForce.total"}.setRole(
+        ClusterRole::ShardServer);
+auto& stepDownCmdsWithForceFailed =
+    *MetricBuilder<Counter64>{"commands.replSetStepDownWithForce.failed"}.setRole(
+        ClusterRole::ShardServer);
+}  // namespace
 
 class CmdReplSetStepDown : public ReplSetCommand {
 public:
@@ -572,19 +580,19 @@ public:
 
     CmdReplSetStepDown() : ReplSetCommand("replSetStepDown") {}
 
-    virtual bool run(OperationContext* opCtx,
-                     const DatabaseName&,
-                     const BSONObj& cmdObj,
-                     BSONObjBuilder& result) {
+    bool run(OperationContext* opCtx,
+             const DatabaseName&,
+             const BSONObj& cmdObj,
+             BSONObjBuilder& result) override {
         const bool force = cmdObj["force"].trueValue();
 
         if (force) {
-            _stepDownCmdsWithForceExecuted.increment();
+            stepDownCmdsWithForceExecuted.increment();
         }
 
         ScopeGuard onExitGuard([&] {
             if (force) {
-                _stepDownCmdsWithForceFailed.increment();
+                stepDownCmdsWithForceFailed.increment();
             }
         });
 
@@ -637,9 +645,6 @@ public:
     }
 
 private:
-    CounterMetric _stepDownCmdsWithForceExecuted{"commands.replSetStepDownWithForce.total"};
-    CounterMetric _stepDownCmdsWithForceFailed{"commands.replSetStepDownWithForce.failed"};
-
     ActionSet getAuthActionSet() const override {
         return ActionSet{ActionType::replSetStateChange};
     }
@@ -653,10 +658,10 @@ public:
                "Enable or disable maintenance mode.";
     }
     CmdReplSetMaintenance() : ReplSetCommand("replSetMaintenance") {}
-    virtual bool run(OperationContext* opCtx,
-                     const DatabaseName&,
-                     const BSONObj& cmdObj,
-                     BSONObjBuilder& result) {
+    bool run(OperationContext* opCtx,
+             const DatabaseName&,
+             const BSONObj& cmdObj,
+             BSONObjBuilder& result) override {
         Status status = ReplicationCoordinator::get(opCtx)->checkReplEnabledForCommand(&result);
         uassertStatusOK(status);
 
@@ -680,10 +685,10 @@ public:
                "in-progress initial sync.";
     }
     CmdReplSetSyncFrom() : ReplSetCommand("replSetSyncFrom") {}
-    virtual bool run(OperationContext* opCtx,
-                     const DatabaseName&,
-                     const BSONObj& cmdObj,
-                     BSONObjBuilder& result) {
+    bool run(OperationContext* opCtx,
+             const DatabaseName&,
+             const BSONObj& cmdObj,
+             BSONObjBuilder& result) override {
         Status status = ReplicationCoordinator::get(opCtx)->checkReplEnabledForCommand(&result);
         uassertStatusOK(status);
 
@@ -706,10 +711,10 @@ MONGO_REGISTER_COMMAND(CmdReplSetSyncFrom).forShard();
 class CmdReplSetUpdatePosition : public ReplSetCommand {
 public:
     CmdReplSetUpdatePosition() : ReplSetCommand("replSetUpdatePosition") {}
-    virtual bool run(OperationContext* opCtx,
-                     const DatabaseName&,
-                     const BSONObj& cmdObj,
-                     BSONObjBuilder& result) {
+    bool run(OperationContext* opCtx,
+             const DatabaseName&,
+             const BSONObj& cmdObj,
+             BSONObjBuilder& result) override {
         auto replCoord = repl::ReplicationCoordinator::get(opCtx->getClient()->getServiceContext());
 
         Status status = replCoord->checkReplEnabledForCommand(&result);
@@ -784,10 +789,10 @@ MONGO_FAIL_POINT_DEFINE(rsDelayHeartbeatResponse);
 class CmdReplSetHeartbeat : public ReplSetCommand {
 public:
     CmdReplSetHeartbeat() : ReplSetCommand("replSetHeartbeat") {}
-    virtual bool run(OperationContext* opCtx,
-                     const DatabaseName&,
-                     const BSONObj& cmdObj,
-                     BSONObjBuilder& result) {
+    bool run(OperationContext* opCtx,
+             const DatabaseName&,
+             const BSONObj& cmdObj,
+             BSONObjBuilder& result) override {
         rsDelayHeartbeatResponse.execute(
             [&](const BSONObj& data) { sleepsecs(data["delay"].numberInt()); });
 
@@ -833,10 +838,10 @@ class CmdReplSetStepUp : public ReplSetCommand {
 public:
     CmdReplSetStepUp() : ReplSetCommand("replSetStepUp") {}
 
-    virtual bool run(OperationContext* opCtx,
-                     const DatabaseName&,
-                     const BSONObj& cmdObj,
-                     BSONObjBuilder& result) {
+    bool run(OperationContext* opCtx,
+             const DatabaseName&,
+             const BSONObj& cmdObj,
+             BSONObjBuilder& result) override {
         Status status = ReplicationCoordinator::get(opCtx)->checkReplEnabledForCommand(&result);
         uassertStatusOK(status);
 
@@ -870,10 +875,10 @@ public:
 
     CmdReplSetAbortPrimaryCatchUp() : ReplSetCommand("replSetAbortPrimaryCatchUp") {}
 
-    virtual bool run(OperationContext* opCtx,
-                     const DatabaseName&,
-                     const BSONObj& cmdObj,
-                     BSONObjBuilder& result) override {
+    bool run(OperationContext* opCtx,
+             const DatabaseName&,
+             const BSONObj& cmdObj,
+             BSONObjBuilder& result) override {
         Status status = ReplicationCoordinator::get(opCtx)->checkReplEnabledForCommand(&result);
         uassertStatusOK(status);
         LOGV2(21583, "Received replSetAbortPrimaryCatchUp request");

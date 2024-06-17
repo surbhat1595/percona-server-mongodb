@@ -54,6 +54,7 @@
 #include "mongo/bson/oid.h"
 #include "mongo/client/read_preference.h"
 #include "mongo/crypto/fle_field_schema_gen.h"
+#include "mongo/db/admission/execution_admission_context.h"
 #include "mongo/db/api_parameters.h"
 #include "mongo/db/auth/authorization_session.h"
 #include "mongo/db/basic_types.h"
@@ -106,7 +107,6 @@
 #include "mongo/db/query/plan_executor.h"
 #include "mongo/db/query/plan_executor_factory.h"
 #include "mongo/db/query/plan_yield_policy.h"
-#include "mongo/db/query/query_knobs_gen.h"
 #include "mongo/db/record_id.h"
 #include "mongo/db/repl/oplog.h"
 #include "mongo/db/repl/oplog_entry.h"
@@ -125,6 +125,7 @@
 #include "mongo/db/stats/top.h"
 #include "mongo/db/storage/duplicate_key_error_info.h"
 #include "mongo/db/storage/snapshot.h"
+#include "mongo/db/storage/storage_parameters_gen.h"
 #include "mongo/db/timeseries/timeseries_update_delete_util.h"
 #include "mongo/db/transaction/retryable_writes_stats.h"
 #include "mongo/db/transaction/transaction_participant.h"
@@ -597,12 +598,6 @@ void populateWriteResultWithInsertReply(size_t nDocsToInsert,
     SingleWriteResult result;
     result.setN(1);
 
-    // TODO(SERVER-79787): Remove this if block.
-    if (nDocsToInsert == inserted && insertReply.getWriteErrors().has_value() && isOrdered) {
-        // A temporary "fix" to work around the invariant below.
-        inserted = insertReply.getWriteErrors()->at(0).getIndex();
-    }
-
     if (nDocsToInsert == inserted) {
         invariant(!insertReply.getWriteErrors().has_value());
         out.results.reserve(inserted);
@@ -744,9 +739,17 @@ bool handleGroupedInserts(OperationContext* opCtx,
     curOp.push(opCtx);
     ON_BLOCK_EXIT([&] { finishCurOp(opCtx, &curOp, LogicalOp::opInsert); });
 
+    // If we are using document sequences for documents that total >16MB then getInsertOpDesc can
+    // fail with BSONObjectTooLarge. If this happens we want to proceed with an empty BSONObj.
+    BSONObj insertDocsObj;
+    try {
+        insertDocsObj = getInsertOpDesc(insertDocs, nsIdx);
+    } catch (ExceptionFor<ErrorCodes::BSONObjectTooLarge>&) {
+        insertDocsObj = BSONObj();
+    }
+
     // Initialize curOp information.
-    setCurOpInfoAndEnsureStarted(
-        opCtx, &curOp, LogicalOp::opInsert, nsEntry, getInsertOpDesc(insertDocs, nsIdx));
+    setCurOpInfoAndEnsureStarted(opCtx, &curOp, LogicalOp::opInsert, nsEntry, insertDocsObj);
 
     // Handle timeseries inserts.
     TimeseriesBucketNamespace tsNs(nsString, nsEntry.getIsTimeseriesNamespace());
@@ -765,10 +768,10 @@ bool handleGroupedInserts(OperationContext* opCtx,
         }
     }
 
-    boost::optional<ScopedAdmissionPriorityForLock> priority;
+    boost::optional<ScopedAdmissionPriority<ExecutionAdmissionContext>> priority;
     if (nsString == NamespaceString::kConfigSampledQueriesNamespace ||
         nsString == NamespaceString::kConfigSampledQueriesDiffNamespace) {
-        priority.emplace(shard_role_details::getLocker(opCtx), AdmissionContext::Priority::kLow);
+        priority.emplace(opCtx, AdmissionContext::Priority::kLow);
     }
 
     auto txnParticipant = TransactionParticipant::get(opCtx);
@@ -814,9 +817,9 @@ bool handleGroupedInserts(OperationContext* opCtx,
                                                                      nsEntry.getCollectionUUID(),
                                                                      req.getOrdered(),
                                                                      batch,
+                                                                     OperationSource::kStandard,
                                                                      &lastOpFixer,
-                                                                     &out,
-                                                                     OperationSource::kStandard);
+                                                                     &out);
 
         batch.clear();
         bytesInBatch = 0;
@@ -1175,6 +1178,7 @@ void explainUpdateOp(OperationContext* opCtx,
     updateRequest.setLegacyRuntimeConstants(Variables::generateRuntimeConstants(opCtx));
     updateRequest.setUpdateConstants(op->getConstants());
     updateRequest.setLetParameters(req.getLet());
+    updateRequest.setSort(op->getSort().value_or(BSONObj()));
     updateRequest.setHint(op->getHint());
     updateRequest.setCollation(op->getCollation().value_or(BSONObj()));
     updateRequest.setArrayFilters(op->getArrayFilters().value_or(std::vector<BSONObj>()));
@@ -1289,6 +1293,10 @@ public:
             return true;
         }
 
+        bool isSubjectToIngressAdmissionControl() const override {
+            return true;
+        }
+
         NamespaceString ns() const final {
             return NamespaceString(request().getDbName());
         }
@@ -1327,6 +1335,9 @@ public:
 
             if (!_firstUpdateOp->getFilter().isEmpty()) {
                 bob->append("filter", _firstUpdateOp->getFilter());
+            }
+            if (_firstUpdateOp->getSort()) {
+                bob->append("sort", *_firstUpdateOp->getSort());
             }
             if (!_firstUpdateOp->getHint().isEmpty()) {
                 bob->append("hint", _firstUpdateOp->getHint());
@@ -1408,7 +1419,7 @@ public:
                                    bulk_write::SummaryFields summaryFields) {
             auto reqObj = unparsedRequest().body;
             const NamespaceString cursorNss =
-                NamespaceString::makeBulkWriteNSS(req.getDollarTenant());
+                NamespaceString::makeBulkWriteNSS(req.getDbName().tenantId());
 
             if (replies.size() == 0 || bulk_write_common::isUnacknowledgedBulkWrite(opCtx)) {
                 // Skip cursor creation and return the simplest reply.
@@ -1612,8 +1623,10 @@ bool handleUpdateOp(OperationContext* opCtx,
                 opCtx, bucketNs, updateRequest, executor, &out);
             responses.addUpdateReply(opCtx, currentOpIdx, out);
 
-            bulk_write_common::incrementBulkWriteUpdateMetrics(
-                op->getUpdateMods(), nsEntry.getNs(), op->getArrayFilters());
+            bulk_write_common::incrementBulkWriteUpdateMetrics(ClusterRole::ShardServer,
+                                                               op->getUpdateMods(),
+                                                               nsEntry.getNs(),
+                                                               op->getArrayFilters());
             return out.canContinue;
         }
 
@@ -1629,8 +1642,10 @@ bool handleUpdateOp(OperationContext* opCtx,
                 responses.addUpdateReply(
                     currentOpIdx, numMatched, numDocsModified, upserted, stmtId);
 
-                bulk_write_common::incrementBulkWriteUpdateMetrics(
-                    op->getUpdateMods(), nsEntry.getNs(), op->getArrayFilters());
+                bulk_write_common::incrementBulkWriteUpdateMetrics(ClusterRole::ShardServer,
+                                                                   op->getUpdateMods(),
+                                                                   nsEntry.getNs(),
+                                                                   op->getArrayFilters());
                 return true;
             }
         }
@@ -1696,8 +1711,10 @@ bool handleUpdateOp(OperationContext* opCtx,
                                                                 &updateRequest);
                     lastOpFixer.finishedOpSuccessfully();
                     responses.addUpdateReply(currentOpIdx, result, boost::none);
-                    bulk_write_common::incrementBulkWriteUpdateMetrics(
-                        op->getUpdateMods(), nsEntry.getNs(), op->getArrayFilters());
+                    bulk_write_common::incrementBulkWriteUpdateMetrics(ClusterRole::ShardServer,
+                                                                       op->getUpdateMods(),
+                                                                       nsEntry.getNs(),
+                                                                       op->getArrayFilters());
                     return true;
                 } catch (const ExceptionFor<ErrorCodes::DuplicateKey>& ex) {
                     auto cq = uassertStatusOK(

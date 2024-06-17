@@ -133,6 +133,11 @@ BulkWriteReplyInfo execute(OperationContext* opCtx,
                            const std::vector<std::unique_ptr<NSTargeter>>& targeters,
                            const BulkWriteCommandRequest& clientRequest);
 
+
+BulkWriteCommandReply createEmulatedErrorReply(const Status& error,
+                                               int errorCount,
+                                               const boost::optional<TenantId>& tenantId);
+
 /**
  * The BulkWriteOp class manages the lifecycle of a bulkWrite request received by mongos. Each op in
  * the ops array is tracked via a WriteOp, and the function of the BulkWriteOp is to aggregate the
@@ -253,6 +258,7 @@ public:
     void noteWriteOpResponse(const std::unique_ptr<TargetedWrite>& targetedWrite,
                              WriteOp& op,
                              const BulkWriteCommandReply& commandReply,
+                             size_t numOps,
                              boost::optional<const BulkWriteReplyItem&> replyItem);
 
     /**
@@ -355,13 +361,21 @@ public:
      * Finalizes/resets state after executing (or attempting to execute) a write without shard key
      * with _id.
      */
-    void finishExecutingWriteWithoutShardKeyWithId(TargetedBatchMap& childBatches);
+    void finishExecutingWriteWithoutShardKeyWithId();
 
     void noteTargetedShard(const TargetedWriteBatch& targetedBatch);
     void noteNumShardsOwningChunks(size_t nsIdx, int nShardsOwningChunks);
     void noteTwoPhaseWriteProtocol(const TargetedWriteBatch& targetedBatch,
                                    size_t nsIdx,
                                    int nShardsOwningChunks);
+
+    void setTargeterHasStaleShardResponse(bool targeterHasStaleShardResponse) {
+        _targeterHasStaleShardResponse = targeterHasStaleShardResponse;
+    }
+
+    bool targeterHasStaleShardResponse() const {
+        return _targeterHasStaleShardResponse;
+    }
 
 private:
     // The OperationContext the client bulkWrite request is run on.
@@ -381,7 +395,7 @@ private:
     // A list of write concern errors from all shards.
     std::vector<ShardWCError> _wcErrors;
 
-    // Optionally stores a vector of write concern errors from all shards encountered during
+    // Optionally stores a map of write concern errors from all shards encountered during
     // the current round of execution. This is used only in the specific case where we are
     // processing a write of type WriteType::WriteWithoutShardKeyWithId, and is necessary because
     // if we see a staleness error we restart the broadcasting protocol and do not care about
@@ -390,13 +404,27 @@ private:
     // by the opIdx has reached a terminal state. If so, these errors are final and will be moved
     // to _wcErrors. If the op is not in a terminal state, we must be restarting the protocol and
     // therefore we discard the errors.
-    // We always process WriteWithoutShardKeyWithId writes in their own round and thus there is
-    // only ever a single op in consideration here.
-    boost::optional<std::pair<int /* opIdx */, std::vector<ShardWCError>>> _deferredWCErrors;
+    boost::optional<stdx::unordered_map<int /* opIdx */, std::vector<ShardWCError>>>
+        _deferredWCErrors;
+
+    // Optionally stores a vector of TargetedWriteBatch, BulkWriteCommandReply and
+    // BulkWriteReplyItem tuple for writes of type WithoutShardKeyWithId in a targeted batch to
+    // defer updating batch stats until we are sure that there is no retry of such writes is needed.
+    // This is necessary for responses that have n > 0 in a given round because we do not want to
+    // increment the batch stats multiple times for retried statements.
+    boost::optional<std::vector<std::tuple<const TargetedWriteBatch*,
+                                           const BulkWriteCommandReply,
+                                           boost::optional<const BulkWriteReplyItem>>>>
+        _deferredResponses;
+
+    bool _targeterHasStaleShardResponse = false;
 
     // Statement ids for the ops that had already been executed, thus were not executed in this
     // bulkWrite.
-    boost::optional<std::vector<StmtId>> _retriedStmtIds;
+    // Using an unordered_set to avoid tracking duplicate statement Ids for
+    // WriteType::WithoutShardKeyWithId, which may be retried multiple times and thus have their
+    // statement IDs appear in multiple responses from shards.
+    boost::optional<stdx::unordered_set<StmtId>> _retriedStmtIds;
 
     // Set to true if this write is part of a transaction.
     const bool _inTransaction{false};

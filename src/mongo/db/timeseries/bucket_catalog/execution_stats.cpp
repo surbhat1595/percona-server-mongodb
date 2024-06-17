@@ -100,6 +100,16 @@ void ExecutionStatsController::incNumBucketsArchivedDueToTimeBackward(long long 
     _globalStats->numBucketsArchivedDueToTimeBackward.fetchAndAddRelaxed(increment);
 }
 
+void ExecutionStatsController::incNumCompressedBucketsConvertedToUnsorted(long long increment) {
+    _collectionStats->numCompressedBucketsConvertedToUnsorted.fetchAndAddRelaxed(increment);
+    _globalStats->numCompressedBucketsConvertedToUnsorted.fetchAndAddRelaxed(increment);
+}
+
+void ExecutionStatsController::incNumBucketsFrozen(long long increment) {
+    _collectionStats->numBucketsFrozen.fetchAndAddRelaxed(increment);
+    _globalStats->numBucketsFrozen.fetchAndAddRelaxed(increment);
+}
+
 void ExecutionStatsController::incNumCommits(long long increment) {
     _collectionStats->numCommits.fetchAndAddRelaxed(increment);
     _globalStats->numCommits.fetchAndAddRelaxed(increment);
@@ -228,6 +238,9 @@ void appendExecutionStatsToBuilder(const ExecutionStats& stats, BSONObjBuilder& 
                          stats.numBucketsKeptOpenDueToLargeMeasurements.load());
     builder.appendNumber("numBucketsClosedDueToCachePressure",
                          stats.numBucketsClosedDueToCachePressure.load());
+    builder.appendNumber("numBucketsFrozen", stats.numBucketsFrozen.load());
+    builder.appendNumber("numCompressedBucketsConvertedToUnsorted",
+                         stats.numCompressedBucketsConvertedToUnsorted.load());
     builder.appendNumber("numBucketsFetched", stats.numBucketsFetched.load());
     builder.appendNumber("numBucketsQueried", stats.numBucketsQueried.load());
     builder.appendNumber("numBucketFetchesFailed", stats.numBucketFetchesFailed.load());
@@ -235,14 +248,14 @@ void appendExecutionStatsToBuilder(const ExecutionStats& stats, BSONObjBuilder& 
     builder.appendNumber("numBucketReopeningsFailed", stats.numBucketReopeningsFailed.load());
     builder.appendNumber("numDuplicateBucketsReopened", stats.numDuplicateBucketsReopened.load());
 
-    builder.appendNumber("numBytesUncompressed", stats.numBytesUncompressed.load());
-    builder.appendNumber("numBytesCompressed", stats.numBytesCompressed.load());
-
     if (feature_flags::gTimeseriesAlwaysUseCompressedBuckets.isEnabled(
             serverGlobalParams.featureCompatibility.acquireFCVSnapshot())) {
         return;
     }
 
+    // TODO(SERVER-70605): Remove these.
+    builder.appendNumber("numBytesUncompressed", stats.numBytesUncompressed.load());
+    builder.appendNumber("numBytesCompressed", stats.numBytesCompressed.load());
     builder.appendNumber("numSubObjCompressionRestart", stats.numSubObjCompressionRestart.load());
     builder.appendNumber("numCompressedBuckets", stats.numCompressedBuckets.load());
     builder.appendNumber("numUncompressedBuckets", stats.numUncompressedBuckets.load());
@@ -267,6 +280,9 @@ void addCollectionExecutionStats(ExecutionStatsController& stats, const Executio
         collStats.numBucketsArchivedDueToMemoryThreshold.load());
     stats.incNumBucketsArchivedDueToTimeBackward(
         collStats.numBucketsArchivedDueToTimeBackward.load());
+    stats.incNumBucketsFrozen(collStats.numBucketsFrozen.load());
+    stats.incNumCompressedBucketsConvertedToUnsorted(
+        collStats.numCompressedBucketsConvertedToUnsorted.load());
     stats.incNumCommits(collStats.numCommits.load());
     stats.incNumMeasurementsGroupCommitted(collStats.numMeasurementsGroupCommitted.load());
     stats.incNumWaits(collStats.numWaits.load());
@@ -280,6 +296,8 @@ void addCollectionExecutionStats(ExecutionStatsController& stats, const Executio
     stats.incNumBucketQueriesFailed(collStats.numBucketQueriesFailed.load());
     stats.incNumBucketReopeningsFailed(collStats.numBucketReopeningsFailed.load());
     stats.incNumDuplicateBucketsReopened(collStats.numDuplicateBucketsReopened.load());
+
+    // TODO(SERVER-70605): Remove these.
     stats.incNumBytesUncompressed(collStats.numBytesUncompressed.load());
     stats.incNumBytesCompressed(collStats.numBytesCompressed.load());
     stats.incNumSubObjCompressionRestart(collStats.numSubObjCompressionRestart.load());

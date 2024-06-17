@@ -186,7 +186,7 @@ boost::optional<int> determineCollScanHintedDirection(const CanonicalQuery& quer
     }
 
     // Otherwise use the direction specified by query settings if available.
-    if (auto querySettingsDirection = params.collscanDirection) {
+    if (auto querySettingsDirection = params.mainCollectionInfo.collscanDirection) {
         return static_cast<int>(*querySettingsDirection);
     }
 
@@ -385,7 +385,7 @@ void QueryPlannerAccess::handleRIDRangeMinMax(const CanonicalQuery& query,
     const MatchExpression* conjunct,
     const CollatorInterface* queryCollator,
     const CollatorInterface* ccCollator,
-    const StringData& clusterKeyFieldName,
+    StringData clusterKeyFieldName,
     RecordIdRange& recordRange,
     const std::function<void(const MatchExpression*)>& redundant) {
     if (conjunct == nullptr) {
@@ -570,9 +570,9 @@ std::unique_ptr<QuerySolutionNode> QueryPlannerAccess::makeCollectionScan(
     csn->filter = root->clone();
     csn->tailable = tailable;
     csn->shouldTrackLatestOplogTimestamp =
-        params.options & QueryPlannerParams::TRACK_LATEST_OPLOG_TS;
+        params.mainCollectionInfo.options & QueryPlannerParams::TRACK_LATEST_OPLOG_TS;
     csn->shouldWaitForOplogVisibility =
-        params.options & QueryPlannerParams::OPLOG_SCAN_WAIT_FOR_VISIBLE;
+        params.mainCollectionInfo.options & QueryPlannerParams::OPLOG_SCAN_WAIT_FOR_VISIBLE;
     csn->direction = determineCollScanHintedDirection(query, params).value_or(direction);
     csn->isOplog = isOplog;
     csn->isClustered = params.clusteredInfo ? true : false;
@@ -596,8 +596,8 @@ std::unique_ptr<QuerySolutionNode> QueryPlannerAccess::makeCollectionScan(
         csn->resumeAfterRecordId = RecordId::deserializeToken(recordIdElem);
     }
 
-    const bool assertMinTsHasNotFallenOffOplog =
-        params.options & QueryPlannerParams::ASSERT_MIN_TS_HAS_NOT_FALLEN_OFF_OPLOG;
+    const bool assertMinTsHasNotFallenOffOplog = params.mainCollectionInfo.options &
+        QueryPlannerParams::ASSERT_MIN_TS_HAS_NOT_FALLEN_OFF_OPLOG;
     if ((isOplog || isChangeCollection) && csn->direction == 1) {
         // Takes Timestamp 'ts' as input, transforms it to the RecordIdBound and assigns it to the
         // output parameter 'recordId'. The RecordId format for the change collection is a string,
@@ -1254,9 +1254,8 @@ void QueryPlannerAccess::finishLeafNode(
         auto ixScan = static_cast<IndexScanNode*>(node);
         ixScan->iets.reserve(ietBuilders.size());
         for (size_t i = 0; i < ietBuilders.size(); ++i) {
-            auto iet = ietBuilders[i].done();
-            if (iet) {
-                ixScan->iets.push_back(*iet);
+            if (auto iet = ietBuilders[i].done()) {
+                ixScan->iets.push_back(std::move(*iet));
             } else {
                 ixScan->iets.push_back(
                     interval_evaluation_tree::IET::make<interval_evaluation_tree::ConstNode>(
@@ -1351,8 +1350,8 @@ bool projNeedsFetch(const CanonicalQuery& query) {
 
     // This optimization can only be used for find when the index covers the projection completely.
     // However, if the indexed field is in the projection, the index may return an incorrect value
-    // for the field, since it does not distinguish between null and undefined (and the empty list,
-    // in the multikey case). Hence, only find queries projecting _id are covered.
+    // for the field, since it does not distinguish between null and missing. Hence, only find
+    // queries projecting _id are covered.
     auto proj = query.getProj();
     if (!proj) {
         return true;
@@ -2065,11 +2064,9 @@ std::unique_ptr<QuerySolutionNode> QueryPlannerAccess::_buildIndexedDataAccess(
     return nullptr;
 }
 
-std::unique_ptr<QuerySolutionNode> QueryPlannerAccess::scanWholeIndex(
-    const IndexEntry& index,
-    const CanonicalQuery& query,
-    const QueryPlannerParams& params,
-    int direction) {
+std::unique_ptr<QuerySolutionNode> QueryPlannerAccess::scanWholeIndex(const IndexEntry& index,
+                                                                      const CanonicalQuery& query,
+                                                                      int direction) {
     std::unique_ptr<QuerySolutionNode> solnRoot;
 
     // Build an ixscan over the id index, use it, and return it.

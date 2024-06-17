@@ -102,6 +102,10 @@ public:
         return _impl->get().uuidMatches(uuid);
     }
 
+    const UUID& getUUID() const {
+        return _impl->get().getUUID();
+    }
+
     const boost::optional<TypeCollectionReshardingFields>& getReshardingFields() const {
         return _impl->get().getReshardingFields();
     }
@@ -134,7 +138,9 @@ public:
         return _impl->get().keyBelongsToMe(key);
     }
 
-    bool isRangeEntirelyOwned(const BSONObj& min, const BSONObj& max) const;
+    bool isRangeEntirelyOwned(const BSONObj& min,
+                              const BSONObj& max,
+                              bool includeMaxBound = true) const;
 };
 
 }  // namespace mongo

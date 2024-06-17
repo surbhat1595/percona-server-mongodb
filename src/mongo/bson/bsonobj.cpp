@@ -179,7 +179,7 @@ BSONObj BSONObj::redact(RedactLevel level,
     // Helper to get an "internal function" to be able to do recursion
     struct redactor {
         void appendRedactedElem(BSONObjBuilder& builder,
-                                const StringData& fieldNameString,
+                                StringData fieldNameString,
                                 bool appendMask) {
             if (appendMask) {
                 builder.append(fieldNameString, "###"_sd);
@@ -681,15 +681,27 @@ void BSONObj::getFields(unsigned n, const char** fieldNames, BSONElement* fields
 }
 
 BSONElement BSONObj::getField(StringData name) const {
-    BSONObjIterator i(*this);
-    while (i.more()) {
-        BSONElement e = i.next();
-        // We know that e has a cached field length since BSONObjIterator::next internally
-        // called BSONElement::size on the BSONElement that it returned, so it is more
-        // efficient to re-use that information by obtaining the field name as a
-        // StringData, which will be pre-populated with the cached length.
-        if (name == e.fieldNameStringData())
-            return e;
+    const char* elem = objdata() + sizeof(int);
+    while (int8_t type = *elem) {
+        auto ptr = elem;
+        // Use the name comparison while computing the name length: this avoids having to look at
+        // the same name bytes twice.
+        for (auto c : name)
+            if (*++ptr != c)
+                goto next;  // *ptr is the first non-matching byte, possibly the 0 terminator
+
+        // If the field name is found and complete, return the element.
+        if (!*++ptr)
+            return BSONElement(elem, ptr - elem, BSONElement::computeSize(type, elem, ptr - elem));
+
+        // The name is found, but the field name is not yet complete, so there's no match.
+        ++ptr;
+next:
+        // Skip any remaining part of the field name.
+        while (*ptr)
+            ++ptr;
+
+        elem += BSONElement::computeSize(type, elem, ptr - elem);
     }
     return BSONElement();
 }
@@ -932,15 +944,14 @@ bool BSONIteratorSorted::ElementFieldCmp::operator()(const Field& lhs, const Fie
 }
 
 BSONIteratorSorted::BSONIteratorSorted(const BSONObj& o, const ElementFieldCmp& cmp)
-    : _nfields(o.nFields()), _fields(std::make_unique<Field[]>(_nfields)) {
+    : _fields(o.nFields()) {
     int x = 0;
     BSONObjIterator i(o);
     while (i.more()) {
         auto elem = i.next();
         _fields[x++] = {elem.fieldNameStringData(), elem.size()};
     }
-    MONGO_verify(x == _nfields);
-    std::sort(_fields.get(), _fields.get() + _nfields, cmp);
+    std::sort(_fields.begin(), _fields.end(), cmp);
     _cur = 0;
 }
 

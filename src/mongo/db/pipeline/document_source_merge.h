@@ -146,14 +146,10 @@ public:
         MergeWhenNotMatchedModeEnum _whenNotMatched;
     };
 
-    virtual ~DocumentSourceMerge() = default;
+    ~DocumentSourceMerge() override = default;
 
     const char* getSourceName() const final {
         return kStageName.rawData();
-    }
-
-    const NamespaceString& getOutputNs() const override {
-        return _outputNs;
     }
 
     MergeProcessor* getMergeProcessor() {
@@ -164,7 +160,7 @@ public:
 
     boost::optional<DistributedPlanLogic> distributedPlanLogic() final;
 
-    Value serialize(const SerializationOptions& opts = SerializationOptions{}) const final override;
+    Value serialize(const SerializationOptions& opts = SerializationOptions{}) const final;
 
     /**
      * Creates a new $merge stage from the given arguments.
@@ -236,8 +232,6 @@ private:
     void flush(BatchedCommandRequest bcr, BatchedObjects batch) override;
 
     void waitWhileFailPointEnabled() override;
-
-    const NamespaceString _outputNs;
 
     // Holds the fields used for uniquely identifying documents. There must exist a unique index
     // with this key pattern. Default is "_id" for unsharded collections, and "_id" plus the shard

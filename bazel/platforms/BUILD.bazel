@@ -1,23 +1,84 @@
 # Define supported build platforms.
+load("//bazel/platforms:remote_execution_containers.bzl", "REMOTE_EXECUTION_CONTAINERS")
 
 package(default_visibility = ["//visibility:public"])
 
+constraint_setting(name = "tcmalloc_kernel_version")
+
+constraint_value(
+    name = "kernel_version_4_4_or_greater",
+    constraint_setting = ":tcmalloc_kernel_version",
+)
+
+constraint_value(
+    name = "kernel_version_less_than_4_4",
+    constraint_setting = ":tcmalloc_kernel_version",
+)
+
+constraint_setting(name = "distro")
+
+[
+    constraint_value(
+        name = distro_or_os,
+        constraint_setting = ":distro",
+    )
+    for distro_or_os in [
+        "linux",
+        "ubuntu18",
+        "ubuntu20",
+        "ubuntu22",
+        "amazon_linux_2",
+        "amazon_linux_2023",
+        "debian10",
+        "debian12",
+        "rhel7",
+        "rhel8",
+        "rhel9",
+        "suse12",
+        "suse15",
+    ]
+]
+
 [
     platform(
-        name = "linux_arm64_" + compiler,
+        name = distro_or_os + "_" + arch + "_" + compiler,
         constraint_values = [
             "@platforms//os:linux",
-            "@platforms//cpu:arm64",
+            "@platforms//cpu:arm64" if arch == "arm64" else "@platforms//cpu:x86_64",
             "@bazel_tools//tools/cpp:" + compiler,
+            ":" + distro_or_os,
+            ":kernel_version_4_4_or_greater",  # remote execution platforms assume a given kernel version
         ],
         exec_properties = {
-            # debian gcc based image contains the base our toolchain needs (glibc version and build-essentials)
-            # https://hub.docker.com/layers/library/gcc/12.3-bookworm/images/sha256-6a3a5694d10299dbfb8747b98621abf4593bb54a5396999caa013cba0e17dd4f?context=explore
-            "container-image": "docker://docker.io/library/gcc@sha256:6a3a5694d10299dbfb8747b98621abf4593bb54a5396999caa013cba0e17dd4f",
-            "dockerNetwork": "standard"
-        }
+            "container-image": REMOTE_EXECUTION_CONTAINERS[distro_or_os]["container-url"],
+            "dockerNetwork": "standard",
+
+            # EngFlow's "default" pool is ARM64
+            "Pool": "x86_64" if arch == "amd64" else "default",
+        },
     )
-    for compiler in ["clang", "gcc"]
+    for compiler in [
+        "clang",
+        "gcc",
+    ]
+    for arch in [
+        "arm64",
+        "amd64",
+    ]
+    for distro_or_os in [
+        "linux",
+        "ubuntu18",
+        "ubuntu20",
+        "ubuntu22",
+        "amazon_linux_2",
+        "amazon_linux_2023",
+        "debian10",
+        "debian12",
+        "rhel7",
+        "rhel8",
+        "rhel9",
+        "suse15",
+    ]
 ]
 
 platform(
@@ -26,7 +87,7 @@ platform(
         "@platforms//cpu:x86_64",
         "@platforms//os:windows",
         "@bazel_tools//tools/cpp:msvc",
-    ]
+    ],
 )
 
 platform(
@@ -35,7 +96,7 @@ platform(
         "@platforms//cpu:arm64",
         "@platforms//os:macos",
         "@bazel_tools//tools/cpp:clang",
-    ]
+    ],
 )
 
 platform(
@@ -44,5 +105,77 @@ platform(
         "@platforms//cpu:x86_64",
         "@platforms//os:macos",
         "@bazel_tools//tools/cpp:clang",
-    ]
+    ],
+)
+
+platform(
+    name = "linux_ppc64le_clang",
+    constraint_values = [
+        "@platforms//cpu:ppc64le",
+        "@platforms//os:linux",
+        "@bazel_tools//tools/cpp:clang",
+    ],
+)
+
+platform(
+    name = "linux_ppc64le_gcc",
+    constraint_values = [
+        "@platforms//cpu:ppc64le",
+        "@platforms//os:linux",
+        "@bazel_tools//tools/cpp:gcc",
+    ],
+)
+
+platform(
+    name = "linux_s390x_clang",
+    constraint_values = [
+        "@platforms//cpu:s390x",
+        "@platforms//os:linux",
+        "@bazel_tools//tools/cpp:clang",
+    ],
+)
+
+platform(
+    name = "linux_s390x_gcc",
+    constraint_values = [
+        "@platforms//cpu:s390x",
+        "@platforms//os:linux",
+        "@bazel_tools//tools/cpp:gcc",
+    ],
+)
+
+platform(
+    name = "rhel8_ppc64le_clang",
+    constraint_values = [
+        "@platforms//cpu:ppc64le",
+        "@platforms//os:linux",
+        "@bazel_tools//tools/cpp:clang",
+    ],
+)
+
+platform(
+    name = "rhel8_ppc64le_gcc",
+    constraint_values = [
+        "@platforms//cpu:ppc64le",
+        "@platforms//os:linux",
+        "@bazel_tools//tools/cpp:gcc",
+    ],
+)
+
+platform(
+    name = "rhel8_s390x_clang",
+    constraint_values = [
+        "@platforms//cpu:s390x",
+        "@platforms//os:linux",
+        "@bazel_tools//tools/cpp:clang",
+    ],
+)
+
+platform(
+    name = "rhel8_s390x_gcc",
+    constraint_values = [
+        "@platforms//cpu:s390x",
+        "@platforms//os:linux",
+        "@bazel_tools//tools/cpp:gcc",
+    ],
 )

@@ -592,7 +592,7 @@ StatusWith<ShardType> ShardingCatalogManager::_validateHostAsShard(
     }
 
     // Disallow adding shard replica set with name 'config'
-    if (!isConfigShard && actualShardName == DatabaseName::kConfig.db()) {
+    if (!isConfigShard && actualShardName == DatabaseName::kConfig.db(omitTenant)) {
         return {ErrorCodes::BadValue, "use of shard replica set with name 'config' is not allowed"};
     }
 
@@ -775,6 +775,14 @@ void ShardingCatalogManager::installConfigShardIdentityDocument(OperationContext
 
         auto shardIdUpsertCmd = add_shard_util::createShardIdentityUpsertForAddShard(
             addShardCmd, ShardingCatalogClient::kLocalWriteConcern);
+
+        // A request dispatched through a local client is served within the same thread that submits
+        // it (so that the opCtx needs to be used as the vehicle to pass the WC to the
+        // ServiceEntryPoint).
+        const auto originalWC = opCtx->getWriteConcern();
+        ScopeGuard resetWCGuard([&] { opCtx->setWriteConcern(originalWC); });
+        opCtx->setWriteConcern(ShardingCatalogClient::kLocalWriteConcern);
+
         DBDirectClient localClient(opCtx);
         BSONObj res;
 
@@ -819,6 +827,16 @@ Status ShardingCatalogManager::_updateClusterCardinalityParameterAfterAddShardIf
 Status ShardingCatalogManager::_updateClusterCardinalityParameterAfterRemoveShardIfNeeded(
     const Lock::ExclusiveLock&, OperationContext* opCtx) {
     if (MONGO_unlikely(skipUpdatingClusterCardinalityParameterAfterRemoveShard.shouldFail())) {
+        return Status::OK();
+    }
+
+    // If the replica set endpoint is not active, then it isn't safe to allow direct connections
+    // again after a second shard has been added. Unsharded collections are allowed to be tracked
+    // and moved as soon as a second shard is added to the cluster, and these collections will not
+    // handle direct connections properly.
+    const auto fcvSnapshot = serverGlobalParams.featureCompatibility.acquireFCVSnapshot();
+    if (fcvSnapshot.isVersionInitialized() &&
+        !feature_flags::gFeatureFlagRSEndpointClusterCardinalityParameter.isEnabled(fcvSnapshot)) {
         return Status::OK();
     }
 
@@ -996,7 +1014,7 @@ StatusWith<std::string> ShardingCatalogManager::addShard(
         const auto fcvSnapshot = (*fcvRegion).acquireFCVSnapshot();
 
         std::vector<CollectionType> collList;
-        if (feature_flags::gTrackUnshardedCollectionsOnShardingCatalog.isEnabled(fcvSnapshot)) {
+        if (feature_flags::gTrackUnshardedCollectionsUponCreation.isEnabled(fcvSnapshot)) {
             // TODO SERVER-80532: the sharding catalog might lose some collections.
             auto listStatus = _getCollListFromShard(opCtx, dbNamesStatus.getValue(), targeter);
             if (!listStatus.isOK()) {
@@ -1581,16 +1599,25 @@ Status ShardingCatalogManager::_pullClusterTimeKeys(
 }
 
 void ShardingCatalogManager::_setClusterParametersLocally(OperationContext* opCtx,
-                                                          const boost::optional<TenantId>& tenantId,
                                                           const std::vector<BSONObj>& parameters) {
     DBDirectClient client(opCtx);
     ClusterParameterDBClientService dbService(client);
+    const auto tenantId = [&]() -> boost::optional<TenantId> {
+        const auto vts = auth::ValidatedTenancyScope::get(opCtx);
+        invariant(!vts || vts->hasTenantId());
+
+        if (vts && vts->hasTenantId()) {
+            return vts->tenantId();
+        }
+        return boost::none;
+    }();
+
     for (auto& parameter : parameters) {
         SetClusterParameter setClusterParameterRequest(
             BSON(parameter["_id"].String() << parameter.filterFieldsUndotted(
                      BSON("_id" << 1 << "clusterParameterTime" << 1), false)));
         setClusterParameterRequest.setDbName(DatabaseNameUtil::deserialize(
-            tenantId, DatabaseName::kAdmin.db(), SerializationContext::stateDefault()));
+            tenantId, DatabaseName::kAdmin.db(omitTenant), SerializationContext::stateDefault()));
         std::unique_ptr<ServerParameterService> parameterService =
             std::make_unique<ClusterParameterService>();
         SetClusterParameterInvocation invocation{std::move(parameterService), dbService};
@@ -1648,8 +1675,10 @@ void ShardingCatalogManager::_pullClusterParametersFromNewShard(OperationContext
     for (const auto& tenantId : tenantIds) {
         uassertStatusOK(fetchers[i]->join(opCtx));
         uassertStatusOK(statuses[i]);
-        _setClusterParametersLocally(opCtx, tenantId, allParameters[i]);
 
+        auth::ValidatedTenancyScopeGuard::runAsTenant(opCtx, tenantId, [&]() -> void {
+            _setClusterParametersLocally(opCtx, allParameters[i]);
+        });
         i++;
     }
 }
@@ -1689,7 +1718,7 @@ void ShardingCatalogManager::_pushClusterParametersToNewShard(
 
     for (const auto& [tenantId, clusterParameters] : allClusterParameters) {
         const auto& dbName = DatabaseNameUtil::deserialize(
-            tenantId, DatabaseName::kAdmin.db(), SerializationContext::stateDefault());
+            tenantId, DatabaseName::kAdmin.db(omitTenant), SerializationContext::stateDefault());
         // Push cluster parameters into the newly added shard.
         for (auto& parameter : clusterParameters) {
             ShardsvrSetClusterParameter setClusterParamsCmd(
@@ -1781,13 +1810,9 @@ void ShardingCatalogManager::_addShardInTransaction(
     }
 
     // 2. Set up and run the commit statements
-    // TODO SERVER-66261 newShard may be passed by reference.
     // TODO SERVER-81582: generate batches of transactions to insert the database/placementHistory
     // and collection/placementHistory before adding the shard in config.shards.
-    auto transactionChain = [opCtx,
-                             newShard,
-                             dbNames = std::move(databasesInNewShard),
-                             nssList = std::move(collectionsInNewShard)](
+    auto transactionChain = [opCtx, &newShard, &databasesInNewShard, &collectionsInNewShard](
                                 const txn_api::TransactionClient& txnClient, ExecutorPtr txnExec) {
         write_ops::InsertCommandRequest insertShardEntry(NamespaceString::kConfigsvrShardsNamespace,
                                                          {newShard.toBSON()});
@@ -1795,7 +1820,7 @@ void ShardingCatalogManager::_addShardInTransaction(
             .thenRunOn(txnExec)
             .then([&](const BatchedCommandResponse& insertShardEntryResponse) {
                 uassertStatusOK(insertShardEntryResponse.toStatus());
-                if (dbNames.empty()) {
+                if (databasesInNewShard.empty()) {
                     BatchedCommandResponse noOpResponse;
                     noOpResponse.setStatus(Status::OK());
                     noOpResponse.setN(0);
@@ -1804,8 +1829,8 @@ void ShardingCatalogManager::_addShardInTransaction(
                 }
 
                 std::vector<BSONObj> databaseEntries;
-                std::transform(dbNames.begin(),
-                               dbNames.end(),
+                std::transform(databasesInNewShard.begin(),
+                               databasesInNewShard.end(),
                                std::back_inserter(databaseEntries),
                                [&](const DatabaseName& dbName) {
                                    return DatabaseType(dbName,
@@ -1821,7 +1846,7 @@ void ShardingCatalogManager::_addShardInTransaction(
             .thenRunOn(txnExec)
             .then([&](const BatchedCommandResponse& insertDatabaseEntriesResponse) {
                 uassertStatusOK(insertDatabaseEntriesResponse.toStatus());
-                if (nssList.empty()) {
+                if (collectionsInNewShard.empty()) {
                     BatchedCommandResponse noOpResponse;
                     noOpResponse.setStatus(Status::OK());
                     noOpResponse.setN(0);
@@ -1830,8 +1855,8 @@ void ShardingCatalogManager::_addShardInTransaction(
                 }
                 std::vector<BSONObj> collEntries;
 
-                std::transform(nssList.begin(),
-                               nssList.end(),
+                std::transform(collectionsInNewShard.begin(),
+                               collectionsInNewShard.end(),
                                std::back_inserter(collEntries),
                                [&](const CollectionType& coll) { return coll.toBSON(); });
                 write_ops::InsertCommandRequest insertCollectionEntries(
@@ -1841,7 +1866,7 @@ void ShardingCatalogManager::_addShardInTransaction(
             .thenRunOn(txnExec)
             .then([&](const BatchedCommandResponse& insertCollectionEntriesResponse) {
                 uassertStatusOK(insertCollectionEntriesResponse.toStatus());
-                if (nssList.empty()) {
+                if (collectionsInNewShard.empty()) {
                     BatchedCommandResponse noOpResponse;
                     noOpResponse.setStatus(Status::OK());
                     noOpResponse.setN(0);
@@ -1853,8 +1878,8 @@ void ShardingCatalogManager::_addShardInTransaction(
                     ShardKeyPattern(sharding_ddl_util::unsplittableCollectionShardKey());
                 const auto shardId = ShardId(newShard.getName());
                 std::transform(
-                    nssList.begin(),
-                    nssList.end(),
+                    collectionsInNewShard.begin(),
+                    collectionsInNewShard.end(),
                     std::back_inserter(chunkEntries),
                     [&](const CollectionType& coll) {
                         // Create a single chunk for this
@@ -1875,7 +1900,7 @@ void ShardingCatalogManager::_addShardInTransaction(
             .thenRunOn(txnExec)
             .then([&](const BatchedCommandResponse& insertChunkEntriesResponse) {
                 uassertStatusOK(insertChunkEntriesResponse.toStatus());
-                if (dbNames.empty()) {
+                if (databasesInNewShard.empty()) {
                     BatchedCommandResponse noOpResponse;
                     noOpResponse.setStatus(Status::OK());
                     noOpResponse.setN(0);
@@ -1883,8 +1908,8 @@ void ShardingCatalogManager::_addShardInTransaction(
                     return SemiFuture<BatchedCommandResponse>(std::move(noOpResponse));
                 }
                 std::vector<BSONObj> placementEntries;
-                std::transform(dbNames.begin(),
-                               dbNames.end(),
+                std::transform(databasesInNewShard.begin(),
+                               databasesInNewShard.end(),
                                std::back_inserter(placementEntries),
                                [&](const DatabaseName& dbName) {
                                    return NamespacePlacementType(NamespaceString(dbName),
@@ -1892,8 +1917,8 @@ void ShardingCatalogManager::_addShardInTransaction(
                                                                  {ShardId(newShard.getName())})
                                        .toBSON();
                                });
-                std::transform(nssList.begin(),
-                               nssList.end(),
+                std::transform(collectionsInNewShard.begin(),
+                               collectionsInNewShard.end(),
                                std::back_inserter(placementEntries),
                                [&](const CollectionType& coll) {
                                    NamespacePlacementType placementInfo(

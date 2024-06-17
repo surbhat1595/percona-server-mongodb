@@ -29,6 +29,9 @@
 
 #include "mongo/db/query/query_settings/query_settings_utils.h"
 
+#include <boost/optional/optional.hpp>
+#include <string_view>
+
 #include "mongo/db/curop.h"
 #include "mongo/db/pipeline/lite_parsed_pipeline.h"
 #include "mongo/db/query/query_request_helper.h"
@@ -37,7 +40,11 @@
 #include "mongo/db/query/query_shape/distinct_cmd_shape.h"
 #include "mongo/db/query/query_shape/find_cmd_shape.h"
 #include "mongo/db/query/query_utils.h"
+#include "mongo/stdx/unordered_set.h"
+#include "mongo/util/assert_util.h"
 #include "mongo/util/serialization_context.h"
+
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kDefault
 
 namespace mongo::query_settings {
 
@@ -47,10 +54,108 @@ namespace {
 // Explicitly defines the `SerializationContext` to be used in `RepresentativeQueryInfo` factory
 // methods. This was done as part of SERVER-79909 to ensure that inner query commands correctly
 // infer the `tenantId`.
-auto const kSerializationContext = SerializationContext{SerializationContext::Source::Command,
-                                                        SerializationContext::CallerType::Request,
-                                                        SerializationContext::Prefix::Default,
-                                                        true /* nonPrefixedTenantId */};
+auto const kSerializationContext =
+    SerializationContext{SerializationContext::Source::Command,
+                         SerializationContext::CallerType::Request,
+                         SerializationContext::Prefix::ExcludePrefix};
+
+MONGO_FAIL_POINT_DEFINE(allowAllSetQuerySettings);
+
+void failIfRejectedBySettings(const boost::intrusive_ptr<ExpressionContext>& expCtx,
+                              const QuerySettings& settings) {
+    if (expCtx->explain) {
+        // Explaining queries which _would_ be rejected if executed is still useful;
+        // do not fail here.
+        return;
+    }
+    if (settings.getReject()) {
+        auto* opCtx = expCtx->opCtx;
+        const Command* curCommand = CommandInvocation::get(opCtx)->definition();
+        auto* curOp = CurOp::get(opCtx);
+        auto query = curOp->opDescription();
+
+        mutablebson::Document cmdToLog(query, mutablebson::Document::kInPlaceDisabled);
+        curCommand->snipForLogging(&cmdToLog);
+        LOGV2_DEBUG_OPTIONS(8687100,
+                            2,
+                            {logv2::LogComponent::kQueryRejected},
+                            "Query rejected by QuerySettings",
+                            "queryShapeHash"_attr = curOp->getQueryShapeHash()->toHexString(),
+                            "ns"_attr = CurOp::get(expCtx->opCtx)->getNS(),
+                            "command"_attr = redact(cmdToLog.getObject()));
+        uasserted(ErrorCodes::QueryRejectedBySettings, "Query rejected by admin query settings");
+    }
+}
+
+/**
+ * System or administrative queries should not be rejected, even if a user
+ * chooses to set reject=true.
+ */
+bool pipelineCanBeRejected(const Pipeline& pipeline) {
+    using namespace std::string_view_literals;
+    static const stdx::unordered_set<std::string_view> exemptedStages = {
+        "$querySettings"sv,
+        "$planCacheStats"sv,
+        "$collStats"sv,
+        "$indexStats"sv,
+        "$listSessions"sv,
+        "$listSampledQueries"sv,
+        "$queryStats"sv,
+        "$currentOp"sv,
+        "$listCatalog"sv,
+        "$listLocalSessions"sv,
+        "$listSearchIndexes"sv,
+        "$operationMetrics"sv,
+    };
+    return !pipeline.peekFront() || !exemptedStages.contains(pipeline.peekFront()->getSourceName());
+}
+
+/**
+ * Aggregate commands require additional introspection to decide if the pipeline is suitable for
+ * rejection to apply.
+ *
+ * "System" requests (used internally or for administration) are permitted to ignore reject, to
+ * avoid accidentally reaching a hard to resolve state, or breaking internal mechanisms.
+ */
+void failIfRejectedBySettings(const boost::intrusive_ptr<ExpressionContext>& expCtx,
+                              const Pipeline& pipeline,
+                              const QuerySettings& settings) {
+    // Agg requests with "system" stages like $querySettings should not be failed,
+    // even if reject has been set by query hash.
+    if (!pipelineCanBeRejected(pipeline)) {
+        return;
+    }
+    // Continue on to the common checks, and maybe fail the request.
+    failIfRejectedBySettings(expCtx, settings);
+}
+
+/**
+ * If the pipeline starts with a "system"/administrative document source to which query settings
+ * should not be applied, return the relevant stage name.
+ */
+boost::optional<std::string> getStageExemptedFromRejection(const Pipeline& pipeline) {
+    if (pipelineCanBeRejected(pipeline)) {
+        // No pipeline stages are incompatible with rejection.
+        return boost::none;
+    }
+
+    const auto* firstStage = pipeline.peekFront();
+    // An empty pipeline should have lead to the above early exit being taken.
+    tassert(8705201, "Empty pipeline should be eligible for rejection, but was not", firstStage);
+
+    // Currently, all "system" queries are always the first stage in a pipeline.
+    return {std::string(firstStage->getSourceName())};
+}
+
+/**
+ * Sets query shape hash value 'hash' for the operation defined by 'opCtx' operation context.
+ */
+void setQueryShapeHash(OperationContext* opCtx, const boost::optional<QueryShapeHash>& hash) {
+    // Field 'queryShapeHash' is accessed by other threads therefore write the query shape hash
+    // within a critical section.
+    stdx::lock_guard<Client> lk(*opCtx->getClient());
+    CurOp::get(opCtx)->setQueryShapeHash(hash);
+}
 }  // namespace
 
 /*
@@ -105,7 +210,8 @@ RepresentativeQueryInfo createRepresentativeInfoFind(
         nssOrUuid.nss(),
         std::move(involvedNamespaces),
         std::move(encryptionInformation),
-        isIdHackEligibleQuery};
+        isIdHackEligibleQuery,
+        {/* no unsupported agg stages */}};
 }
 
 /*
@@ -150,7 +256,8 @@ RepresentativeQueryInfo createRepresentativeInfoDistinct(
         nssOrUuid.nss(),
         std::move(involvedNamespaces),
         boost::none /* encryptionInformation */,
-        false /* isIdHackEligibleQuery */};
+        false /* isIdHackEligibleQuery */,
+        {/* no unsupported agg stages */}};
 }
 
 /*
@@ -206,7 +313,8 @@ RepresentativeQueryInfo createRepresentativeInfoAgg(
         std::move(expCtx->ns),
         std::move(involvedNamespaces),
         std::move(encryptionInformation),
-        false /* isIdHackEligibleQuery */};
+        false /* isIdHackEligibleQuery */,
+        getStageExemptedFromRejection(*pipeline)};
 }
 
 RepresentativeQueryInfo createRepresentativeInfo(const BSONObj& cmd,
@@ -227,72 +335,240 @@ RepresentativeQueryInfo createRepresentativeInfo(const BSONObj& cmd,
     uasserted(7746402, str::stream() << "QueryShape can not be computed for command: " << cmd);
 }
 
+QuerySettings lookupQuerySettingsForFind(const boost::intrusive_ptr<ExpressionContext>& expCtx,
+                                         const ParsedFindCommand& parsedFind,
+                                         const NamespaceString& nss) {
+    // No query settings lookup for IDHACK queries.
+    if (isIdHackEligibleQueryWithoutCollator(*parsedFind.findCommandRequest)) {
+        return query_settings::QuerySettings();
+    }
+
+    // No query settings lookup on internal dbs or system collections in user dbs.
+    if (nss.isOnInternalDb() || nss.isSystem()) {
+        return query_settings::QuerySettings();
+    }
+
+    // No query settings for queries with encryption information.
+    if (parsedFind.findCommandRequest->getEncryptionInformation()) {
+        return query_settings::QuerySettings();
+    }
+
+    // If query settings are present as part of the request, use them as opposed to performing the
+    // query settings lookup. In this case, no check for 'reject' setting will be made.
+    if (auto querySettings = parsedFind.findCommandRequest->getQuerySettings()) {
+        return *querySettings;
+    }
+
+    // We need to use isEnabledUseLatestFCVWhenUninitialized instead of isEnabled because
+    // this could run during startup while the FCV is still uninitialized.
+    if (!feature_flags::gFeatureFlagQuerySettings.isEnabledUseLatestFCVWhenUninitialized(
+            serverGlobalParams.featureCompatibility.acquireFCVSnapshot())) {
+        return query_settings::QuerySettings();
+    }
+
+    auto* opCtx = expCtx->opCtx;
+    const auto& serializationContext = parsedFind.findCommandRequest->getSerializationContext();
+    auto curOp = CurOp::get(opCtx);
+    auto& opDebug = curOp->debug();
+    auto hash = [&]() -> boost::optional<QueryShapeHash> {
+        if (opDebug.queryStatsInfo.key) {
+            return opDebug.queryStatsInfo.key->getQueryShapeHash(opCtx, serializationContext);
+        }
+        boost::optional<query_shape::FindCmdShape> shape;
+        try {
+            shape.emplace(parsedFind, expCtx);
+        } catch (ExceptionFor<ErrorCodes::BSONObjectTooLarge>&) {
+            return boost::none;
+        }
+        return shape->sha256Hash(expCtx->opCtx, serializationContext);
+    }();
+    if (!hash) {
+        return query_settings::QuerySettings();
+    }
+    setQueryShapeHash(opCtx, hash);
+
+    // Return the found query settings or an empty one.
+    auto& manager = QuerySettingsManager::get(opCtx);
+    auto settings = manager.getQuerySettingsForQueryShapeHash(opCtx, *hash, nss.dbName().tenantId())
+                        .get_value_or({})
+                        .first;
+
+    // Fail the current command, if 'reject: true' flag is present.
+    failIfRejectedBySettings(expCtx, settings);
+
+    return settings;
+}
+
+QuerySettings lookupQuerySettingsForAgg(
+    const boost::intrusive_ptr<ExpressionContext>& expCtx,
+    const AggregateCommandRequest& aggregateCommandRequest,
+    const Pipeline& pipeline,
+    const stdx::unordered_set<NamespaceString>& involvedNamespaces,
+    const NamespaceString& nss) {
+    // No query settings lookup on internal dbs or system collections in user dbs.
+    if (nss.isOnInternalDb() || nss.isSystem()) {
+        return query_settings::QuerySettings();
+    }
+
+    // No query settings for queries with encryption information.
+    if (aggregateCommandRequest.getEncryptionInformation()) {
+        return query_settings::QuerySettings();
+    }
+
+    // If query settings are present as part of the request, use them as opposed to performing the
+    // query settings lookup. In this case, no check for 'reject' setting will be made.
+    if (auto querySettings = aggregateCommandRequest.getQuerySettings()) {
+        return *querySettings;
+    }
+
+    // We need to use isEnabledUseLatestFCVWhenUninitialized instead of isEnabled because
+    // this could run during startup while the FCV is still uninitialized.
+    if (!feature_flags::gFeatureFlagQuerySettings.isEnabledUseLatestFCVWhenUninitialized(
+            serverGlobalParams.featureCompatibility.acquireFCVSnapshot())) {
+        return query_settings::QuerySettings();
+    }
+
+    auto* opCtx = expCtx->opCtx;
+    const auto& serializationContext = aggregateCommandRequest.getSerializationContext();
+    auto curOp = CurOp::get(opCtx);
+    auto& opDebug = curOp->debug();
+    auto hash = [&]() -> boost::optional<QueryShapeHash> {
+        if (opDebug.queryStatsInfo.key) {
+            return opDebug.queryStatsInfo.key->getQueryShapeHash(opCtx, serializationContext);
+        }
+        boost::optional<query_shape::AggCmdShape> shape;
+        try {
+            shape.emplace(aggregateCommandRequest, nss, involvedNamespaces, pipeline, expCtx);
+        } catch (ExceptionFor<ErrorCodes::BSONObjectTooLarge>&) {
+            return boost::none;
+        }
+        return shape->sha256Hash(opCtx, serializationContext);
+    }();
+    if (!hash) {
+        return query_settings::QuerySettings();
+    }
+    setQueryShapeHash(opCtx, hash);
+
+    // Return the found query settings or an empty one.
+    auto& manager = QuerySettingsManager::get(opCtx);
+    auto settings = manager.getQuerySettingsForQueryShapeHash(opCtx, *hash, nss.dbName().tenantId())
+                        .get_value_or({})
+                        .first;
+
+    // Fail the current command, if 'reject: true' flag is present.
+    failIfRejectedBySettings(expCtx, pipeline, settings);
+
+    return settings;
+}
+
+QuerySettings lookupQuerySettingsForDistinct(const boost::intrusive_ptr<ExpressionContext>& expCtx,
+                                             const ParsedDistinctCommand& parsedDistinct,
+                                             const NamespaceString& nss) {
+    // No query settings lookup on internal dbs or system collections in user dbs.
+    if (nss.isOnInternalDb() || nss.isSystem()) {
+        return query_settings::QuerySettings();
+    }
+
+    // If query settings are present as part of the request, use them as opposed to performing the
+    // query settings lookup. In this case, no check for 'reject' setting will be made.
+    if (auto querySettings = parsedDistinct.distinctCommandRequest->getQuerySettings()) {
+        return *querySettings;
+    }
+
+    // We need to use isEnabledUseLatestFCVWhenUninitialized instead of isEnabled because
+    // this could run during startup while the FCV is still uninitialized.
+    if (!feature_flags::gFeatureFlagQuerySettings.isEnabledUseLatestFCVWhenUninitialized(
+            serverGlobalParams.featureCompatibility.acquireFCVSnapshot())) {
+        return query_settings::QuerySettings();
+    }
+
+    auto* opCtx = expCtx->opCtx;
+    const auto& serializationContext =
+        parsedDistinct.distinctCommandRequest->getSerializationContext();
+    auto curOp = CurOp::get(opCtx);
+    auto& opDebug = curOp->debug();
+    auto hash = [&]() -> boost::optional<QueryShapeHash> {
+        if (opDebug.queryStatsInfo.key) {
+            return opDebug.queryStatsInfo.key->getQueryShapeHash(opCtx, serializationContext);
+        }
+        boost::optional<query_shape::DistinctCmdShape> shape;
+        try {
+            shape.emplace(parsedDistinct, expCtx);
+        } catch (ExceptionFor<ErrorCodes::BSONObjectTooLarge>&) {
+            return boost::none;
+        }
+        return shape->sha256Hash(expCtx->opCtx, serializationContext);
+    }();
+
+    if (!hash) {
+        return query_settings::QuerySettings();
+    }
+    setQueryShapeHash(opCtx, hash);
+
+    // Return the found query settings or an empty one.
+    auto& manager = QuerySettingsManager::get(opCtx);
+    auto settings = manager.getQuerySettingsForQueryShapeHash(opCtx, *hash, nss.dbName().tenantId())
+                        .get_value_or({})
+                        .first;
+
+    // Fail the current command, if 'reject: true' flag is present.
+    failIfRejectedBySettings(expCtx, settings);
+
+    return settings;
+}
+
 namespace utils {
 
-/**
- * Returns the namespace field of the hint, in case it is present. In case it is not present, it
- * returns the inferred namespace or throws an error if multiple collections are involved.
- */
-NamespaceString getHintNamespace(const mongo::query_settings::IndexHintSpec& hint,
-                                 const stdx::unordered_set<NamespaceString>& namespacesSet,
-                                 const boost::optional<TenantId>& tenantId) {
-    tassert(7746607, "involved namespaces cannot be empty!", !namespacesSet.empty());
-    const auto& ns = hint.getNs();
-    if (ns) {
-        return NamespaceStringUtil::deserialize(
-            tenantId, ns->getDb(), ns->getColl(), SerializationContext::stateDefault());
-    }
-    uassert(7746602,
-            str::stream() << "Hint: '" << hint.toBSON().toString()
-                          << "' does not contain a namespace field and more than one "
-                             "collection is involved the query",
-            namespacesSet.size() == 1);
-    // In case the namespace is not defined but there is only one collection involved,
-    // we can infer the namespace.
-    return *namespacesSet.begin();
+bool allowQuerySettingsFromClient(const Client* client) {
+    // Query settings are allowed to be part of the request only in cases when request:
+    // - comes from mongos (internal client), which has already performed the query settings lookup
+    // or
+    // - has been created interally and is executed via DBDirectClient.
+    return client->isInternalClient() || client->isInDirectClient();
+}
+
+bool isDefault(const QuerySettings& settings) {
+    // The 'serialization_context' field is not significant.
+    static_assert(QuerySettings::fieldNames.size() == 4,
+                  "A new field has been added to the QuerySettings structure, isDefault should be "
+                  "updated appropriately.");
+
+    // For the 'reject' field of type OptionalBool, consider both 'false' and missing value as
+    // default.
+    return !(settings.getQueryFramework() || settings.getIndexHints() || settings.getReject());
 }
 
 /**
- * Validates that `setQuerySettings` command namespace can naïvely be deduced
- * from the query shape if only one collection is involved. In case multiple collections are
- * involved, the method ensures that each index hint is used at most once.
- *
- * This method also checks that every index hint namespace specified refers to an “involved”
- * collection and that two index hints cannot refer to the same collection.
+ * Validates that no index hint applies to the same collection more than once.
  */
-void validateQuerySettingsNamespacesNotAmbiguous(
-    const QueryShapeConfiguration& config,
-    const RepresentativeQueryInfo& representativeQueryInfo,
-    const boost::optional<TenantId>& tenantId) {
+void validateQuerySettingsIndexHints(const auto& indexHints) {
     // If there are no index hints involved, no validation is required.
-    if (!config.getSettings().getIndexHints()) {
+    if (!indexHints) {
         return;
     }
 
-    auto hints = visit(
+    const auto& hints = visit(
         OverloadedVisitor{
             [](const std::vector<mongo::query_settings::IndexHintSpec>& hints) { return hints; },
             [](const mongo::query_settings::IndexHintSpec& hints) { return std::vector{hints}; },
         },
-        (*config.getSettings().getIndexHints()));
+        *indexHints);
 
-    auto& namespacesSet = representativeQueryInfo.involvedNamespaces;
     stdx::unordered_map<NamespaceString, mongo::query_settings::IndexHintSpec>
         collectionsWithAppliedIndexHints;
     for (const auto& hint : hints) {
-        NamespaceString nss = getHintNamespace(hint, namespacesSet, tenantId);
-
-        uassert(7746603,
-                str::stream() << "Namespace: '" << nss.toStringForErrorMsg()
-                              << "' does not refer to any involved collection",
-                namespacesSet.contains(nss));
-
+        uassert(8727500,
+                "invalid index hint: 'ns.db' field is missing",
+                hint.getNs().getDb().has_value());
+        uassert(8727501,
+                "invalid index hint: 'ns.coll' field is missing",
+                hint.getNs().getColl().has_value());
+        auto nss = NamespaceStringUtil::deserialize(*hint.getNs().getDb(), *hint.getNs().getColl());
         auto [it, emplaced] = collectionsWithAppliedIndexHints.emplace(nss, hint);
         uassert(7746608,
-                str::stream() << "Collections can be applied at most one index hint, but indices '"
+                str::stream() << "Collection '"
                               << collectionsWithAppliedIndexHints[nss].toBSON().toString()
-                              << "' and '" << hint.toBSON().toString()
-                              << "' refer to the same collection",
+                              << "' has already index hints specified",
                 emplaced);
     }
 }
@@ -301,7 +577,7 @@ void validateQuerySettingsNamespacesNotAmbiguous(
  * Validates that QueryShapeConfiguration is not specified for queries with queryable encryption.
  */
 void validateQuerySettingsEncryptionInformation(
-    const QueryShapeConfiguration& config, const RepresentativeQueryInfo& representativeQueryInfo) {
+    const RepresentativeQueryInfo& representativeQueryInfo) {
     uassert(7746600,
             "Queries with encryption information are not allowed on setQuerySettings commands",
             !representativeQueryInfo.encryptionInformation);
@@ -316,22 +592,80 @@ void validateQuerySettingsEncryptionInformation(
             !containsFLE2StateCollection);
 }
 
-void validateQuerySettings(const QueryShapeConfiguration& config,
-                           const RepresentativeQueryInfo& representativeQueryInfo,
-                           const boost::optional<TenantId>& tenantId) {
-    // Validates that the settings field for query settings is not empty.
-    uassert(7746604,
-            "settings field in setQuerySettings command cannot be empty",
-            !config.getSettings().toBSON().isEmpty());
+void validateRepresentativeQuery(const RepresentativeQueryInfo& representativeQueryInfo) {
+    if (MONGO_unlikely(allowAllSetQuerySettings.shouldFail())) {
+        return;
+    }
+    uassert(8584900,
+            "setQuerySettings command cannot be used on internal databases",
+            !representativeQueryInfo.namespaceString.isOnInternalDb());
 
-    validateQuerySettingsEncryptionInformation(config, representativeQueryInfo);
+    uassert(8584901,
+            "setQuerySettings command cannot be used on system collections",
+            !representativeQueryInfo.namespaceString.isSystem());
+
+    validateQuerySettingsEncryptionInformation(representativeQueryInfo);
 
     // Validates that the query settings' representative is not eligible for IDHACK.
     uassert(7746606,
             "setQuerySettings command cannot be used on find queries eligible for IDHACK",
             !representativeQueryInfo.isIdHackQuery);
+}
 
-    validateQuerySettingsNamespacesNotAmbiguous(config, representativeQueryInfo, tenantId);
+void validateQuerySettings(const QuerySettings& querySettings) {
+    // Validates that the settings field for query settings is not empty.
+    uassert(7746604,
+            "the resulting settings cannot be empty or contain only default values",
+            !isDefault(querySettings));
+
+    validateQuerySettingsIndexHints(querySettings.getIndexHints());
+}
+
+void verifyQueryCompatibleWithSettings(const RepresentativeQueryInfo& representativeQueryInfo,
+                                       const QuerySettings& settings) {
+    if (MONGO_unlikely(allowAllSetQuerySettings.shouldFail())) {
+        return;
+    }
+    uassert(8705200,
+            str::stream() << "Setting {reject:true} is forbidden for query containing stage: "
+                          << *representativeQueryInfo.systemStage,
+            !(settings.getReject() && representativeQueryInfo.systemStage.has_value()));
+}
+
+void simplifyQuerySettings(QuerySettings& settings) {
+    // If reject is present, but is false, set to an empty optional.
+    if (settings.getReject().has_value() && !settings.getReject()) {
+        settings.setReject({});
+    }
+
+    const auto& indexes = settings.getIndexHints();
+    if (!indexes) {
+        return;
+    }
+
+    // Remove index hints where list of allowed indexes is empty.
+    std::visit(OverloadedVisitor{
+                   [&](const IndexHintSpec& indexHintSpec) {
+                       if (indexHintSpec.getAllowedIndexes().empty()) {
+                           settings.setIndexHints(boost::none);
+                       }
+                   },
+                   [&](const std::vector<IndexHintSpec>& indexHints) {
+                       std::vector<IndexHintSpec> simplifiedIndexHints;
+                       std::copy_if(
+                           indexHints.begin(),
+                           indexHints.end(),
+                           std::back_inserter(simplifiedIndexHints),
+                           [](const auto& spec) { return !spec.getAllowedIndexes().empty(); });
+
+                       if (simplifiedIndexHints.empty()) {
+                           settings.setIndexHints(boost::none);
+                       } else {
+                           settings.setIndexHints({{std::move(simplifiedIndexHints)}});
+                       }
+                   },
+               },
+               *indexes);
 }
 
 }  // namespace utils

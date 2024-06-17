@@ -44,7 +44,6 @@
 #include "mongo/db/cloner.h"
 #include "mongo/db/cluster_role.h"
 #include "mongo/db/commands.h"
-#include "mongo/db/commands/feature_compatibility_version.h"
 #include "mongo/db/database_name.h"
 #include "mongo/db/dbdirectclient.h"
 #include "mongo/db/namespace_string.h"
@@ -58,7 +57,6 @@
 #include "mongo/s/catalog/sharding_catalog_client.h"
 #include "mongo/s/grid.h"
 #include "mongo/s/request_types/clone_catalog_data_gen.h"
-#include "mongo/s/sharding_feature_flags_gen.h"
 #include "mongo/s/sharding_state.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/database_name_util.h"
@@ -73,7 +71,6 @@ namespace {
 void cloneDatabase(OperationContext* opCtx,
                    const DatabaseName& dbName,
                    StringData from,
-                   bool cloneOnlyUntrackedColls,
                    BSONObjBuilder& result) {
     std::vector<NamespaceString> trackedColls;
     auto const catalogClient = Grid::get(opCtx)->catalogClient();
@@ -83,11 +80,8 @@ void cloneDatabase(OperationContext* opCtx,
         catalogClient->getDatabase(opCtx, dbName, repl::ReadConcernLevel::kMajorityReadConcern)
             .getPrimary()
             .toString();
-    auto unsplittableCollections = cloneOnlyUntrackedColls
-        ? catalogClient->getUnsplittableCollectionNamespacesForDb(
-              opCtx, dbName, repl::ReadConcernLevel::kMajorityReadConcern, {})
-        : catalogClient->getUnsplittableCollectionNamespacesForDbOutsideOfShards(
-              opCtx, dbName, {databasePrimary}, repl::ReadConcernLevel::kMajorityReadConcern);
+    auto unsplittableCollections = catalogClient->getUnsplittableCollectionNamespacesForDb(
+        opCtx, dbName, repl::ReadConcernLevel::kMajorityReadConcern, {});
 
     std::move(unsplittableCollections.begin(),
               unsplittableCollections.end(),
@@ -97,17 +91,8 @@ void cloneDatabase(OperationContext* opCtx,
 
     // Clone the non-ignored collections.
     std::set<std::string> clonedColls;
-    bool forceSameUUIDAsSource = false;
-    {
-        FixedFCVRegion fcvRegion{opCtx};
-        forceSameUUIDAsSource =
-            feature_flags::gTrackUnshardedCollectionsOnShardingCatalog.isEnabled(
-                (*fcvRegion).acquireFCVSnapshot());
-    }
-
     Cloner cloner;
-    uassertStatusOK(cloner.copyDb(
-        opCtx, dbName, from.toString(), trackedColls, forceSameUUIDAsSource, &clonedColls));
+    uassertStatusOK(cloner.copyDb(opCtx, dbName, from.toString(), trackedColls, &clonedColls));
     {
         BSONArrayBuilder cloneBarr = result.subarrayStart("clonedColls");
         cloneBarr.append(clonedColls);
@@ -133,15 +118,15 @@ public:
         return AllowedOnSecondary::kNever;
     }
 
-    virtual bool adminOnly() const {
+    bool adminOnly() const override {
         return true;
     }
 
-    virtual bool supportsWriteConcern(const BSONObj& cmd) const override {
+    bool supportsWriteConcern(const BSONObj& cmd) const override {
         return true;
     }
 
-    virtual bool supportsRetryableWrite() const override {
+    bool supportsRetryableWrite() const override {
         return true;
     }
 
@@ -190,12 +175,6 @@ public:
                 str::stream() << "Can't run _shardsvrCloneCatalogData without a source",
                 !from.empty());
 
-        // If cloneOnlyUntrackedColls is true, the cloner will only copy data for collections not
-        // tracked on the config server (config, system, and admin collections plus any created via
-        // direct connection). If this is false, the cloner will also copy data for tracked
-        // collections that live on the current dbPrimary.
-        auto cloneOnlyUntrackedColls = cloneCatalogDataRequest.getCloneOnlyUntrackedColls();
-
         // For newer versions, execute the operation in another operation context with local write
         // concern to prevent doing waits while we're holding resources (we have a session checked
         // out).
@@ -215,7 +194,7 @@ public:
                     ->grantInternalAuthorization(newOpCtxPtr.get()->getClient());
                 newOpCtxPtr->setWriteConcern(ShardingCatalogClient::kLocalWriteConcern);
                 WriteBlockBypass::get(newOpCtxPtr.get()).set(true);
-                cloneDatabase(newOpCtxPtr.get(), dbName, from, cloneOnlyUntrackedColls, result);
+                cloneDatabase(newOpCtxPtr.get(), dbName, from, result);
             }
             // Since no write happened on this txnNumber, we need to make a dummy write to protect
             // against older requests with old txnNumbers.
@@ -227,7 +206,7 @@ public:
                           true /* upsert */,
                           false /* multi */);
         } else {
-            cloneDatabase(opCtx, dbName, from, cloneOnlyUntrackedColls, result);
+            cloneDatabase(opCtx, dbName, from, result);
         }
         return true;
     }

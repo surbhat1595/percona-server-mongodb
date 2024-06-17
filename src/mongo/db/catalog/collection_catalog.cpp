@@ -222,7 +222,7 @@ bool isCSFLE1Validator(BSONObj doc) {
  */
 class CollectionCatalogSection final : public ServerStatusSection {
 public:
-    CollectionCatalogSection() : ServerStatusSection("collectionCatalog") {}
+    using ServerStatusSection::ServerStatusSection;
 
     bool includeByDefault() const override {
         return true;
@@ -236,7 +236,10 @@ public:
     }
 
     AtomicWord<long long> numScansDueToMissingMapping;
-} gCollectionCatalogSection;
+};
+
+auto& gCollectionCatalogSection =
+    *ServerStatusSectionBuilder<CollectionCatalogSection>("collectionCatalog").forShard();
 
 class IgnoreExternalViewChangesForDatabase {
 public:
@@ -822,8 +825,13 @@ Status CollectionCatalog::createView(OperationContext* opCtx,
     invariant(shard_role_details::getLocker(opCtx)->isCollectionLockedForMode(
         NamespaceString::makeSystemDotViewsNamespace(viewName.dbName()), MODE_X));
 
-    invariant(_viewsForDatabase.find(viewName.dbName()));
-    const ViewsForDatabase& viewsForDb = *_getViewsForDatabase(opCtx, viewName.dbName());
+    auto optViewsForDB = _getViewsForDatabase(opCtx, viewName.dbName());
+    if (!optViewsForDB) {
+        return Status(ErrorCodes::NamespaceNotFound,
+                      str::stream() << "cannot create view on non existing database "
+                                    << viewName.toStringForErrorMsg());
+    }
+    const ViewsForDatabase& viewsForDb = *optViewsForDB;
 
     auto& uncommittedCatalogUpdates = UncommittedCatalogUpdates::get(opCtx);
     if (uncommittedCatalogUpdates.shouldIgnoreExternalViewChanges(viewName.dbName())) {
@@ -870,8 +878,14 @@ Status CollectionCatalog::modifyView(
     invariant(shard_role_details::getLocker(opCtx)->isCollectionLockedForMode(viewName, MODE_X));
     invariant(shard_role_details::getLocker(opCtx)->isCollectionLockedForMode(
         NamespaceString::makeSystemDotViewsNamespace(viewName.dbName()), MODE_X));
-    invariant(_viewsForDatabase.find(viewName.dbName()));
-    const ViewsForDatabase& viewsForDb = *_getViewsForDatabase(opCtx, viewName.dbName());
+
+    auto optViewsForDB = _getViewsForDatabase(opCtx, viewName.dbName());
+    if (!optViewsForDB) {
+        return Status(ErrorCodes::NamespaceNotFound,
+                      str::stream() << "cannot modify view on non existing database "
+                                    << viewName.toStringForErrorMsg());
+    }
+    const ViewsForDatabase& viewsForDb = *optViewsForDB;
 
     if (!viewName.isEqualDb(viewOn))
         return Status(ErrorCodes::BadValue,
@@ -916,8 +930,14 @@ Status CollectionCatalog::dropView(OperationContext* opCtx, const NamespaceStrin
     invariant(shard_role_details::getLocker(opCtx)->isCollectionLockedForMode(viewName, MODE_IX));
     invariant(shard_role_details::getLocker(opCtx)->isCollectionLockedForMode(
         NamespaceString::makeSystemDotViewsNamespace(viewName.dbName()), MODE_X));
-    invariant(_viewsForDatabase.find(viewName.dbName()));
-    const ViewsForDatabase& viewsForDb = *_getViewsForDatabase(opCtx, viewName.dbName());
+
+    auto optViewsForDB = _getViewsForDatabase(opCtx, viewName.dbName());
+    if (!optViewsForDB) {
+        // If the database does not exist, the view does not exist either
+        return Status::OK();
+    }
+    const ViewsForDatabase& viewsForDb = *optViewsForDB;
+
     assertViewCatalogValid(viewsForDb);
     if (!viewsForDb.lookup(viewName)) {
         return Status::OK();
@@ -1410,6 +1430,18 @@ std::shared_ptr<Collection> CollectionCatalog::_createCompatibleCollection(
         return dropPendingColl;
     }
 
+    // Protect against an edge case where the same namespace / UUID combination is used to create a
+    // collection after a drop. In this case, using the shared state in the latest instance would be
+    // an error, because the collection at the requested timestamp is not actually the same as the
+    // latest, it just happens to have the same namespace and UUID. Even if it were the same
+    // "logical" collection, this would still be incorrect because the 'ident' would be different,
+    // and the PIT read would be accessing an incorrect ident. The 'ident' is guaranteed to be
+    // unique across collection re-creation, and can be used to determine if the shared state is
+    // incompatible.
+    if (latestCollection && latestCollection->getRecordStore()->getIdent() != catalogEntry.ident) {
+        return nullptr;
+    }
+
     // If either the latest or drop pending collection exists, instantiate a new collection using
     // the shared state.
     if (latestCollection || dropPendingColl) {
@@ -1637,9 +1669,6 @@ Collection* CollectionCatalog::lookupCollectionByUUIDForMetadataWrite(OperationC
     if (!coll)
         return nullptr;
 
-    if (coll->ns().isOplog())
-        return coll.get();
-
     invariant(shard_role_details::getLocker(opCtx)->isCollectionLockedForMode(coll->ns(), MODE_X));
 
     // Skip cloning and return directly if allowed.
@@ -1729,11 +1758,6 @@ std::shared_ptr<const Collection> CollectionCatalog::_getCollectionByNamespace(
 
 Collection* CollectionCatalog::lookupCollectionByNamespaceForMetadataWrite(
     OperationContext* opCtx, const NamespaceString& nss) const {
-    // Oplog is special and can only be modified in a few contexts. It is modified inplace and care
-    // need to be taken for concurrency.
-    if (nss.isOplog()) {
-        return const_cast<Collection*>(lookupCollectionByNamespace(opCtx, nss));
-    }
 
     auto& uncommittedCatalogUpdates = UncommittedCatalogUpdates::get(opCtx);
     auto [found, uncommittedPtr, newColl] = UncommittedCatalogUpdates::lookupCollection(opCtx, nss);
@@ -1982,20 +2006,22 @@ NamespaceString CollectionCatalog::resolveNamespaceStringOrUUID(
         return nsOrUUID.nss();
     }
 
-    auto resolvedNss = lookupNSSByUUID(opCtx, nsOrUUID.uuid());
+    return resolveNamespaceStringFromDBNameAndUUID(opCtx, nsOrUUID.dbName(), nsOrUUID.uuid());
+}
 
+NamespaceString CollectionCatalog::resolveNamespaceStringFromDBNameAndUUID(
+    OperationContext* opCtx, const DatabaseName& dbName, const UUID& uuid) const {
+    auto resolvedNss = lookupNSSByUUID(opCtx, uuid);
     uassert(ErrorCodes::NamespaceNotFound,
-            str::stream() << "Unable to resolve " << nsOrUUID.toStringForErrorMsg(),
+            str::stream() << "Unable to resolve " << uuid.toString(),
             resolvedNss && resolvedNss->isValid());
 
     uassert(ErrorCodes::NamespaceNotFound,
-            str::stream() << "UUID: " << nsOrUUID.toStringForErrorMsg()
-                          << " specified in provided db name: "
-                          << nsOrUUID.dbName().toStringForErrorMsg()
+            str::stream() << "UUID: " << uuid.toString()
+                          << " specified in provided db name: " << dbName.toStringForErrorMsg()
                           << " resolved to a collection in a different database, resolved nss: "
                           << (*resolvedNss).toStringForErrorMsg(),
-            resolvedNss->dbName() == nsOrUUID.dbName());
-
+            resolvedNss->dbName() == dbName);
     return std::move(*resolvedNss);
 }
 

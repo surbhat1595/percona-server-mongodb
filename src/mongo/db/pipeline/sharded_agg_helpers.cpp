@@ -59,6 +59,7 @@
 #include "mongo/crypto/sha256_block.h"
 #include "mongo/db/basic_types_gen.h"
 #include "mongo/db/commands.h"
+#include "mongo/db/commands/feature_compatibility_version.h"
 #include "mongo/db/curop.h"
 #include "mongo/db/exec/document_value/document_metadata_fields.h"
 #include "mongo/db/exec/document_value/value.h"
@@ -90,6 +91,7 @@
 #include "mongo/db/query/cursor_response.h"
 #include "mongo/db/query/cursor_response_gen.h"
 #include "mongo/db/query/query_request_helper.h"
+#include "mongo/db/query/query_stats/query_stats.h"
 #include "mongo/db/repl/read_concern_args.h"
 #include "mongo/db/session/logical_session_id.h"
 #include "mongo/db/session/logical_session_id_gen.h"
@@ -97,6 +99,7 @@
 #include "mongo/db/write_concern_options.h"
 #include "mongo/executor/remote_command_response.h"
 #include "mongo/executor/task_executor.h"
+#include "mongo/idl/generic_argument_gen.h"
 #include "mongo/idl/idl_parser.h"
 #include "mongo/logv2/log.h"
 #include "mongo/logv2/log_attr.h"
@@ -120,6 +123,7 @@
 #include "mongo/s/router_role.h"
 #include "mongo/s/shard_key_pattern.h"
 #include "mongo/s/shard_version.h"
+#include "mongo/s/sharding_feature_flags_gen.h"
 #include "mongo/s/sharding_state.h"
 #include "mongo/s/stale_exception.h"
 #include "mongo/s/transaction_router.h"
@@ -147,6 +151,7 @@ MONGO_FAIL_POINT_DEFINE(shardedAggregateHangBeforeEstablishingShardCursors);
 struct TargetingResults {
     BSONObj shardQuery;
     BSONObj shardTargetingCollation;
+    boost::optional<ShardId> mergeShardId;
     std::set<ShardId> shardIds;
     bool needsSplit;
     bool mustRunOnAllShards;
@@ -225,13 +230,6 @@ BSONObj genericTransformForShards(MutableDocument&& cmdForShards,
     if (auto collationObj = expCtx->getCollatorBSON();
         !collationObj.isEmpty() && !expCtx->getIgnoreCollator()) {
         cmdForShards[AggregateCommandRequest::kCollationFieldName] = Value(collationObj);
-    }
-
-    // Pass query settings of the original request to the shards.
-    if (auto querySettingsBSON = expCtx->getQuerySettings().toBSON();
-        !querySettingsBSON.isEmpty()) {
-        cmdForShards[AggregateCommandRequest::kQuerySettingsFieldName] =
-            Value(std::move(querySettingsBSON));
     }
 
     // If this is a request for an aggregation explain, then we must wrap the aggregate inside an
@@ -851,16 +849,10 @@ bool isRequiredToReadLocalData(const ShardTargetingPolicy& shardTargetingPolicy,
                                const NamespaceString& ns) {
     // Certain namespaces are shard-local; that is, they exist independently on every shard. For
     // these namespaces, a local cursor should always be used.
-    // TODO SERVER-59957: use NamespaceString::isPerShardNamespace instead.
-    auto shouldAlwaysAttachLocalCursorForNamespace = [](const NamespaceString& ns) {
-        return (ns.isLocalDB() || ns.isConfigDotCacheDotChunks() ||
-                ns.isReshardingLocalOplogBufferCollection() ||
-                ns == NamespaceString::kConfigImagesNamespace ||
-                ns.isChangeStreamPreImagesCollection());
-    };
+    const bool shouldAlwaysAttachLocalCursorForNamespace = ns.isShardLocalNamespace();
 
     return shardTargetingPolicy == ShardTargetingPolicy::kNotAllowed ||
-        shouldAlwaysAttachLocalCursorForNamespace(ns);
+        shouldAlwaysAttachLocalCursorForNamespace;
 }
 
 /**
@@ -905,11 +897,20 @@ std::unique_ptr<Pipeline, PipelineDeleter> tryAttachCursorSourceForLocalRead(
     const ShardId& localShardId) {
     try {
         const auto& cm = targetingCri.cm;
+        auto shardVersion = [&] {
+            auto sv = cm.hasRoutingTable() ? targetingCri.getShardVersion(localShardId)
+                                           : ShardVersion::UNSHARDED();
+            if (auto txnRouter = TransactionRouter::get(opCtx)) {
+                if (auto optOriginalPlacementConflictTime = txnRouter.getPlacementConflictTime()) {
+                    sv.setPlacementConflictTime(*optOriginalPlacementConflictTime);
+                }
+            }
+            return sv;
+        }();
         ScopedSetShardRole shardRole{
             opCtx,
             expCtx.ns,
-            cm.hasRoutingTable() ? targetingCri.getShardVersion(localShardId)
-                                 : ShardVersion::UNSHARDED(),
+            shardVersion,
             boost::optional<DatabaseVersion>{!cm.hasRoutingTable(), cm.dbVersion()}};
 
         // TODO SERVER-77402 Wrap this in a shardRoleRetry loop instead of
@@ -1032,6 +1033,16 @@ SplitPipeline splitPipeline(std::unique_ptr<Pipeline, PipelineDeleter> pipeline)
     // half to the shards, as possible.
     auto mergePipeline = std::move(pipeline);
 
+    // Before splitting the pipeline, we need to do dependency analysis to validate if we have text
+    // score metadata. This is because the planner will not have any way of knowing whether the
+    // split half provides this metadata after shards are targeted, because the shard executing the
+    // merging half only sees a $mergeCursors stage.
+    auto queryObj = mergePipeline->getInitialQuery();
+    auto unavailableMetadata = DocumentSourceMatch::isTextQuery(queryObj)
+        ? DepsTracker::kNoMetadata
+        : DepsTracker::kOnlyTextScore;
+    mergePipeline->getDependencies(unavailableMetadata);
+
     auto [shardsPipeline, inputsSort] = findSplitPoint(mergePipeline.get());
 
     // The order in which optimizations are applied can have significant impact on the efficiency of
@@ -1074,15 +1085,39 @@ BSONObj createPassthroughCommandForShard(
         }
     }
 
+    if (query_stats::shouldRequestRemoteMetrics(CurOp::get(expCtx->opCtx)->debug())) {
+        targetedCmd[AggregateCommandRequest::kIncludeQueryStatsMetricsFieldName] = Value(true);
+    }
     auto shardCommand = genericTransformForShards(
         std::move(targetedCmd), expCtx, explainVerbosity, std::move(readConcern));
 
     // Apply filter and RW concern to the final shard command.
-    return CommandHelpers::filterCommandRequestForPassthrough(
+    auto filteredCommand = CommandHelpers::filterCommandRequestForPassthrough(
         applyReadWriteConcern(expCtx->opCtx,
                               true,              /* appendRC */
                               !explainVerbosity, /* appendWC */
                               shardCommand));
+
+    // Request the targeted shard to gossip back the routing metadata versions for the involved
+    // collections.
+    if (pipeline &&
+        feature_flags::gShardedAggregationCatalogCacheGossiping.isEnabled(
+            serverGlobalParams.featureCompatibility.acquireFCVSnapshot())) {
+        BSONArrayBuilder arrayBuilder;
+        for (const auto& nss : pipeline->getInvolvedCollections()) {
+            arrayBuilder.append(
+                NamespaceStringUtil::serialize(nss, SerializationContext::stateDefault()));
+        }
+
+        if (arrayBuilder.arrSize() > 0) {
+            filteredCommand = filteredCommand.addField(
+                BSON(Generic_args_unstable_v1::kRequestGossipRoutingCacheFieldName
+                     << arrayBuilder.arr())
+                    .firstElement());
+        }
+    }
+
+    return filteredCommand;
 }
 
 BSONObj createCommandForTargetedShards(const boost::intrusive_ptr<ExpressionContext>& expCtx,
@@ -1116,11 +1151,31 @@ BSONObj createCommandForTargetedShards(const boost::intrusive_ptr<ExpressionCont
         }
     }
 
+    // Request the targeted shards to gossip back the routing metadata versions for the involved
+    // collections.
+    if (feature_flags::gShardedAggregationCatalogCacheGossiping.isEnabled(
+            serverGlobalParams.featureCompatibility.acquireFCVSnapshot())) {
+        BSONArrayBuilder arrayBuilder;
+        for (const auto& nss : splitPipeline.shardsPipeline->getInvolvedCollections()) {
+            arrayBuilder.append(
+                NamespaceStringUtil::serialize(nss, SerializationContext::stateDefault()));
+        }
+
+        if (arrayBuilder.arrSize() > 0) {
+            targetedCmd[Generic_args_unstable_v1::kRequestGossipRoutingCacheFieldName] =
+                Value(arrayBuilder.arr());
+        }
+    }
+
     targetedCmd[AggregateCommandRequest::kCursorFieldName] =
         Value(DOC(aggregation_request_helper::kBatchSizeField << 0));
 
     targetedCmd[AggregateCommandRequest::kExchangeFieldName] =
         exchangeSpec ? Value(exchangeSpec->exchangeSpec.toBSON()) : Value();
+
+    if (query_stats::shouldRequestRemoteMetrics(CurOp::get(expCtx->opCtx)->debug())) {
+        targetedCmd[AggregateCommandRequest::kIncludeQueryStatsMetricsFieldName] = Value(true);
+    }
 
     auto shardCommand =
         genericTransformForShards(std::move(targetedCmd), expCtx, explain, std::move(readConcern));
@@ -1137,9 +1192,6 @@ TargetingResults targetPipeline(const boost::intrusive_ptr<ExpressionContext>& e
                                 PipelineDataSource pipelineDataSource,
                                 ShardTargetingPolicy shardTargetingPolicy,
                                 const boost::optional<CollectionRoutingInfo>& cri) {
-    const bool needsPrimaryShardMerge =
-        (pipeline->needsPrimaryShardMerger() || internalQueryAlwaysMergeOnPrimaryShard.load());
-
     const bool needsMongosMerge = pipeline->needsMongosMerger();
 
     auto shardQuery = pipeline->getInitialQuery();
@@ -1166,16 +1218,16 @@ TargetingResults targetPipeline(const boost::intrusive_ptr<ExpressionContext>& e
 
     bool targetAllHosts = pipeline->needsAllShardHosts();
     // Don't need to split the pipeline if we are only targeting a single shard, unless:
-    // - There is a stage that needs to be run on the primary shard and the single target shard
-    //   is not the primary.
     // - The pipeline contains one or more stages which must always merge on mongoS.
     // - The pipeline requires the merge to be performed on a specific shard that is not targeted.
-    // TODO SERVER-79583: This reference to dbPrimary can be removed once
-    // HostTypeRequirement::kPrimaryShard is no longer used.
-    const bool needsSplit =
-        (shardIds.size() > 1u || needsMongosMerge || targetAllHosts ||
-         (needsPrimaryShardMerge && cri && *(shardIds.begin()) != cri->cm.dbPrimary())) ||
+    const bool needsSplit = (shardIds.size() > 1u) || needsMongosMerge || targetAllHosts ||
         (mergeShardId && *(shardIds.begin()) != mergeShardId);
+
+    if (mergeShardId) {
+        tassert(8561400,
+                "Expected no mergeShardId, or a valid one; got " + mergeShardId->toString(),
+                mergeShardId->isValid());
+    }
 
     // A $changeStream pipeline must run on all shards, and will also open an extra cursor on the
     // config server in order to monitor for new shards. To guarantee that we do not miss any
@@ -1203,6 +1255,7 @@ TargetingResults targetPipeline(const boost::intrusive_ptr<ExpressionContext>& e
 
     return {std::move(shardQuery),
             shardTargetingCollation,
+            mergeShardId,
             std::move(shardIds),
             needsSplit,
             mustRunOnAllShards,
@@ -1288,6 +1341,7 @@ DispatchShardPipelineResults dispatchTargetedShardPipeline(
 
     const auto& [shardQuery,
                  shardTargetingCollation,
+                 mergeShardId,
                  shardIds,
                  needsSplit,
                  mustRunOnAllShards,
@@ -1309,16 +1363,16 @@ DispatchShardPipelineResults dispatchTargetedShardPipeline(
     boost::optional<ShardedExchangePolicy> exchangeSpec;
     boost::optional<SplitPipeline> splitPipelines;
     const bool targetAllHosts = pipeline->needsAllShardHosts();
-    const bool needsPrimaryShardMerger = pipeline->needsPrimaryShardMerger();
 
     if (needsSplit) {
         LOGV2_DEBUG(20906,
                     5,
                     "Splitting pipeline: targeting = {shardIds_size} shards, needsMongosMerge = "
-                    "{needsMongosMerge}, needsPrimaryShardMerge = {needsPrimaryShardMerge}",
+                    "{needsMongosMerge}, needsSpecificShardMerger = {needsSpecificShardMerger}",
                     "shardIds_size"_attr = shardCount,
                     "needsMongosMerge"_attr = pipeline->needsMongosMerger(),
-                    "needsPrimaryShardMerge"_attr = pipeline->needsPrimaryShardMerger());
+                    "needsSpecificShardMerger"_attr =
+                        mergeShardId.has_value() ? mergeShardId->toString() : "false");
         splitPipelines = splitPipeline(std::move(pipeline));
 
         // If the first stage of the pipeline is a $search stage, exchange optimization isn't
@@ -1408,15 +1462,12 @@ DispatchShardPipelineResults dispatchTargetedShardPipeline(
     }
 
     // Record the number of shards involved in the aggregation. If we are required to merge on
-    // the primary shard, but the primary shard was not in the set of targeted shards, then we
+    // a specific shard, but the merging shard was not in the set of targeted shards, then we
     // must increment the number of involved shards.
-    // TODO SERVER-79583: Revisit this computation. In particular, even when we are no longer
-    // merging on the primary shard specifically, we may need to account for the chase where the
-    // merging shard is not in 'shardIds'.
     CurOp::get(opCtx)->debug().nShards =
-        shardCount + (needsPrimaryShardMerger && cri && !shardIds.count(cri->cm.dbPrimary()));
+        shardCount + (mergeShardId && !shardIds.count(*mergeShardId));
 
-    return DispatchShardPipelineResults{needsPrimaryShardMerger,
+    return DispatchShardPipelineResults{std::move(mergeShardId),
                                         std::move(ownedCursors),
                                         std::move(shardResults),
                                         std::move(splitPipelines),
@@ -1453,8 +1504,11 @@ DispatchShardPipelineResults dispatchShardPipeline(
 
     // Return if we don't need to establish any cursors.
     if (shardIds.empty()) {
+        tassert(7958303,
+                "Expected no merge shard id when shardIds are empty",
+                !targeting.mergeShardId.has_value());
         return DispatchShardPipelineResults{
-            false, {}, {}, boost::none, nullptr, BSONObj(), 0, boost::none};
+            boost::none, {}, {}, boost::none, nullptr, BSONObj(), 0, boost::none};
     }
     return dispatchTargetedShardPipeline(std::move(serializedCommand),
                                          targeting,
@@ -1478,6 +1532,8 @@ AsyncResultsMergerParams buildArmParams(boost::intrusive_ptr<ExpressionContext> 
     armParams.setSort(std::move(shardCursorsSortSpec));
     armParams.setTailableMode(expCtx->tailableMode);
     armParams.setNss(expCtx->ns);
+    armParams.setRequestQueryStatsFromRemotes(
+        query_stats::shouldRequestRemoteMetrics(CurOp::get(expCtx->opCtx)->debug()));
 
     if (auto lsid = expCtx->opCtx->getLogicalSessionId()) {
         OperationSessionInfoFromClient sessionInfo(*lsid, expCtx->opCtx->getTxnNumber());
@@ -1604,7 +1660,7 @@ Status appendExplainResults(DispatchShardPipelineResults&& dispatchResults,
                             BSONObjBuilder* result) {
     if (dispatchResults.splitPipeline) {
         auto* mergePipeline = dispatchResults.splitPipeline->mergePipeline.get();
-        auto specificMergeShardId = mergePipeline->needsSpecificShardMerger();
+        auto specificMergeShardId = dispatchResults.mergeShardId;
         auto mergeType = [&]() -> std::string {
             if (mergePipeline->canRunOnMongos().isOK() && !specificMergeShardId) {
                 if (mergeCtx->inMongos) {
@@ -1613,8 +1669,6 @@ Status appendExplainResults(DispatchShardPipelineResults&& dispatchResults,
                 return "local";
             } else if (dispatchResults.exchangeSpec) {
                 return "exchange";
-            } else if (mergePipeline->needsPrimaryShardMerger()) {
-                return "primaryShard";
             } else if (specificMergeShardId) {
                 return "specificShard";
             } else {
@@ -1680,6 +1734,11 @@ Status appendExplainResults(DispatchShardPipelineResults&& dispatchResults,
         const auto& data = shardResult.swResponse.getValue().data;
         BSONObjBuilder explain(shardExplains.subobjStart(shardId));
         explain << "host" << shardResult.shardHostAndPort->toString();
+
+        // Add the per shard explainVersion to the final explain output.
+        auto explainVersion = data["explainVersion"];
+        explain << "explainVersion" << explainVersion;
+
         if (auto stagesElement = data["stages"]) {
             explain << "stages" << stagesElement;
         } else {
@@ -1869,6 +1928,7 @@ std::unique_ptr<Pipeline, PipelineDeleter> targetShardsAndAddMergeCursors(
     auto cri = getCollectionRoutingInfoForTargeting(expCtx, pipelineDataSource);
     auto targeting =
         targetPipeline(expCtx, pipeline.get(), pipelineDataSource, shardTargetingPolicy, cri);
+
     return dispatchTargetedPipelineAndAddMergeCursors(expCtx,
                                                       std::move(aggRequest),
                                                       std::move(pipeline),

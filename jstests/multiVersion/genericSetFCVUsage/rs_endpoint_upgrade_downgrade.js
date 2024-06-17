@@ -2,7 +2,10 @@
  * Tests that as long as the replica set endpoint enabled, the connection to a standalone or replica
  * set works across upgrade and downgrade.
  *
- * @tags: [featureFlagEmbeddedRouter]
+ * @tags: [
+ *    featureFlagRouterPort,
+ *    requires_fcv_80,
+ * ]
  */
 
 import "jstests/multiVersion/libs/multi_rs.js";
@@ -13,6 +16,16 @@ import {
     makeStandaloneConnectionString,
     waitForAutoBootstrap
 } from "jstests/noPassthrough/rs_endpoint/lib/util.js";
+
+function reconnect(conn) {
+    try {
+        assert.commandWorked(conn.adminCommand({hello: 1}));
+    } catch (e) {
+        // For replica set connection strings, the shell has internal auto-reconnect logic
+        // so the first command doesn't always fail.
+        assert(isNetworkError(e), e);
+    }
+}
 
 function runTest(connString, getShard0PrimaryFunc, upgradeFunc, downgradeFunc, tearDownFunc) {
     jsTest.log("Running tests for connection string: " + connString);
@@ -31,25 +44,22 @@ function runTest(connString, getShard0PrimaryFunc, upgradeFunc, downgradeFunc, t
         shard0Primary.adminCommand({transitionToShardedCluster: 1, writeConcern: {w: "majority"}}));
     waitForAutoBootstrap(shard0Primary);
 
-    if (!connString.includes("replicaSet=")) {
-        // For a standalone connection string, the shell doesn't auto-reconnect when there is a
-        // network error.
-        conn = new Mongo(connString);
-    }
-    // TODO (PM-3364): Remove the enableSharding command below once we start tracking unsharded
-    // collections.
+    // Reconnect after the connection was closed due to restart.
+    reconnect(conn);
+
+    // TODO SERVER-88213 Remove the enableSharding command below once transitionToShardedCluster
+    // registers databases
     assert.commandWorked(conn.adminCommand({enableSharding: dbName}));
+
     const docAfterUpgrade = conn.getDB(dbName).getCollection(collName).findOne({x: 1});
     assert.neq(docAfterUpgrade, null);
 
     jsTest.log("Start downgrading");
     downgradeFunc();
     jsTest.log("Finished downgrading");
-    if (!connString.includes("replicaSet=")) {
-        // For a standalone connection string, the shell doesn't auto-reconnect when there is a
-        // network error.
-        conn = new Mongo(connString);
-    }
+
+    // Reconnect after the connection was closed due to restart.
+    reconnect(conn);
     const docAfterDowngrade = conn.getDB(dbName).getCollection(collName).findOne({x: 1});
     assert.neq(docAfterDowngrade, null);
 

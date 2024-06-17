@@ -104,7 +104,12 @@ const verifyCurOp = (expectedCurOp, returnedCurOp) => {
 
 const runTest = (parameters) => {
     jsTestLog("Running dbcheck with " + tojson(parameters));
-    resetAndInsert(rst, testDB, collName, 10, {a: 1});
+    resetAndInsert(rst, testDB, collName, 10);
+    assert.commandWorked(testDB.runCommand({
+        createIndexes: collName,
+        indexes: [{key: {a: 1}, name: 'a_1'}],
+    }));
+    rst.awaitReplication();
 
     const dbcheckFp = configureFailPoint(primary, "hangBeforeProcessingDbCheckRun");
     runDbCheck(rst, testDB, collName, parameters);
@@ -113,7 +118,7 @@ const runTest = (parameters) => {
         getExpectedCurOp(parameters, testDB.getCollectionInfos({name: collName})[0].info.uuid),
         testDB.currentOp().inprog.filter(x => x["desc"] === "dbCheck")[0]);
     dbcheckFp.off();
-    awaitDbCheckCompletion(rst, testDB, true /*withClearedHealthLog*/);
+    awaitDbCheckCompletion(rst, testDB, true /*waitForHealthLogDbCheckStop*/);
 };
 
 const dbCheckParameters = [
@@ -133,8 +138,8 @@ const dbCheckParameters = [
     {
         validateMode: "extraIndexKeysCheck",
         secondaryIndex: "a_1",
-        start: {"a": 10},
-        end: {"a": 40},
+        start: {"a": 1},
+        end: {"a": 4},
         skipLookupForExtraKeys: true,
     },
     {

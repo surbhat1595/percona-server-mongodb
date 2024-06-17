@@ -121,6 +121,7 @@ std::unique_ptr<HealthLogEntry> dbCheckBatchEntry(
     const std::string& foundHash,
     const BSONObj& minKey,
     const BSONObj& maxKey,
+    int64_t nConsecutiveIdenticalIndexKeysAtEnd,
     const boost::optional<Timestamp>& timestamp,
     const repl::OpTime& optime,
     const boost::optional<CollectionOptions>& options = boost::none,
@@ -131,6 +132,20 @@ struct ReadSourceWithTimestamp {
     RecoveryUnit::ReadSource readSource;
     boost::optional<Timestamp> timestamp = boost::none;
 };
+
+/**
+ * Helper that takes in a keystring with a recordId appended at the end, and returns the size
+ * of the keystring itself (without recordId appended).
+ */
+size_t getKeyStringSizeWithoutRecordId(const Collection* collection,
+                                       const key_string::Value& keyString);
+
+/**
+ * Helper for converting a keystring to its BSON format. Converting a keystring to BSON will remove
+ * the RecordId, as BSON objects cannot store the RecordId. As a result, if you then convert the
+ * BSON back to keystring format, that keystring will not have a RecordId.
+ */
+BSONObj _keyStringToBsonSafeHelper(const key_string::Value& keyString, const Ordering& ordering);
 
 /**
  * DbCheckAcquisition is a helper class to acquire locks and set RecoveryUnit state for the dbCheck
@@ -149,7 +164,6 @@ private:
     OperationContext* _opCtx;
 
 public:
-    const Lock::GlobalLock globalLock;
     const ReadSourceScope readSourceScope;
     const PrepareConflictBehavior prevPrepareConflictBehavior;
     const DataCorruptionDetectionMode prevDataCorruptionMode;
@@ -200,11 +214,14 @@ public:
 
     /**
      * Hash index keys between first and last inclusive.
+     * If nConsecutiveIdenticalKeysAtEnd > 1, this means that the last keystring is in a series
+     * of consecutive identical keys, and we should only hash nConsecutiveIdenticalKeysAtEnd of
+     * those.
      */
     Status hashForExtraIndexKeysCheck(OperationContext* opCtx,
                                       const Collection* collection,
-                                      const key_string::Value& first,
-                                      const key_string::Value& last);
+                                      const BSONObj& firstBson,
+                                      const BSONObj& lastBson);
 
     /**
      * Checks if a document has missing index keys by finding the index keys that should be
@@ -225,7 +242,7 @@ public:
      *
      * Again, not the same as the `end` passed in; this is MinKey if no items have been hashed.
      */
-    BSONObj lastKey(void) const;
+    BSONObj lastKeySeen(void) const;
 
     int64_t bytesSeen(void) const;
 
@@ -235,18 +252,20 @@ public:
 
     int64_t countSeen(void) const;
 
+    int64_t nConsecutiveIdenticalIndexKeysSeenAtEnd(void) const;
+
 private:
     /**
-     * Checks if we can hash `obj` without going over our limits.
+     * Checks if we can hash `obj` without going over our limits for collection check.
      */
-    bool _canHash(const BSONObj& obj);
+    bool _canHashForCollectionCheck(const BSONObj& obj);
 
     OperationContext* _opCtx;
     std::unique_ptr<PlanExecutor, PlanExecutor::Deleter> _exec;
     md5_state_t _state;
 
     BSONObj _maxKey;
-    BSONObj _last = kMinBSONKey;
+    BSONObj _lastKeySeen = kMinBSONKey;
 
     boost::optional<StringData> _indexName;
 
@@ -260,6 +279,7 @@ private:
 
     int64_t _maxBytes = 0;
     int64_t _bytesSeen = 0;
+    int64_t _nConsecutiveIdenticalIndexKeysSeenAtEnd = 0;
 
     std::vector<const IndexCatalogEntry*> _indexes;
     std::vector<BSONObj> _missingIndexKeys;

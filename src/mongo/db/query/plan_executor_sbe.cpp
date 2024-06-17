@@ -90,9 +90,11 @@ PlanExecutorSBE::PlanExecutorSBE(OperationContext* opCtx,
                                  bool isOpen,
                                  std::unique_ptr<PlanYieldPolicySBE> yieldPolicy,
                                  bool generatedByBonsai,
+                                 boost::optional<size_t> cachedPlanHash,
                                  OptimizerCounterInfo optCounterInfo,
                                  std::unique_ptr<RemoteCursorMap> remoteCursors,
-                                 std::unique_ptr<RemoteExplainVector> remoteExplains)
+                                 std::unique_ptr<RemoteExplainVector> remoteExplains,
+                                 std::unique_ptr<MultiPlanStage> classicRuntimePlannerStage)
     : _state{isOpen ? State::kOpened : State::kClosed},
       _opCtx(opCtx),
       _nss(std::move(nss)),
@@ -152,12 +154,12 @@ PlanExecutorSBE::PlanExecutorSBE(OperationContext* opCtx,
         _yieldPolicy->clearRegisteredPlans();
         _yieldPolicy->registerPlan(_root.get());
     }
-    const auto isMultiPlan = candidates.plans.size() > 1;
+    const auto isMultiPlan = candidates.plans.size() > 1 || classicRuntimePlannerStage;
     const auto isCachedCandidate = candidates.winner().fromPlanCache;
-    const auto matchesCachedPlan = candidates.winner().matchesCachedPlan;
     if (!_cq || !_cq->getExpCtx()->explain) {
         // If we're not in explain mode, there is no need to keep rejected candidate plans around.
         candidates.plans.clear();
+        classicRuntimePlannerStage.reset();
     } else {
         // Keep only rejected candidate plans.
         candidates.plans.erase(candidates.plans.begin() + candidates.winnerIdx);
@@ -166,17 +168,30 @@ PlanExecutorSBE::PlanExecutorSBE(OperationContext* opCtx,
     if (_solution) {
         _secondaryNssVector = _solution->getAllSecondaryNamespaces(_nss);
     }
-    _planExplainer = plan_explainer_factory::make(_root.get(),
-                                                  &_rootData,
-                                                  _solution.get(),
-                                                  std::move(optimizerData),
-                                                  std::move(candidates.plans),
-                                                  isMultiPlan,
-                                                  isCachedCandidate,
-                                                  matchesCachedPlan,
-                                                  _rootData.debugInfo,
-                                                  std::move(optCounterInfo),
-                                                  _remoteExplains.get());
+
+    _planExplainer = classicRuntimePlannerStage
+        // Classic multi-planner + SBE
+        ? plan_explainer_factory::make(_root.get(),
+                                       &_rootData,
+                                       _solution.get(),
+                                       isMultiPlan,
+                                       isCachedCandidate,
+                                       cachedPlanHash,
+                                       _rootData.debugInfo,
+                                       std::move(classicRuntimePlannerStage),
+                                       _remoteExplains.get())
+        // SBE runtime planner + SBE
+        : plan_explainer_factory::make(_root.get(),
+                                       &_rootData,
+                                       _solution.get(),
+                                       std::move(optimizerData),
+                                       std::move(candidates.plans),
+                                       isMultiPlan,
+                                       isCachedCandidate,
+                                       cachedPlanHash,
+                                       _rootData.debugInfo,
+                                       std::move(optCounterInfo),
+                                       _remoteExplains.get());
     _cursorType = _rootData.staticData->cursorType;
 
     if (_remoteCursors) {
@@ -794,10 +809,14 @@ sbe::PlanState fetchNextImpl(sbe::PlanStage* root,
         } else if (tag == sbe::value::TypeTags::bsonObject) {
             BSONObj result;
             if (returnOwnedBson) {
-                auto [ownedTag, ownedVal] = resultSlot->copyOrMoveValue();
-                auto sharedBuf =
-                    SharedBuffer(UniqueBuffer::reclaim(sbe::value::bitcastTo<char*>(ownedVal)));
-                result = BSONObj{std::move(sharedBuf)};
+                if (auto bsonResultAccessor = resultSlot->as<sbe::value::BSONObjValueAccessor>()) {
+                    result = bsonResultAccessor->getOwnedBSONObj();
+                } else {
+                    auto [ownedTag, ownedVal] = sbe::value::copyValue(tag, val);
+                    auto sharedBuf =
+                        SharedBuffer(UniqueBuffer::reclaim(sbe::value::bitcastTo<char*>(ownedVal)));
+                    result = BSONObj{std::move(sharedBuf)};
+                }
             } else {
                 result = BSONObj{sbe::value::bitcastTo<const char*>(val)};
             }

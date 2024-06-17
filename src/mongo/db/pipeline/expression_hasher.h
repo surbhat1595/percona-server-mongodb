@@ -44,11 +44,6 @@ H AbslHashValue(H h, const Value& value) {
 }
 
 template <typename H>
-H AbslHashValue(H h, const FieldPath& value) {
-    return H::combine(std::move(h), value.fullPath());
-}
-
-template <typename H>
 H AbslHashValue(H h, const TimeZone& value) {
     return H::combine(std::move(h), value.toString());
 }
@@ -358,7 +353,7 @@ public:
     }
 
     void visit(const ExpressionFieldPath* expr) final {
-        combine(OpType::kExp, expr->getFieldPath(), expr->getVariableId());
+        combine(OpType::kExp, expr->serialize());
     }
 
     void visit(const ExpressionFilter* expr) final {
@@ -750,11 +745,11 @@ public:
         combine(OpType::kAccumulatorPercentile, expr->_method);
     }
 
-    void visit(const ExpressionFromAccumulator<AccumulatorStdDevPop>* expr) {
+    void visit(const ExpressionFromAccumulator<AccumulatorStdDevPop>* expr) override {
         combine(OpType::kAccumulatorStdDevPop);
     }
 
-    void visit(const ExpressionFromAccumulator<AccumulatorStdDevSamp>* expr) {
+    void visit(const ExpressionFromAccumulator<AccumulatorStdDevSamp>* expr) override {
         combine(OpType::kAccumulatorStdDevSamp);
     }
 

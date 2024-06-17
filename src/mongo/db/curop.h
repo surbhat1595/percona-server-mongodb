@@ -41,7 +41,6 @@
 #include <functional>
 #include <map>
 #include <memory>
-#include <ratio>
 #include <string>
 #include <utility>
 #include <vector>
@@ -50,7 +49,6 @@
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
-#include "mongo/config.h"  // IWYU pragma: keep
 #include "mongo/db/auth/authorization_session.h"
 #include "mongo/db/auth/user_acquisition_stats.h"
 #include "mongo/db/catalog/collection_catalog.h"
@@ -58,7 +56,6 @@
 #include "mongo/db/commands.h"
 #include "mongo/db/concurrency/flow_control_ticketholder.h"
 #include "mongo/db/concurrency/lock_stats.h"
-#include "mongo/db/cursor_id.h"
 #include "mongo/db/database_name.h"
 #include "mongo/db/generic_cursor_gen.h"
 #include "mongo/db/namespace_string.h"
@@ -69,6 +66,7 @@
 #include "mongo/db/query/cursor_response_gen.h"
 #include "mongo/db/query/plan_executor.h"
 #include "mongo/db/query/plan_summary_stats.h"
+#include "mongo/db/query/query_stats/data_bearing_node_metrics.h"
 #include "mongo/db/query/query_stats/key.h"
 #include "mongo/db/server_options.h"
 #include "mongo/db/stats/resource_consumption_metrics.h"
@@ -86,7 +84,6 @@
 #include "mongo/util/string_map.h"
 #include "mongo/util/system_tick_source.h"
 #include "mongo/util/tick_source.h"
-#include "mongo/util/time_support.h"
 
 #ifndef MONGO_CONFIG_USE_RAW_LATCHES
 #include "mongo/util/diagnostic_info.h"
@@ -126,6 +123,19 @@ public:
          * AdditiveMetrics instance.
          */
         void add(const AdditiveMetrics& otherMetrics);
+
+        /**
+         * Adds all of the fields of the given DataBearingNodeMetrics object together with the
+         * corresponding fields of this object.
+         */
+        void aggregateDataBearingNodeMetrics(const query_stats::DataBearingNodeMetrics& metrics);
+        void aggregateDataBearingNodeMetrics(
+            const boost::optional<query_stats::DataBearingNodeMetrics>& metrics);
+
+        /**
+         * Aggregate CursorMetrics (e.g., from a remote cursor) into this AdditiveMetrics instance.
+         */
+        void aggregateCursorMetrics(const CursorMetrics& metrics);
 
         /**
          * Resets all members to the default state.
@@ -230,6 +240,20 @@ public:
 
         // Amount of time spent executing a query.
         boost::optional<Microseconds> executionTime;
+
+        // True if the query plan involves an in-memory sort.
+        bool hasSortStage{false};
+        // True if the given query used disk.
+        bool usedDisk{false};
+        // True if any plan(s) involved in servicing the query (including internal queries sent to
+        // shards) came from the multi-planner (not from the plan cache and not a query with a
+        // single solution).
+        bool fromMultiPlanner{false};
+        // False unless all plan(s) involved in servicing the query came from the plan cache.
+        // This is because we want to report a "negative" outcome (plan cache miss) if any internal
+        // query involved missed the cache. Optional because we need tri-state (true, false, not
+        // set) to make the "sticky towards false" logic work.
+        boost::optional<bool> fromPlanCache;
     };
 
     OpDebug() = default;
@@ -313,10 +337,8 @@ public:
     boost::optional<long long> msWaitingForMongot{boost::none};
     long long mongotBatchNum = 0;
     BSONObj mongotCountVal = BSONObj();
+    BSONObj mongotSlowQueryLog = BSONObj();
 
-    bool hasSortStage{false};  // true if the query plan involves an in-memory sort
-
-    bool usedDisk{false};              // true if the given query used disk
     long long sortSpills{0};           // The total number of spills to disk from sort stages
     size_t sortTotalDataSizeBytes{0};  // The amount of data we've sorted in bytes
     long long keysSorted{0};           // The number of keys that we've sorted.
@@ -324,12 +346,6 @@ public:
     long long collectionScansNonTailable{0};  // The number of non-tailable collection scans.
     std::set<std::string> indexesUsed;        // The indexes used during query execution.
 
-
-    // True if the plan came from the multi-planner (not from the plan cache and not a query with a
-    // single solution).
-    bool fromMultiPlanner{false};
-
-    bool fromPlanCache{false};
     // True if a replan was triggered during the execution of this operation.
     boost::optional<std::string> replanReason;
 
@@ -371,8 +387,8 @@ public:
      *        never needing the wasRateLimited field.
      */
 
-    // Note that the only case when the three fields of the below struct are null, none, and false
-    // is if the query stats feature flag is turned off.
+    // Note that the only case when key, keyHash, and wasRateLimited of the below struct are null,
+    // none, and false is if the query stats feature flag is turned off.
     struct QueryStatsInfo {
         // Uniquely identifies one query stats entry.
         // nullptr if `wasRateLimited` is true.
@@ -382,6 +398,10 @@ public:
         boost::optional<std::size_t> keyHash;
         // True if the request was rate limited and stats should not be collected.
         bool wasRateLimited = false;
+        // Sometimes we need to request metrics as part of a higher-level operation without
+        // actually caring about the metrics for this specific operation. In those cases, we
+        // use metricsRequested to indicate we should request metrics from other nodes.
+        bool metricsRequested = false;
     };
 
     QueryStatsInfo queryStatsInfo;
@@ -447,6 +467,12 @@ public:
     // Stores the duration of time spent waiting for the specified user write concern to
     // be fulfilled.
     Milliseconds waitForWriteConcernDurationMillis{0};
+
+    // Stores the duration of time spent waiting in a queue for a ticket to be acquired.
+    Milliseconds waitForTicketDurationMillis{0};
+
+    // Stores the duration of execution after removing time spent blocked.
+    Milliseconds workingTimeMillis{0};
 
     // Stores the total time an operation spends with an uncommitted oplog slot held open. Indicator
     // that an operation is holding back replication by causing oplog holes to remain open for
@@ -982,6 +1008,18 @@ public:
                                       unsigned long long progressMeterTotal = 0,
                                       int secondsBetween = 3);
 
+    /**
+     * Captures stats on the locker after transaction resources are unstashed to the operation
+     * context to be able to correctly ignore stats from outside this CurOp instance.
+     */
+    void updateStatsOnTransactionUnstash();
+
+    /**
+     * Captures stats on the locker that happened during this CurOp instance before transaction
+     * resources are stashed. Also cleans up stats taken when transaction resources were unstashed.
+     */
+    void updateStatsOnTransactionStash();
+
     /*
      * Gets the message for FailPoints used.
      */
@@ -995,9 +1033,7 @@ public:
     const std::string& getMessage() const {
         return _message;
     }
-    const ProgressMeter& getProgressMeter() {
-        return _progressMeter;
-    }
+
     CurOp* parent() const {
         return _parent;
     }
@@ -1054,6 +1090,14 @@ public:
         return _shouldOmitDiagnosticInformation;
     }
 
+    boost::optional<query_shape::QueryShapeHash> getQueryShapeHash() const {
+        return _queryShapeHash;
+    }
+
+    void setQueryShapeHash(const boost::optional<query_shape::QueryShapeHash>& hash) {
+        _queryShapeHash = hash;
+    }
+
 private:
     class CurOpStack;
 
@@ -1066,6 +1110,9 @@ private:
     TickSource::Tick startTime();
     Microseconds computeElapsedTimeTotal(TickSource::Tick startTime,
                                          TickSource::Tick endTime) const;
+
+    Milliseconds _sumBlockedTimeTotal();
+
     /**
      * Handles failpoints that check whether a command has completed or not.
      * Used for testing purposes instead of the getLog command.
@@ -1126,16 +1173,33 @@ private:
     OpDebug _debug;
     std::string _failPointMessage;  // Used to store FailPoint information.
     std::string _message;
-    ProgressMeter _progressMeter;
+    boost::optional<ProgressMeter> _progressMeter;
     AtomicWord<int> _numYields{0};
     // A GenericCursor containing information about the active cursor for a getMore operation.
     boost::optional<GenericCursor> _genericCursor;
 
     std::string _planSummary;
 
-    // The snapshot of lock stats taken when this CurOp instance is pushed to a
-    // CurOpStack.
+    // The lock stats being reported on the locker that accrued outside of this operation. This
+    // includes the snapshot of lock stats taken when this CurOp instance is pushed to a CurOpStack
+    // or the snapshot of lock stats taken when transaction resources are unstashed to this
+    // operation context.
     boost::optional<SingleThreadedLockStats> _lockStatsBase;
+
+    // The snapshot of lock stats taken when transaction resources are stashed. This captures the
+    // locker activity that happened on this operation before the locker is released back to
+    // transaction resources.
+    boost::optional<SingleThreadedLockStats> _lockStatsOnceStashed;
+
+    // The ticket wait times being reported on the locker that accrued outside of this operation.
+    // This includes ticket wait times already accrued when the CurOp instance is pushed to a
+    // CurOpStack or ticket wait times on locker when transaction resources are unstashed to this
+    // operation context.
+    Microseconds _ticketWaitBase{0};
+
+    // The ticket wait times that accrued during this operation captured before the locker is
+    // released back to transaction resources and stashed.
+    Microseconds _ticketWaitWhenStashed{0};
 
     // _shouldDBProfileWithRateLimit can be called several times by shouldDBProfile and
     // completeAndLogOperation so to be consistent we need to cache random generated bool value.
@@ -1161,6 +1225,12 @@ private:
 
     // Flag to decide if diagnostic information should be omitted.
     bool _shouldOmitDiagnosticInformation{false};
+
+    // TODO SERVER-87201: Remove need to zero out blocked time prior to operation starting.
+    Milliseconds _blockedTimeAtStart{0};
+
+    // The hash of the query's shape.
+    boost::optional<query_shape::QueryShapeHash> _queryShapeHash{boost::none};
 };
 
 }  // namespace mongo

@@ -303,6 +303,7 @@ public:
                    const CollectionPtr& coll,
                    std::vector<InsertStatement>::const_iterator begin,
                    std::vector<InsertStatement>::const_iterator end,
+                   const std::vector<RecordId>& recordIds,
                    std::vector<bool> fromMigrate,
                    bool defaultFromMigrate,
                    OpStateAccumulator* opAccumulator = nullptr) override;
@@ -362,6 +363,7 @@ void MapReduceOpObserver::onInserts(OperationContext* opCtx,
                                     const CollectionPtr& coll,
                                     std::vector<InsertStatement>::const_iterator begin,
                                     std::vector<InsertStatement>::const_iterator end,
+                                    const std::vector<RecordId>& recordIds,
                                     std::vector<bool> fromMigrate,
                                     bool defaultFromMigrate,
                                     OpStateAccumulator* opAccumulator) {
@@ -445,7 +447,7 @@ const NamespaceString MapReduceCommandTest::outputNss =
 
 void MapReduceCommandTest::setUp() {
     ServiceContextMongoDTest::setUp();
-    ScriptEngine::setup();
+    ScriptEngine::setup(ExecutionEnvironment::Server);
     auto service = getServiceContext();
     DBDirectClientFactory::get(service).registerImplementation(
         [](OperationContext* opCtx) { return std::make_unique<DBDirectClient>(opCtx); });
@@ -502,7 +504,9 @@ Status MapReduceCommandTest::_runCommand(StringData mapCode, StringData reduceCo
     auto command = CommandHelpers::findCommand(_opCtx.get(), "mapReduce");
     ASSERT(command) << "Unable to look up mapReduce command";
 
-    auto request = OpMsgRequest::fromDBAndBody(inputNss.dbName(), _makeCmdObj(mapCode, reduceCode));
+    auto request = OpMsgRequestBuilder::create(auth::ValidatedTenancyScope::get(_opCtx.get()),
+                                               inputNss.dbName(),
+                                               _makeCmdObj(mapCode, reduceCode));
     auto replyBuilder = rpc::makeReplyBuilder(rpc::Protocol::kOpMsg);
     auto result = CommandHelpers::runCommandDirectly(_opCtx.get(), request);
     auto status = getStatusFromCommandResult(result);

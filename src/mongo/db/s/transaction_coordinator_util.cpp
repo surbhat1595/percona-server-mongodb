@@ -51,6 +51,7 @@
 #include "mongo/bson/util/builder_fwd.h"
 #include "mongo/client/dbclient_cursor.h"
 #include "mongo/client/read_preference.h"
+#include "mongo/db/admission/execution_admission_context.h"
 #include "mongo/db/commands/txn_cmds_gen.h"
 #include "mongo/db/commands/txn_two_phase_commit_cmds_gen.h"
 #include "mongo/db/database_name.h"
@@ -243,20 +244,20 @@ Future<repl::OpTime> persistParticipantsList(
         boost::none /* no need for a backoff */,
         [](const StatusWith<repl::OpTime>& s) { return shouldRetryPersistingCoordinatorState(s); },
         [&scheduler, lsid, txnNumberAndRetryCounter, participants] {
-            return scheduler.scheduleWork([lsid, txnNumberAndRetryCounter, participants](
-                                              OperationContext* opCtx) {
-                // Skip ticket acquisition in order to prevent possible deadlock when
-                // participants are in the prepared state. See SERVER-82883 and SERVER-60682.
-                ScopedAdmissionPriorityForLock skipTicketAcquisition(
-                    shard_role_details::getLocker(opCtx), AdmissionContext::Priority::kImmediate);
-                getTransactionCoordinatorWorkerCurOpRepository()->set(
-                    opCtx,
-                    lsid,
-                    txnNumberAndRetryCounter,
-                    CoordinatorAction::kWritingParticipantList);
-                return persistParticipantListBlocking(
-                    opCtx, lsid, txnNumberAndRetryCounter, participants);
-            });
+            return scheduler.scheduleWork(
+                [lsid, txnNumberAndRetryCounter, participants](OperationContext* opCtx) {
+                    // Skip ticket acquisition in order to prevent possible deadlock when
+                    // participants are in the prepared state. See SERVER-82883 and SERVER-60682.
+                    ScopedAdmissionPriority<ExecutionAdmissionContext> skipTicketAcquisition(
+                        opCtx, AdmissionContext::Priority::kExempt);
+                    getTransactionCoordinatorWorkerCurOpRepository()->set(
+                        opCtx,
+                        lsid,
+                        txnNumberAndRetryCounter,
+                        CoordinatorAction::kWritingParticipantList);
+                    return persistParticipantListBlocking(
+                        opCtx, lsid, txnNumberAndRetryCounter, participants);
+                });
         });
 }
 
@@ -483,26 +484,26 @@ Future<repl::OpTime> persistDecision(txn::AsyncWorkScheduler& scheduler,
         boost::none /* no need for a backoff */,
         [](const StatusWith<repl::OpTime>& s) { return shouldRetryPersistingCoordinatorState(s); },
         [&scheduler, lsid, txnNumberAndRetryCounter, participants, decision, affectedNamespaces] {
-            return scheduler.scheduleWork([lsid,
-                                           txnNumberAndRetryCounter,
-                                           participants = participants,
-                                           decision,
-                                           affectedNamespaces = affectedNamespaces](
-                                              OperationContext* opCtx) mutable {
-                // Do not acquire a storage ticket in order to avoid unnecessary serialization
-                // with other prepared transactions that are holding a storage ticket
-                // themselves; see SERVER-60682.
-                ScopedAdmissionPriorityForLock setTicketAquisition(
-                    shard_role_details::getLocker(opCtx), AdmissionContext::Priority::kImmediate);
-                getTransactionCoordinatorWorkerCurOpRepository()->set(
-                    opCtx, lsid, txnNumberAndRetryCounter, CoordinatorAction::kWritingDecision);
-                return persistDecisionBlocking(opCtx,
-                                               lsid,
-                                               txnNumberAndRetryCounter,
-                                               std::move(participants),
-                                               decision,
-                                               std::move(affectedNamespaces));
-            });
+            return scheduler.scheduleWork(
+                [lsid,
+                 txnNumberAndRetryCounter,
+                 participants = participants,
+                 decision,
+                 affectedNamespaces = affectedNamespaces](OperationContext* opCtx) mutable {
+                    // Do not acquire a storage ticket in order to avoid unnecessary serialization
+                    // with other prepared transactions that are holding a storage ticket
+                    // themselves; see SERVER-60682.
+                    ScopedAdmissionPriority<ExecutionAdmissionContext> setTicketAquisition(
+                        opCtx, AdmissionContext::Priority::kExempt);
+                    getTransactionCoordinatorWorkerCurOpRepository()->set(
+                        opCtx, lsid, txnNumberAndRetryCounter, CoordinatorAction::kWritingDecision);
+                    return persistDecisionBlocking(opCtx,
+                                                   lsid,
+                                                   txnNumberAndRetryCounter,
+                                                   std::move(participants),
+                                                   decision,
+                                                   std::move(affectedNamespaces));
+                });
         });
 }
 

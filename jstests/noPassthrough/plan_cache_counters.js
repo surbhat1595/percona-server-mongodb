@@ -1,11 +1,6 @@
 /**
  * Test that the plan cache hits, misses and skipped serverStatus' counters are updated correctly
  * when serving queries.
- *
- * @tags: [
- *   # TODO SERVER-67607: Test plan cache with CQF enabled.
- *   cqf_incompatible,
- * ]
  */
 import {checkSbeFullyEnabled} from "jstests/libs/sbe_util.js";
 
@@ -122,7 +117,7 @@ function runCommandAndCheckPlanCacheMetric({
     // third run when a plan cache entry gets activated.
     {
         command: {find: coll.getName(), filter: {a: 1}, comment: "query two indexes"},
-        indexes: [{a: 1}, {a: 1, b: 1}],
+        indexes: [{a: 1}, {a: -1}],
         expectedCacheBehaviors: [cacheBehavior.miss, cacheBehavior.miss, cacheBehavior.hit]
     },
     // Same query shape as above, should always recover from plan cache.
@@ -143,7 +138,7 @@ function runCommandAndCheckPlanCacheMetric({
     },
     // IdHack queries is always is executed with the classic engine and never get cached.
     {
-        command: {find: coll.getName(), filter: {_id: 1}, comment: "query idhack"},
+        command: {find: coll.getName(), filter: {_id: 1}, comment: "query idhack", batchSize: 200},
         expectedCacheBehaviors: [cacheBehavior.skip, cacheBehavior.skip, cacheBehavior.skip],
         planCacheType: "classic"
     },

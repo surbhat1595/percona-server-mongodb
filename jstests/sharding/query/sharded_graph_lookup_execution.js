@@ -7,14 +7,19 @@
  * multiversion environment.
  * @tags: [
  *   requires_fcv_73,
+ *   # TODO (SERVER-85629): Re-enable this test once redness is resolved in multiversion suites.
+ *   DISABLED_TEMPORARILY_DUE_TO_FCV_UPGRADE,
+ *   requires_fcv_80
  * ]
  */
 
 import {arrayEq} from "jstests/aggregation/extras/utils.js";
+import {FeatureFlagUtil} from "jstests/libs/feature_flag_util.js";
 import {enableLocalReadLogs, getLocalReadCount} from "jstests/libs/local_reads.js";
 import {profilerHasNumMatchingEntriesOrThrow} from "jstests/libs/profiler.js";
 
 const st = new ShardingTest({shards: 2, mongos: 1});
+
 const testName = "sharded_graph_lookup";
 
 const mongosDB = st.s0.getDB(testName);
@@ -92,6 +97,7 @@ function assertGraphLookupExecution(pipeline, opts, expectedResults, executionLi
                         "command.comment": opts.comment,
                         "command.pipeline.$graphLookup": {$exists: !isLookup},
                         "command.pipeline.$lookup": {$exists: isLookup},
+                        "errName": {$ne: "StaleConfig"}
                     },
                     numExpectedMatches: exec.toplevelExec[shard]
                 });
@@ -109,7 +115,8 @@ function assertGraphLookupExecution(pipeline, opts, expectedResults, executionLi
                                         .find({
                                             "command.aggregate": fromCollName,
                                             "command.comment": opts.comment,
-                                            "command.fromMongos": exec.mongosMerger === true
+                                            "command.fromMongos": exec.mongosMerger === true,
+                                            "errName": {$ne: "StaleConfig"}
                                         })
                                         .itcount();
             assert.eq(localReadCount + remoteReadCount,
@@ -158,7 +165,7 @@ let expectedRes = [
 assertGraphLookupExecution(
     pipeline, {comment: "unsharded_to_sharded_targeted"}, expectedRes, [{
         // Because the local collection is unsharded, the $graphLookup stage is executed on the
-        // primary shard of the database.
+        // shard which owns the collection.
         toplevelExec: [1, 0],
         // For every document that flows through the $graphLookup stage, the node executing it will
         // target the shard that holds the relevant data for the sharded foreign collection. Note:
@@ -313,6 +320,8 @@ assertGraphLookupExecution(pipeline, {comment: "sharded_to_sharded_to_unsharded"
     {
         collName: airportsColl.getName(),
         fromCollName: airfieldsColl.getName(),
+        // TODO SERVER-77915 remove this comment:
+
         // When executing the subpipeline, the nested $graphLookup stage will stay on the merging
         // half of the pipeline and execute on the merging node, sending requests to execute the
         // nested $matches on the primary shard (where the unsharded 'airfields' collection is).
@@ -415,10 +424,9 @@ pipeline = [
 
 assertGraphLookupExecution(pipeline, {comment: "sharded_to_sharded_view_to_sharded"}, expectedRes, [
     {
-        // The 'travelers' collection is sharded, however, the 'from' namespace is a view, so the
-        // $graphLookup stage is executed as a merger.
-        // TODO SERVER-83902: Update this once this pipeline can run in parallel on shards again.
-        toplevelExec: [1, 0],
+        // The 'travelers' collection is sharded, so the $graphLookup stage is executed in parallel
+        // on every shard that contains the local collection.
+        toplevelExec: [1, 1],
         // Each node executing the $graphLookup will, for every document that flows through the
         // stage, target the shard(s) that holds the relevant data for the sharded foreign view.
         recursiveMatchExec: [0, 3],
@@ -538,11 +546,9 @@ expectedRes = [
 assertGraphLookupExecution(
     pipeline, {comment: "sharded_to_sharded_lookup_view_to_sharded"}, expectedRes, [
         {
-            // The 'travelers' collection is sharded, however, the 'from' namespace is a view, so
-            // the $graphLookup stage is executed as a merger.
-            // TODO SERVER-83902: Update this once this pipeline can run in parallel on shards
-            // again.
-            toplevelExec: [1, 0],
+            // The 'travelers' collection is sharded, so the $graphLookup stage is executed in
+            // parallel on every shard that contains the local collection.
+            toplevelExec: [1, 1],
             // Each node executing the $graphLookup will, for every document that flows through the
             // stage, target the shard(s) that holds the relevant data for the sharded foreign view.
             recursiveMatchExec: [0, 3],
@@ -551,8 +557,8 @@ assertGraphLookupExecution(
             collName: airportsColl.getName(),
             fromCollName: airfieldsColl.getName(),
             // When executing the subpipeline, the "nested" $lookup stage contained in the view
-            // pipeline will stay on the merging half of the pipeline and execute on the merging
-            // node, targeting shards to execute the nested subpipelines.
+            // pipeline will be pushed down to the shards and will recursively target shards
+            // to execute the nested subpipelines.
             toplevelExec: [0, 0],
             subpipelineExec: [1, 2]
         }

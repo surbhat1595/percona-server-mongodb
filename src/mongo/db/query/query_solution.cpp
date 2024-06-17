@@ -350,8 +350,11 @@ void QuerySolution::extendWith(std::unique_ptr<QuerySolutionNode> extensionRoot)
                 parentOfSentinel->children.size() == 1);
         current = parentOfSentinel->children[0].get();
     }
+    QuerySolutionNode* oldRoot = _root.get();
     parentOfSentinel->children[0] = std::move(_root);
     setRoot(std::move(extensionRoot));
+    // setRoot may re-assign node ids, so we assign this value after calling setRoot.
+    _unextendedRootId = oldRoot->nodeId();
 }
 
 void QuerySolution::setRoot(std::unique_ptr<QuerySolutionNode> root) {
@@ -391,26 +394,6 @@ void CollectionScanNode::computeProperties() {
         }
         sortSet = ProvidedSortSet(sort);
     }
-}
-
-/*
- * IndexBounds exist when this collection scan is a ClusteredIndexScan. Since we need the index
- * bounds very seldomly it is built adHoc instead of precomputed.
- */
-IndexBounds CollectionScanNode::getIndexBounds() const {
-    tassert(
-        8311900,
-        "Requesting index bounds on a non ClusteredIndexScan (hidden in a collection scan node)",
-        !(doClusteredCollectionScanClassic() || doClusteredCollectionScanSbe()));
-
-    IndexBounds clusteredIdxScanBounds;
-    BSONObjBuilder maxRecordBson;
-    maxRecord->appendToBSONAs(&maxRecordBson, clusteredIndex->getName().value());
-    BSONObjBuilder minRecordBson;
-    minRecord->appendToBSONAs(&minRecordBson, clusteredIndex->getName().value());
-    clusteredIdxScanBounds.endKey = maxRecordBson.obj();
-    clusteredIdxScanBounds.startKey = minRecordBson.obj();
-    return clusteredIdxScanBounds;
 }
 
 void CollectionScanNode::appendToString(str::stream* ss, int indent) const {
@@ -1400,7 +1383,7 @@ void ReplaceRootNode::appendToString(str::stream* ss, int indent) const {
         addIndent(ss, indent + 1);
         *ss << "newRoot:\n";
 
-        *ss << newRoot->serialize(SerializationOptions{}).toString();
+        *ss << newRoot->serialize().toString();
     }
     addCommon(ss, indent);
     addIndent(ss, indent + 1);
@@ -1833,12 +1816,11 @@ void GroupNode::appendToString(str::stream* ss, int indent) const {
             if (idx > 0) {
                 *ss << ", ";
             }
-            *ss << "{" << groupName << ": " << exprObj->serialize(SerializationOptions{}).toString()
-                << "}";
+            *ss << "{" << groupName << ": " << exprObj->serialize().toString() << "}";
             ++idx;
         }
     } else {
-        *ss << "{_id: " << groupByExpression->serialize(SerializationOptions{}).toString() << "}";
+        *ss << "{_id: " << groupByExpression->serialize().toString() << "}";
     }
     *ss << '\n';
     addIndent(ss, indent + 1);
@@ -1890,6 +1872,9 @@ void EqLookupNode::appendToString(str::stream* ss, int indent) const {
         addIndent(ss, indent + 1);
         *ss << "indexKeyPattern = " << idxEntry->keyPattern << "\n";
     }
+    addIndent(ss, indent + 1);
+    *ss << "shouldProduceBson = " << shouldProduceBson << "\n";
+
     addCommon(ss, indent);
     addIndent(ss, indent + 1);
     *ss << "Child:" << '\n';
@@ -1897,16 +1882,71 @@ void EqLookupNode::appendToString(str::stream* ss, int indent) const {
 }
 
 std::unique_ptr<QuerySolutionNode> EqLookupNode::clone() const {
-    auto copy = std::make_unique<EqLookupNode>(children[0]->clone(),
-                                               foreignCollection,
-                                               joinFieldLocal,
-                                               joinFieldForeign,
-                                               joinField,
-                                               lookupStrategy,
-                                               idxEntry,
-                                               shouldProduceBson);
-    return copy;
+    return std::make_unique<EqLookupNode>(children[0]->clone(),
+                                          foreignCollection,
+                                          joinFieldLocal,
+                                          joinFieldForeign,
+                                          joinField,
+                                          lookupStrategy,
+                                          idxEntry,
+                                          shouldProduceBson);
 }
+
+/**
+ * EqLookupUnwindNode.
+ */
+void EqLookupUnwindNode::appendToString(str::stream* ss, int indent) const {
+    addIndent(ss, indent);
+    *ss << "EQ_LOOKUP_UNWIND\n";
+
+    addIndent(ss, indent + 1);
+    *ss << "from = " << toStringForLogging(foreignCollection) << "\n";
+    addIndent(ss, indent + 1);
+    *ss << "as = " << joinField.fullPath() << "\n";
+    addIndent(ss, indent + 1);
+    *ss << "localField = " << joinFieldLocal.fullPath() << "\n";
+    addIndent(ss, indent + 1);
+    *ss << "foreignField = " << joinFieldForeign.fullPath() << "\n";
+    addIndent(ss, indent + 1);
+    *ss << "lookupStrategy = " << EqLookupNode::serializeLookupStrategy(lookupStrategy) << "\n";
+    if (idxEntry) {
+        addIndent(ss, indent + 1);
+        *ss << "indexName = " << idxEntry->identifier.catalogName << "\n";
+        addIndent(ss, indent + 1);
+        *ss << "indexKeyPattern = " << idxEntry->keyPattern << "\n";
+    }
+    addIndent(ss, indent + 1);
+    *ss << "shouldProduceBson = " << shouldProduceBson << "\n";
+
+    addIndent(ss, indent + 1);
+    *ss << "preserveNullAndEmptyArrays = " << unwindNode.preserveNullAndEmptyArrays << "\n";
+    if (unwindNode.indexPath) {
+        addIndent(ss, indent + 1);
+        *ss << "indexPath = " << unwindNode.indexPath->fullPath() << "\n";
+    }
+
+    addCommon(ss, indent);
+    addIndent(ss, indent + 1);
+    *ss << "Child:" << '\n';
+    children[0]->appendToString(ss, indent + 2);
+}
+
+std::unique_ptr<QuerySolutionNode> EqLookupUnwindNode::clone() const {
+    return std::make_unique<EqLookupUnwindNode>(children[0]->clone(),
+                                                // Shared data members.
+                                                joinField,
+                                                // $lookup-specific data members.
+                                                foreignCollection,
+                                                joinFieldLocal,
+                                                joinFieldForeign,
+                                                lookupStrategy,
+                                                idxEntry,
+                                                shouldProduceBson,
+                                                // $unwind-specific data members.
+                                                unwindNode.preserveNullAndEmptyArrays,
+                                                unwindNode.indexPath);
+}
+
 /**
  * SentinelNode.
  */
@@ -1973,8 +2013,7 @@ void WindowNode::appendToString(str::stream* ss, int indent) const {
     *ss << "WINDOW\n";
     if (partitionBy) {
         addIndent(ss, indent + 1);
-        *ss << "partitionBy = " << (*partitionBy)->serialize(SerializationOptions{}).toString()
-            << '\n';
+        *ss << "partitionBy = " << (*partitionBy)->serialize().toString() << '\n';
     }
     if (sortBy) {
         addIndent(ss, indent + 1);
@@ -1993,7 +2032,7 @@ void WindowNode::appendToString(str::stream* ss, int indent) const {
         outputField.expr->bounds().serialize(boundsDoc, SerializationOptions{});
         auto boundsBson = boundsDoc.freeze().toBson();
         *ss << "{" << outputField.fieldName << ": {" << outputField.expr->getOpName() << ": "
-            << outputField.expr->input()->serialize(SerializationOptions{}).toString()
+            << outputField.expr->input()->serialize().toString()
             << "window: " << boundsBson.toString() << "}}";
     }
     *ss << "]" << '\n';

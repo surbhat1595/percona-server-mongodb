@@ -42,11 +42,8 @@
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonobj.h"
-#include "mongo/db/exec/collection_scan.h"
 #include "mongo/db/exec/document_value/document.h"
 #include "mongo/db/exec/document_value/value.h"
-#include "mongo/db/exec/index_scan.h"
-#include "mongo/db/exec/plan_stage.h"
 #include "mongo/db/exec/timeseries/bucket_unpacker.h"
 #include "mongo/db/matcher/expression.h"
 #include "mongo/db/pipeline/dependencies.h"
@@ -99,15 +96,13 @@ public:
         return kStageNameInternal.rawData();
     }
 
-    void serializeToArray(
-        std::vector<Value>& array,
-        const SerializationOptions& opts = SerializationOptions{}) const final override;
+    void serializeToArray(std::vector<Value>& array,
+                          const SerializationOptions& opts = SerializationOptions{}) const final;
 
     /**
      * Use 'serializeToArray' above.
      */
-    Value serialize(
-        const SerializationOptions& opts = SerializationOptions{}) const final override {
+    Value serialize(const SerializationOptions& opts = SerializationOptions{}) const final {
         MONGO_UNREACHABLE_TASSERT(7484305);
     }
 
@@ -289,7 +284,7 @@ public:
     bool optimizeLastpoint(Pipeline::SourceContainer::iterator itr,
                            Pipeline::SourceContainer* container);
 
-    GetModPathsReturn getModifiedPaths() const final override;
+    GetModPathsReturn getModifiedPaths() const final;
 
     DepsTracker getRestPipelineDependencies(Pipeline::SourceContainer::iterator itr,
                                             Pipeline::SourceContainer* container,
@@ -326,6 +321,32 @@ private:
      */
     Pipeline::SourceContainer::iterator optimizeAtRestOfPipeline(
         Pipeline::SourceContainer::iterator itr, Pipeline::SourceContainer* container);
+
+    /**
+     * The top-k sort optimization absorbs a $sort stage that is enough to produce a top-k sorted
+     * input for a group key if the $sort is followed by $group with $first and/or $last.
+     *
+     * For example, the following pipeline can be rewritten into a $group with $top/$bottom:
+     * [
+     *   {$_internalUnpackBucket: {...}},
+     *   {$sort: {b: 1}},
+     *   {$group: {_id: "$a", f: {$first: "$b"}, l: {$last: "$b"}}
+     * ]
+     *
+     * The rewritten pipeline would be:
+     * [
+     *   {$_internalUnpackBucket: {...}},
+     *   {
+     *     $group: {
+     *       _id: "$a",
+     *       f: {$top: {sortBy: {b: 1}, output: "$b"}},
+     *       l: {$bottom: {sortBy: {b: 1}, output: "$b"}}
+     *     }
+     *   }
+     * ]
+     */
+    bool tryToAbsorbTopKSortIntoGroup(Pipeline::SourceContainer::iterator itr,
+                                      Pipeline::SourceContainer* container);
 
     // If buckets contained a mixed type schema along some path, we have to push down special
     // predicates in order to ensure correctness.

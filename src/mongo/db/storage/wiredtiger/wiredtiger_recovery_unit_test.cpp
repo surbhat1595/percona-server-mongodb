@@ -82,14 +82,14 @@ class WiredTigerRecoveryUnitHarnessHelper final : public RecoveryUnitHarnessHelp
 public:
     WiredTigerRecoveryUnitHarnessHelper()
         : _dbpath("wt_test"),
-          _engine(kWiredTigerEngineName,  // .canonicalName
-                  _dbpath.path(),         // .path
-                  &_cs,                   // .cs
-                  "",                     // .extraOpenOptions
-                  1,                      // .cacheSizeMB
-                  0,                      // .maxCacheOverflowFileSizeMB
-                  false,                  // .ephemeral
-                  false                   // .repair
+          _engine(std::string{kWiredTigerEngineName},  // .canonicalName
+                  _dbpath.path(),                      // .path
+                  &_cs,                                // .cs
+                  "",                                  // .extraOpenOptions
+                  1,                                   // .cacheSizeMB
+                  0,                                   // .maxCacheOverflowFileSizeMB
+                  false,                               // .ephemeral
+                  false                                // .repair
           ) {
         // Use a replica set so that writes to replicated collections are not journaled and thus
         // retain their timestamps.
@@ -99,23 +99,22 @@ public:
         repl::ReplicationCoordinator::set(getGlobalServiceContext(),
                                           std::make_unique<repl::ReplicationCoordinatorMock>(
                                               getGlobalServiceContext(), replSettings));
-        auto opCtx = Client::getCurrent()->makeOperationContext();
-        _engine.notifyStartupComplete(opCtx.get());
+        _engine.notifyStorageStartupRecoveryComplete();
     }
 
-    ~WiredTigerRecoveryUnitHarnessHelper() {}
+    ~WiredTigerRecoveryUnitHarnessHelper() override {}
 
-    virtual std::unique_ptr<RecoveryUnit> newRecoveryUnit() final {
+    std::unique_ptr<RecoveryUnit> newRecoveryUnit() final {
         return std::unique_ptr<RecoveryUnit>(_engine.newRecoveryUnit());
     }
 
-    virtual std::unique_ptr<RecordStore> createRecordStore(OperationContext* opCtx,
-                                                           const std::string& ns) final {
+    std::unique_ptr<RecordStore> createRecordStore(OperationContext* opCtx,
+                                                   const std::string& ns) final {
         std::string ident = ns;
         NamespaceString nss = NamespaceString::createNamespaceString_forTest(ns);
         std::string uri = WiredTigerKVEngine::kTableUriPrefix + ns;
         StatusWith<std::string> result =
-            WiredTigerRecordStore::generateCreateString(kWiredTigerEngineName,
+            WiredTigerRecordStore::generateCreateString(std::string{kWiredTigerEngineName},
                                                         nss,
                                                         ident,
                                                         CollectionOptions(),
@@ -137,7 +136,7 @@ public:
         WiredTigerRecordStore::Params params;
         params.nss = nss;
         params.ident = ident;
-        params.engineName = kWiredTigerEngineName;
+        params.engineName = std::string{kWiredTigerEngineName};
         params.isCapped = false;
         params.keyFormat = KeyFormat::Long;
         params.overwrite = true;
@@ -147,7 +146,7 @@ public:
         params.tracksSizeAdjustments = true;
         params.forceUpdateWithFullDocument = false;
 
-        auto ret = std::make_unique<StandardWiredTigerRecordStore>(&_engine, opCtx, params);
+        auto ret = std::make_unique<WiredTigerRecordStore>(&_engine, opCtx, params);
         ret->postConstructorInit(opCtx, nss);
         return std::move(ret);
     }

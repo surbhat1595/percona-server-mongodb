@@ -30,13 +30,14 @@
 #include "mongo/db/replica_set_endpoint_util.h"
 
 #include "mongo/bson/bsontypes.h"
+#include "mongo/db/cluster_role.h"
 #include "mongo/db/commands.h"
 #include "mongo/db/multitenancy_gen.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/replica_set_endpoint_sharding_state.h"
-#include "mongo/db/s/replica_set_endpoint_feature_flag_gen.h"
 #include "mongo/s/grid.h"
+#include "mongo/s/sharding_feature_flags_gen.h"
 #include "mongo/util/namespace_string_util.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kSharding
@@ -55,48 +56,41 @@ bool isInternalClient(OperationContext* opCtx) {
 }
 
 /**
- * Returns true if this is a request for an unreplicated database or collection.
+ * Returns true if this is a request for the local database.
  */
-bool isUnreplicatedDatabaseOrCollectionCommandRequest(const OpMsgRequest& opMsgReq) {
-    if (opMsgReq.getDbName().isLocalDB()) {
-        return true;
-    }
-    if (const auto& firstElement = opMsgReq.body.firstElement();
-        firstElement.type() == BSONType::String &&
-        firstElement.String() == NamespaceString::kSystemDotProfileCollectionName) {
-        return true;
-    }
-    return false;
+bool isLocalDatabaseCommandRequest(const OpMsgRequest& opMsgReq) {
+    return opMsgReq.parseDbName().isLocalDB();
 }
 
 /**
- * Returns true if this is a request for an aggregate command with a $currentOp stage.
- */
-bool isCurrentOpAggregateCommandRequest(const OpMsgRequest& opMsgReq) {
-    if (opMsgReq.getDbName().isAdminDB() && opMsgReq.getCommandName() == "aggregate") {
-        auto aggRequest = AggregateCommandRequest::parse(
-            IDLParserContext("ServiceEntryPointMongod::isCurrentOp"), opMsgReq.body);
-        return !aggRequest.getPipeline().empty() &&
-            aggRequest.getPipeline()[0].firstElementFieldNameStringData() == "$currentOp";
-    }
-    return false;
-}
-
-/**
- * Returns true if this is a request for a command that needs to run on the mongod it arrives on.
+ * Returns true if this is a request for a command that needs to run directly on the mongod it
+ * arrives on.
  */
 bool isTargetedCommandRequest(OperationContext* opCtx, const OpMsgRequest& opMsgReq) {
-    return kTargetedCmdNames.contains(opMsgReq.getCommandName()) ||
-        isCurrentOpAggregateCommandRequest(opMsgReq);
+    return kTargetedCmdNames.contains(opMsgReq.getCommandName());
+}
+
+/**
+ * Returns the service for the specified role.
+ */
+Service* getService(OperationContext* opCtx, ClusterRole role) {
+    auto service = opCtx->getServiceContext()->getService(role);
+    invariant(service);
+    return service;
 }
 
 /**
  * Returns the router service.
  */
 Service* getRouterService(OperationContext* opCtx) {
-    auto routerService = opCtx->getServiceContext()->getService(ClusterRole::RouterServer);
-    invariant(routerService);
-    return routerService;
+    return getService(opCtx, ClusterRole::RouterServer);
+}
+
+/**
+ * Returns the shard service.
+ */
+Service* getShardService(OperationContext* opCtx) {
+    return getService(opCtx, ClusterRole::ShardServer);
 }
 
 /**
@@ -112,13 +106,17 @@ ScopedSetRouterService::ScopedSetRouterService(OperationContext* opCtx)
     : _opCtx(opCtx), _originalService(opCtx->getService()) {
     // Verify that the opCtx is not using the router service already.
     invariant(!_originalService->role().has(ClusterRole::RouterServer));
+    stdx::lock_guard<Client> lk(*_opCtx->getClient());
     _opCtx->getClient()->setService(getRouterService(opCtx));
+    _opCtx->setRoutedByReplicaSetEndpoint(true);
 }
 
 ScopedSetRouterService::~ScopedSetRouterService() {
     // Verify that the opCtx is still using the router service.
+    stdx::lock_guard<Client> lk(*_opCtx->getClient());
     invariant(_opCtx->getService()->role().has(ClusterRole::RouterServer));
     _opCtx->getClient()->setService(_originalService);
+    _opCtx->setRoutedByReplicaSetEndpoint(false);
 }
 
 bool isReplicaSetEndpointClient(Client* client) {
@@ -138,18 +136,33 @@ bool shouldRouteRequest(OperationContext* opCtx, const OpMsgRequest& opMsgReq) {
         return false;
     }
 
-    if (gMultitenancySupport) {
-        // Currently, serverless does not support sharding.
-        return false;
-    }
-
     if (!Grid::get(opCtx)->isShardingInitialized()) {
         return false;
     }
 
-    if (isInternalClient(opCtx) || isUnreplicatedDatabaseOrCollectionCommandRequest(opMsgReq) ||
+    if (isInternalClient(opCtx) || isLocalDatabaseCommandRequest(opMsgReq) ||
         isTargetedCommandRequest(opCtx, opMsgReq) || !isRoutableCommandRequest(opCtx, opMsgReq)) {
         return false;
+    }
+
+
+    auto shardCommand =
+        CommandHelpers::findCommand(getShardService(opCtx), opMsgReq.getCommandName());
+    if (shardCommand &&
+        shardCommand->secondaryAllowed(opCtx->getServiceContext()) ==
+            BasicCommand::AllowedOnSecondary::kNever) {
+        // On the shard service, this is a primary-only command. Make it fail with a
+        // NotWritablePrimary error if this mongod is not the primary. This check is necessary for
+        // providing replica set user experience (i.e. writes should fail on secondaries) since by
+        // going through the router code paths the command would get routed to the primary and
+        // succeed whether or not this mongod is the primary. This check only needs to be
+        // best-effort since if this mongod steps down after the check, the write would be routed
+        // to the new primary. For this reason, just use canAcceptWritesForDatabase_UNSAFE to
+        // avoid taking the RSTL lock or the ReplicationCoordinator's mutex.
+        uassert(ErrorCodes::NotWritablePrimary,
+                "This command is only allowed on a primary",
+                repl::ReplicationCoordinator::get(opCtx)->canAcceptWritesForDatabase_UNSAFE(
+                    opCtx, opMsgReq.parseDbName()));
     }
 
     // There is nothing that will prevent the cluster from becoming multi-shard (i.e. no longer

@@ -5,8 +5,6 @@
  * threshold is reached by adding entries to the SBE plan cache, the classic cache will start
  * stripping debug info even though the size of the classic cache may be below the threshold.
  * @tags: [
- *   # TODO SERVER-67607: Test plan cache with CQF enabled.
- *   cqf_experimental_incompatible,
  *   featureFlagSbeFull
  * ]
  */
@@ -21,7 +19,7 @@ function createTestCollection(collectionName) {
     const coll = db[collectionName];
     coll.drop();
     // Create multiple indexes to ensure we go through the multi-planner.
-    assert.commandWorked(coll.createIndexes([{a: 1}, {b: 1}, {a: 1, b: 1}, {b: 1, a: 1}]));
+    assert.commandWorked(coll.createIndexes([{a: 1}, {b: 1}, {a: -1, b: -1}, {b: -1, a: -1}]));
     return coll;
 }
 

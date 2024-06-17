@@ -41,17 +41,12 @@ class ValidatedTenancyScopeFactory {
 public:
     /**
      * Parse the provided command {body} and {securityToken}.
-     * 1. If a `"$tenant"` field is found in {body}, and the connection
-     * is authorized for cluster{useTenant}, a simple Tenant-only VTS will be returned.
-     * 2. If an unsigned {securityToken} is provided, we delegate to parseUnsignedToken().
-     * 3. If a signed {securityToken} is provided, we delegate to parseToken().
+     * 1. If an unsigned {securityToken} is provided, we delegate to parseUnsignedToken().
+     * 2. If a signed {securityToken} is provided, we delegate to parseToken().
      *
-     * Note that specifying both `"$tenant"` in {body} and a non-empty {securityToken} is an error.
      * If neither is provided, this method returns `boost::none`.
      */
-    static boost::optional<ValidatedTenancyScope> parse(Client* client,
-                                                        BSONObj body,
-                                                        StringData securityToken);
+    static boost::optional<ValidatedTenancyScope> parse(Client* client, StringData securityToken);
 
     /**
      * Creates an HS256 signed token based on a pre-shared symmetric key.
@@ -102,6 +97,32 @@ private:
      * then extracts authenticatedUser, TenantId, and/or TenantProtocol.
      */
     static ValidatedTenancyScope parseToken(Client* client, StringData securityToken);
+};
+
+/**
+ * An RAII type used with the DBDirectClient to reset the tenancy scope of an operation context,
+ * since the DBDirectClient reuses the same context, invalidating tenant isolation guardrails.
+ */
+class ValidatedTenancyScopeGuard {
+public:
+    ValidatedTenancyScopeGuard(OperationContext* opCtx);
+    ~ValidatedTenancyScopeGuard();
+
+    ValidatedTenancyScopeGuard(const ValidatedTenancyScopeGuard&) = delete;
+    void operator=(const ValidatedTenancyScopeGuard&) = delete;
+
+    /**
+     * Run the provided work within a tenant context, establishing an operation context with a
+     * validated tenancy scope for handling inner requests.
+     */
+    static void runAsTenant(OperationContext* opCtx,
+                            const boost::optional<TenantId>& tenantId,
+                            std::function<void()> workFunc);
+
+private:
+    OperationContext* _opCtx{nullptr};
+    boost::optional<ValidatedTenancyScope> _validatedTenancyScope;
+    boost::optional<auth::ValidatedTenancyScope::TenantProtocol> _tenantProtocol;
 };
 
 }  // namespace auth

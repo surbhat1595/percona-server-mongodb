@@ -85,7 +85,7 @@ public:
     static Balancer* get(OperationContext* operationContext);
 
     Balancer();
-    ~Balancer();
+    ~Balancer() override;
 
     /**
      * Invoked when the config server primary enters the 'PRIMARY' state and is invoked while the
@@ -205,7 +205,7 @@ private:
     void onStepUpComplete(OperationContext* opCtx, long long term) final;
     void onStepDown() final;
     void onBecomeArbiter() final;
-    inline std::string getServiceName() const override final {
+    inline std::string getServiceName() const final {
         return "Balancer";
     }
 
@@ -320,7 +320,7 @@ private:
 
     std::unique_ptr<MoveUnshardedPolicy> _moveUnshardedPolicy;
 
-    std::unique_ptr<stdx::unordered_set<NamespaceString>> _imbalancedCollectionsCache;
+    stdx::unordered_set<NamespaceString> _imbalancedCollectionsCache;
 };
 
 }  // namespace mongo

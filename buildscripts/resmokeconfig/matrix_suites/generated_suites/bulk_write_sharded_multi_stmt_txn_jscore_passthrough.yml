@@ -61,7 +61,6 @@ selector:
   - jstests/core/**/stages*.js
   - jstests/core/**/startup_log.js
   - jstests/core/**/top.js
-  - jstests/core/**/explain_missing_database.js
   - jstests/core/**/geo_2d_explain.js
   - jstests/core/**/geo_s2explain.js
   - jstests/core/**/geo_s2sparse.js
@@ -189,7 +188,6 @@ selector:
   - jstests/core/**/find_and_modify_concurrent_update.js
   - jstests/core/**/fsync.js
   - jstests/core/**/geo_update_btree.js
-  - jstests/core/**/killop_drop_collection.js
   - jstests/core/**/loadserverscripts.js
   - jstests/core/**/mr_killop.js
   - jstests/core/**/removeb.js
@@ -209,11 +207,9 @@ selector:
   - jstests/core/write/update/batch_write_command_update.js
   - jstests/core/write/delete/batch_write_command_delete.js
   - jstests/core/failcommand_failpoint.js
-  - jstests/core/version_api_v1_command_coverage.js
   - jstests/core/write/write_commands_reject_unknown_fields.js
   - jstests/core/query/explain/explain_uuid.js
   - jstests/core/query/explain/explain_includes_command.js
-  - jstests/core/txns/api_params_transaction.js
   - jstests/core/txns/transactions_profiling.js
   - jstests/core/txns/currentop_blocked_operations.js
   - jstests/core/txns/transactions_profiling_with_drops.js
@@ -237,4 +233,5 @@ selector:
   - requires_timeseries
   roots:
   - jstests/core/**/*.js
+  - jstests/core_sharding/**/*.js
 test_kind: multi_stmt_txn_passthrough

@@ -10,8 +10,8 @@
  *   command_not_supported_in_serverless,
  *   # Contains commands that fail which will fail the entire transaction
  *   does_not_support_transactions,
- *   # TODO SERVER-52419 Remove this tag.
- *   featureFlagBulkWriteCommand,
+ *   operations_longer_than_stepdown_interval,
+ *   requires_fcv_80
  * ]
  */
 import {

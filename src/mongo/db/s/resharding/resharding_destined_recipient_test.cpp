@@ -130,8 +130,10 @@ void runInTransaction(OperationContext* opCtx, Callable&& func) {
 
     auto txnParticipant = TransactionParticipant::get(opCtx);
     ASSERT(txnParticipant);
-    txnParticipant.beginOrContinue(
-        opCtx, {txnNum}, false /* autocommit */, true /* startTransaction */);
+    txnParticipant.beginOrContinue(opCtx,
+                                   {txnNum},
+                                   false /* autocommit */,
+                                   TransactionParticipant::TransactionActions::kStart);
     txnParticipant.unstashTransactionResources(opCtx, "SetDestinedRecipient");
 
     func();
@@ -144,7 +146,7 @@ class DestinedRecipientTest : public ShardServerTestFixtureWithCatalogCacheLoade
 public:
     const NamespaceString kNss = NamespaceString::createNamespaceString_forTest("test.foo");
     const std::string kShardKey = "x";
-    const std::vector<ShardType> kShardList = {ShardType(_myShardName.toString(), "Host0:12345"),
+    const std::vector<ShardType> kShardList = {ShardType(kMyShardName.toString(), "Host0:12345"),
                                                ShardType("shard1", "Host1:12345")};
 
     void setUp() override {
@@ -279,7 +281,7 @@ protected:
                             env.version.placementVersion().epoch(),
                             env.version.placementVersion().getTimestamp(),
                             Date_t::now(),
-                            UUID::gen(),
+                            env.sourceUuid,
                             BSON(kShardKey << 1));
         coll.setAllowMigrations(false);
 

@@ -78,6 +78,7 @@
 #include "mongo/s/config_server_catalog_cache_loader.h"
 #include "mongo/s/database_version.h"
 #include "mongo/s/query/cluster_cursor_manager.h"
+#include "mongo/s/routing_information_cache.h"
 #include "mongo/s/write_ops/batched_command_response.h"
 #include "mongo/util/str.h"
 #include "mongo/util/time_support.h"
@@ -118,7 +119,8 @@ void ConfigServerTestFixture::setUp() {
     replicationCoordinator()->alwaysAllowWrites(true);
 
     // Initialize sharding components as a config server.
-    serverGlobalParams.clusterRole = {ClusterRole::ShardServer, ClusterRole::ConfigServer};
+    serverGlobalParams.clusterRole = {
+        ClusterRole::ShardServer, ClusterRole::ConfigServer, ClusterRole::RouterServer};
 
     // The catalog manager requires a special executor used for operations during addShard.
     auto specialNet(std::make_unique<executor::NetworkInterfaceMock>());
@@ -131,6 +133,7 @@ void ConfigServerTestFixture::setUp() {
         std::make_unique<NetworkTestEnv>(_executorForAddShard, _mockNetworkForAddShard);
     auto configServerCatalogCacheLoader = std::make_unique<ConfigServerCatalogCacheLoader>();
     CatalogCacheLoader::set(getServiceContext(), std::move(configServerCatalogCacheLoader));
+    RoutingInformationCache::set(getServiceContext());
 
     uassertStatusOK(initializeGlobalShardingStateForMongodForTest(ConnectionString::forLocal()));
 
@@ -149,8 +152,6 @@ void ConfigServerTestFixture::tearDown() {
     _mockNetworkForAddShard = nullptr;
 
     ShardingCatalogManager::clearForTests(getServiceContext());
-
-    CatalogCacheLoader::clearForTests(getServiceContext());
 
     ShardingMongoDTestFixture::tearDown();
 }
@@ -305,9 +306,11 @@ StatusWith<ShardType> ConfigServerTestFixture::getShardDoc(OperationContext* opC
     return ShardType::fromBSON(doc.getValue());
 }
 
-CollectionType ConfigServerTestFixture::setupCollection(const NamespaceString& nss,
-                                                        const KeyPattern& shardKey,
-                                                        const std::vector<ChunkType>& chunks) {
+CollectionType ConfigServerTestFixture::setupCollection(
+    const NamespaceString& nss,
+    const KeyPattern& shardKey,
+    const std::vector<ChunkType>& chunks,
+    std::function<void(CollectionType& coll)> collectionCustomizer) {
     auto dbDoc = findOneOnConfigCollection(
         operationContext(),
         NamespaceString::kConfigDatabasesNamespace,
@@ -329,6 +332,8 @@ CollectionType ConfigServerTestFixture::setupCollection(const NamespaceString& n
                         Date_t::now(),
                         chunks[0].getCollectionUUID(),
                         shardKey);
+    collectionCustomizer(coll);
+
     ASSERT_OK(
         insertToConfigCollection(operationContext(), CollectionType::ConfigNS, coll.toBSON()));
 

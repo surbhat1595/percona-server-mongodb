@@ -102,19 +102,6 @@ boost::optional<ClusteredCollectionInfo> parseClusteredInfo(const BSONElement& e
     return makeCanonicalClusteredInfo(std::move(indexSpec));
 }
 
-boost::optional<ClusteredCollectionInfo> createClusteredInfoForNewCollection(
-    const BSONObj& indexSpec) {
-    if (!indexSpec["clustered"]) {
-        return boost::none;
-    }
-
-    auto filteredIndexSpec = indexSpec.removeField("clustered"_sd);
-    auto clusteredIndexSpec = ClusteredIndexSpec::parse(
-        IDLParserContext{"ClusteredUtil::createClusteredInfoForNewCollection"}, filteredIndexSpec);
-    ensureClusteredIndexName(clusteredIndexSpec);
-    return makeCanonicalClusteredInfo(std::move(clusteredIndexSpec));
-};
-
 bool requiresLegacyFormat(const NamespaceString& nss) {
     return nss.isTimeseriesBucketsCollection() || nss.isChangeStreamPreImagesCollection();
 }
@@ -166,6 +153,37 @@ StringData getClusterKeyFieldName(const ClusteredIndexSpec& indexSpec) {
 
 BSONObj getSortPattern(const ClusteredIndexSpec& indexSpec) {
     return indexSpec.getKey();
+}
+
+void checkCreationOptions(const CreateCommand& cmd) {
+    uassert(ErrorCodes::Error(6049200),
+            str::stream() << "'size' field for capped collections is not allowed on clustered "
+                             "collections. Did you mean 'capped: true' with 'expireAfterSeconds'?",
+            !cmd.getSize());
+
+    uassert(ErrorCodes::Error(6049204),
+            str::stream() << "'max' field for capped collections is not allowed on clustered "
+                             "collections. Did you mean 'capped: true' with 'expireAfterSeconds'?",
+            !cmd.getMax());
+
+    if (cmd.getCapped()) {
+        uassert(
+            ErrorCodes::Error(6127800),
+            "Clustered capped collection only available with 'enableTestCommands' server parameter",
+            getTestCommandsEnabled());
+
+        uassert(ErrorCodes::Error(6049201),
+                "A capped clustered collection requires the 'expireAfterSeconds' field",
+                cmd.getExpireAfterSeconds());
+    }
+
+    if (cmd.getTimeseries()) {
+        uassert(ErrorCodes::InvalidOptions,
+                "Invalid option 'clusteredIndex: false': clustered index can't be disabled for "
+                "timeseries collection",
+                !cmd.getClusteredIndex() || !holds_alternative<bool>(*cmd.getClusteredIndex()) ||
+                    get<bool>(*cmd.getClusteredIndex()));
+    }
 }
 
 }  // namespace clustered_util

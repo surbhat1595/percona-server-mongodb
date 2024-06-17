@@ -57,6 +57,7 @@
 #include "mongo/db/dbdirectclient.h"
 #include "mongo/db/repl/change_stream_oplog_notification.h"
 #include "mongo/db/repl/read_concern_level.h"
+#include "mongo/db/s/collection_sharding_runtime.h"
 #include "mongo/db/s/database_sharding_state.h"
 #include "mongo/db/s/forwardable_operation_metadata.h"
 #include "mongo/db/s/sharding_ddl_util.h"
@@ -379,6 +380,18 @@ ExecutorFuture<void> MovePrimaryCoordinator::_cleanupOnAbort(
             const auto& failedPhase = _doc.getPhase();
             const auto& toShardId = _doc.getToShardId();
 
+            unblockReadsAndWrites(opCtx);
+            try {
+                // Even if the error is `ShardNotFound`, the recipient may still be in draining
+                // mode, so try to exit the critical section anyway.
+                exitCriticalSectionOnRecipient(opCtx);
+            } catch (const ExceptionFor<ErrorCodes::ShardNotFound>&) {
+                LOGV2_INFO(7392902,
+                           "Failed to exit critical section on recipient as it has been removed",
+                           logAttrs(_dbName),
+                           "to"_attr = toShardId);
+            }
+
             if (failedPhase <= Phase::kCommit) {
                 // A non-retryable error occurred before the new primary shard was actually
                 // committed, so any cloned data on the recipient must be dropped.
@@ -393,18 +406,6 @@ ExecutorFuture<void> MovePrimaryCoordinator::_cleanupOnAbort(
                                logAttrs(_dbName),
                                "to"_attr = toShardId);
                 }
-            }
-
-            unblockReadsAndWrites(opCtx);
-            try {
-                // Even if the error is `ShardNotFound`, the recipient may still be in draining
-                // mode, so try to exit the critical section anyway.
-                exitCriticalSectionOnRecipient(opCtx);
-            } catch (const ExceptionFor<ErrorCodes::ShardNotFound>&) {
-                LOGV2_INFO(7392902,
-                           "Failed to exit critical section on recipient as it has been removed",
-                           logAttrs(_dbName),
-                           "to"_attr = toShardId);
             }
 
             LOGV2_ERROR(7392903,
@@ -458,14 +459,8 @@ std::vector<NamespaceString> MovePrimaryCoordinator::getCollectionsToClone(
         auto catalogClient = Grid::get(opCtx)->catalogClient();
         auto colls = catalogClient->getShardedCollectionNamespacesForDb(
             opCtx, _dbName, repl::ReadConcernLevel::kMajorityReadConcern, {});
-        auto unshardedTrackedColls = _doc.getCloneOnlyUntrackedColls()
-            ? catalogClient->getUnsplittableCollectionNamespacesForDb(
-                  opCtx, _dbName, repl::ReadConcernLevel::kMajorityReadConcern, {})
-            : catalogClient->getUnsplittableCollectionNamespacesForDbOutsideOfShards(
-                  opCtx,
-                  _dbName,
-                  {ShardingState::get(opCtx)->shardId().toString()},
-                  repl::ReadConcernLevel::kMajorityReadConcern);
+        auto unshardedTrackedColls = catalogClient->getUnsplittableCollectionNamespacesForDb(
+            opCtx, _dbName, repl::ReadConcernLevel::kMajorityReadConcern, {});
 
         std::move(
             unshardedTrackedColls.begin(), unshardedTrackedColls.end(), std::back_inserter(colls));
@@ -543,7 +538,6 @@ std::vector<NamespaceString> MovePrimaryCoordinator::cloneDataToRecipient(Operat
             "_shardsvrCloneCatalogData",
             DatabaseNameUtil::serialize(_dbName, SerializationContext::stateDefault()));
         commandBuilder.append("from", fromShard->getConnString().toString());
-        commandBuilder.append("cloneOnlyUntrackedColls", _doc.getCloneOnlyUntrackedColls());
         if (osi.is_initialized()) {
             commandBuilder.appendElements(osi->toBSON());
         }
@@ -602,7 +596,6 @@ void MovePrimaryCoordinator::commitMetadataToConfig(
     OperationContext* opCtx, const DatabaseVersion& preCommitDbVersion) const {
     const auto commitCommand = [&] {
         ConfigsvrCommitMovePrimary request(_dbName, preCommitDbVersion, _doc.getToShardId());
-        request.setCloneOnlyUntrackedColls(_doc.getCloneOnlyUntrackedColls());
         request.setDbName(DatabaseName::kAdmin);
         return CommandHelpers::appendMajorityWriteConcern(request.toBSON({}));
     }();
@@ -663,13 +656,6 @@ void MovePrimaryCoordinator::dropStaleDataOnDonor(OperationContext* opCtx) const
 
     invariant(_doc.getCollectionsToClone());
 
-    auto trackedUnsplittableCollections =
-        Grid::get(opCtx)->catalogClient()->getUnsplittableCollectionNamespacesForDbOutsideOfShards(
-            opCtx,
-            _dbName,
-            {ShardingState::get(opCtx)->shardId().toString()},
-            repl::ReadConcernLevel::kMajorityReadConcern);
-
     const auto dropColl = [&](const NamespaceString& nssToDrop) {
         DropReply unusedDropReply;
         try {
@@ -688,9 +674,6 @@ void MovePrimaryCoordinator::dropStaleDataOnDonor(OperationContext* opCtx) const
         }
     };
 
-    for (const auto& nss : trackedUnsplittableCollections) {
-        dropColl(nss);
-    }
     for (const auto& nss : *_doc.getCollectionsToClone()) {
         dropColl(nss);
     }

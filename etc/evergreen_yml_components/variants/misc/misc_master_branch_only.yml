@@ -1,5 +1,8 @@
-# Miscellaneous build variants that should run only on master branch projects
-# and should be excluded during branching
+# Miscellaneous build variants
+#
+# After the branching variants in this file
+# should NOT run on a new rapid release (v7.1, v7.2 etc.)
+# and LTS release (v7.0, v6.0 etc.) branch projects
 
 buildvariants:
 - name: &enterprise-windows-build-metrics enterprise-windows-build-metrics
@@ -15,16 +18,14 @@ buildvariants:
       LIBPATH="c:/sasl/lib"
       -j$(( $(grep -c ^processor /proc/cpuinfo) / 2 ))
       --win-version-min=win10
-    python: '/cygdrive/c/python/python39/python.exe'
+    python: '/cygdrive/c/python/python310/python.exe'
   tasks:
-  - name: build_metrics_gen_TG
+  - name: build_metrics_tasks_gen
 
 - name: &macos-enterprise-build-metrics macos-enterprise-build-metrics
   display_name: "~ Build Metrics Enterprise MacOS"
   cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
   stepback: false
-  modules:
-  - enterprise
   run_on:
   - macos-1100
   expansions:
@@ -36,14 +37,12 @@ buildvariants:
       --libc++
       --variables-files=etc/scons/xcode_macosx.vars
   tasks:
-  - name: build_metrics_gen_TG
+  - name: build_metrics_tasks_gen
 
 - name: &enterprise-rhel-80-64-bit-build-metrics enterprise-rhel-80-64-bit-build-metrics
   display_name: "~ Build Metrics Enterprise RHEL 8.0 "
   cron: "0 4 * * *" # From the ${project_nightly_cron} parameter
   stepback: false
-  modules:
-  - enterprise
   run_on:
   - rhel80-build
   expansions:
@@ -56,14 +55,12 @@ buildvariants:
     core_analyzer_distro_name: rhel80-xlarge
     num_scons_link_jobs_available: 0.1
   tasks:
-  - name: build_metrics_gen_TG
+  - name: build_metrics_tasks_gen
 
 - name: &enterprise-rhel-80-aarch64-build-metrics enterprise-rhel-80-aarch64-build-metrics
   display_name: "~ Build Metrics Enterprise AL22 ARM"
   cron: "0 4 * * *" # From the ${project_nightly_cron} parameter
   stepback: false
-  modules:
-  - enterprise
   run_on:
   - amazon2023.0-arm64-large
   expansions:
@@ -75,7 +72,7 @@ buildvariants:
     large_distro_name: amazon2023.0-arm64-large
     num_scons_link_jobs_available: 0.1
   tasks:
-  - name: build_metrics_gen_TG
+  - name: build_metrics_tasks_gen
 
 - name: &shared-scons-cache-pruning shared-scons-cache-pruning
   display_name: "Shared SCons Cache Pruning"
@@ -93,13 +90,11 @@ buildvariants:
   - windows-vsCurrent-small
   stepback: false
   expansions:
-    python: '/cygdrive/c/python/python39/python.exe'
+    python: '/cygdrive/c/python/python310/python.exe'
   tasks:
   - name: win_shared_scons_cache_pruning
 
 - name: &stm-daily-cron stm-daily-cron
-  modules:
-  - enterprise
   display_name: "* STM Daily Cron"
   cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
   run_on:
@@ -115,21 +110,3 @@ buildvariants:
   - name: powercycle_smoke_skip_compile_gen
   - name: monitor_mongo_fork_10gen
   - name: daily_task_scanner
-
-- name: tooling-metrics-x86
-  display_name: "* Tooling Metrics x86"
-  cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
-  run_on:
-  - ubuntu2204-small
-  stepback: false
-  tasks:
-  - name: tooling_metrics_test
-
-- name: tooling-metrics-arm64
-  display_name: "* Tooling Metrics ARM64"
-  cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
-  run_on:
-  - ubuntu2204-arm64-small
-  stepback: false
-  tasks:
-  - name: tooling_metrics_test

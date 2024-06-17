@@ -23,6 +23,7 @@ executor:
     class: MongoDFixture
     mongod_options:
       set_parameters:
+        enableAutoCompaction: 1
         enableTestCommands: 1
   hooks:
   - class: ValidateCollections
@@ -41,6 +42,7 @@ selector:
   - jstests/core/**/profile1.js
   - jstests/core/**/profile2.js
   - jstests/core/**/find9.js
+  - jstests/core/**/express.js
   roots:
   - jstests/core/**/*.js
   - jstests/core_standalone/**/*.js

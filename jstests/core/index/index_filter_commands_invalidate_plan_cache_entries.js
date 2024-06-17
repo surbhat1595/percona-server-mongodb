@@ -16,8 +16,8 @@
  *   requires_fcv_62,
  *   # Plan cache state is node-local and will not get migrated alongside tenant data.
  *   tenant_migration_incompatible,
- *   # TODO SERVER-67607: Test plan cache with CQF enabled.
- *   cqf_experimental_incompatible,
+ *   # Plan cache state is node-local and will not get migrated alongside user data
+ *   assumes_balancer_off,
  * ]
  */
 import {getPlanCacheKeyFromShape} from "jstests/libs/analyze_plan.js";
@@ -36,7 +36,7 @@ function initCollection(collection) {
     // We need multiple indexes so that the multi-planner is executed.
     assert.commandWorked(collection.createIndex({a: 1}));
     assert.commandWorked(collection.createIndex({b: 1}));
-    assert.commandWorked(collection.createIndex({a: 1, b: 1}));
+    assert.commandWorked(collection.createIndex({a: -1, b: 1}));
     assert.commandWorked(collection.insert({a: 1, b: 1, c: 1}));
 }
 initCollection(coll);

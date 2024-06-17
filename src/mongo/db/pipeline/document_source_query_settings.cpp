@@ -58,23 +58,27 @@ BSONObj createDebugQueryShape(const BSONObj& representativeQuery,
     // representative query.
     const auto representativeInfo =
         query_settings::createRepresentativeInfo(representativeQuery, opCtx, tenantId);
-    // Erase the nested 'tenantId' so that information doesn't get leaked to the user.
-    MutableDocument mutableDocument(Document{representativeInfo.serializedQueryShape});
-    mutableDocument.setNestedField("cmdNs.tenantId", Value());
-    return mutableDocument.freeze().toBson();
+    return representativeInfo.serializedQueryShape;
 }
 
 DocumentSource::GetNextResult createResult(OperationContext* opCtx,
                                            const boost::optional<TenantId>& tenantId,
                                            QueryShapeConfiguration&& configuration,
-                                           bool includeDebugQueryShape) {
+                                           bool includeDebugQueryShape) try {
     BSONObjBuilder bob;
     configuration.serialize(&bob);
-    if (includeDebugQueryShape) {
+    if (includeDebugQueryShape && configuration.getRepresentativeQuery()) {
         bob.append(DocumentSourceQuerySettings::kDebugQueryShapeFieldName,
-                   createDebugQueryShape(configuration.getRepresentativeQuery(), opCtx, tenantId));
+                   createDebugQueryShape(*configuration.getRepresentativeQuery(), opCtx, tenantId));
     }
     return Document{bob.obj()};
+} catch (const ExceptionFor<ErrorCodes::BSONObjectTooLarge>&) {
+    uasserted(ErrorCodes::BSONObjectTooLarge,
+              str::stream() << "query settings object exceeds " << BSONObjMaxInternalSize
+                            << " bytes"
+                            << (includeDebugQueryShape
+                                    ? "; consider not setting 'showDebugQueryShape' to true"
+                                    : ""));
 }
 }  // namespace
 

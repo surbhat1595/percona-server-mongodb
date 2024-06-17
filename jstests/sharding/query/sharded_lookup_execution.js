@@ -7,8 +7,10 @@
  *
  * Shard targeting logic for $lookup changed in 7.3 and may not match the expected behavior in a
  * multiversion environment.
+ * Changes in $group behavior mean this also requires 8.0
  * @tags: [
- *   requires_fcv_73,
+ *   requires_fcv_80,
+ *   temp_disabled_embedded_router_uncategorized,
  * ]
  */
 
@@ -120,7 +122,8 @@ function assertLookupExecution(pipeline, opts, expected) {
                 filter: {
                     "command.aggregate": reviewsColl.getName(),
                     "command.comment": opts.comment,
-                    "command.fromMongos": expected.mongosMerger === true
+                    "command.fromMongos": expected.mongosMerger === true,
+                    "errName": {$ne: "StaleConfig"}
                 },
                 numExpectedMatches: expected.subpipelineExec[i]
             });
@@ -141,7 +144,8 @@ function assertLookupExecution(pipeline, opts, expected) {
                     filter: {
                         "command.aggregate": reviewsColl.getName(),
                         "command.comment": opts.comment,
-                        "command.fromMongos": expected.mongosMerger === true
+                        "command.fromMongos": expected.mongosMerger === true,
+                        "errName": {$ne: "StaleConfig"}
                     },
                     numExpectedMatches: expected.subpipelineExec[i]
                 });
@@ -161,6 +165,7 @@ function assertLookupExecution(pipeline, opts, expected) {
                 filter: {
                     "command.aggregate": reviewsColl.getName(),
                     "command.comment": opts.comment,
+                    "errName": {$ne: "StaleConfig"},
                     "command.pipeline.$lookup": {$exists: true}
                 }
             });
@@ -168,8 +173,11 @@ function assertLookupExecution(pipeline, opts, expected) {
             // Confirm that the nested $lookup subpipeline execution is as expected.
             profilerHasNumMatchingEntriesOrThrow({
                 profileDB: shardList[i],
-                filter:
-                    {"command.aggregate": updatesColl.getName(), "command.comment": opts.comment},
+                filter: {
+                    "command.aggregate": updatesColl.getName(),
+                    "command.comment": opts.comment,
+                    "errName": {$ne: "StaleConfig"}
+                },
                 numExpectedMatches: expected.nestedExec[i]
             });
         }
@@ -667,10 +675,9 @@ assertLookupExecution(pipeline, {comment: "unsharded_to_sharded_cache"}, {
     toplevelExec: [1, 0],
     // The node executing the $lookup will open a cursor on
     // every shard that contains the foreign collection for the first iteration of $lookup. The
-    // $group stage in the subpipeline is non-correlated so the $lookup will only need to send the
-    // subpipeline to each shard once to populate the cache, and will perform local queries against
-    // the cache in subsequent iterations.
-    subpipelineExec: [1, 1]
+    // $group stage in the subpipeline is correlated because of the $group/$match optimization
+    // $lookup will need to perform local against the shard repeatedly.
+    subpipelineExec: [2, 2]
 });
 
 // Test sharded local collection and sharded foreign collection.
@@ -711,10 +718,9 @@ assertLookupExecution(pipeline, {comment: "sharded_to_sharded_cache"}, {
     toplevelExec: [1, 1],
     // Each node that executes the $lookup will open a cursor on every shard that contains the
     // foreign collection for the first iteration of $lookup. The $group stage in the subpipeline
-    // is non-correlated so the $lookup will only need to send the subpipeline to each shard once
-    // to populate the cache, and will perform local queries against the cache in subsequent
-    // iterations.
-    subpipelineExec: [2, 2]
+    // is correlated so the $lookup will need to send the subpipeline to each shard once for
+    // each iteration.
+    subpipelineExec: [4, 4]
 });
 
 // Test unsharded local collection and unsharded foreign collection.
@@ -725,10 +731,9 @@ assertLookupExecution(pipeline, {comment: "unsharded_to_unsharded_cache"}, {
     toplevelExec: [1, 0],
     // Because the foreign collection is unsharded, the node executing the $lookup can do a local
     // read on the foreign coll during the first iteration of $lookup. The $group stage in the
-    // subpipeline is non-correlated so the $lookup will only need to do the local read once to
-    // populate the cache, and will perform local queries against the cache in subsequent
-    // iterations.
-    subpipelineLocalExec: [1, 0],
+    // subpipeline is correlated so the $lookup will need to perform the subpipeline for each
+    // iteration.
+    subpipelineLocalExec: [4, 0],
     subpipelineExec: [0, 0]
 });
 
@@ -742,10 +747,9 @@ assertLookupExecution(pipeline, {comment: "sharded_to_unsharded_cache"}, {
     toplevelExec: [1, 0],
     // Because the foreign collection is unsharded, the node executing the $lookup can do a local
     // read on the foreign coll during the first iteration of $lookup. The $group stage in the
-    // subpipeline is non-correlated so the $lookup will only need to do the local read once to
-    // populate the cache, and will perform local queries against the cache in subsequent
-    // iterations.
-    subpipelineLocalExec: [1, 0],
+    // subpipeline is correlated so the $lookup will need to perform the subpipeline for each
+    // iteration.
+    subpipelineLocalExec: [4, 0],
     subpipelineExec: [0, 0]
 });
 

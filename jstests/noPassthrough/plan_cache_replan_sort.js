@@ -11,6 +11,7 @@ import {checkSbeFullyEnabled} from "jstests/libs/sbe_util.js";
 
 const conn = MongoRunner.runMongod({setParameter: {allowDiskUseByDefault: false}});
 const db = conn.getDB("test");
+
 const coll = db.plan_cache_replan_sort;
 coll.drop();
 

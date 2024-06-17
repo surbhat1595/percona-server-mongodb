@@ -111,9 +111,12 @@ NamespaceString parseGraphLookupFromAndResolveNamespace(const BSONElement& elem,
         ? boost::make_optional(auth::ValidatedTenancyScopeFactory::create(
               *tenantId, auth::ValidatedTenancyScopeFactory::TrustedForInnerOpMsgRequestTag{}))
         : boost::none;
-    auto spec = NamespaceSpec::parse(
-        IDLParserContext{elem.fieldNameStringData(), false /* apiStrict */, vts, tenantId},
-        elem.embeddedObject());
+    auto spec = NamespaceSpec::parse(IDLParserContext{elem.fieldNameStringData(),
+                                                      false /* apiStrict */,
+                                                      vts,
+                                                      tenantId,
+                                                      SerializationContext::stateDefault()},
+                                     elem.embeddedObject());
 
     auto nss = NamespaceStringUtil::deserialize(spec.getDb().value_or(DatabaseName()),
                                                 spec.getColl().value_or(""));
@@ -247,20 +250,35 @@ void DocumentSourceGraphLookUp::doDispose() {
     _visited.clear();
 }
 
+boost::optional<ShardId> DocumentSourceGraphLookUp::computeMergeShardId() const {
+    // Note that we can only check sharding state when we're on mongos as we may be holding
+    // locks on mongod (which would inhibit looking up sharding state in the catalog cache).
+    if (pExpCtx->inMongos) {
+        // Only nominate a merging shard if the outer collection is unsharded.
+        if (!pExpCtx->mongoProcessInterface->isSharded(pExpCtx->opCtx, pExpCtx->ns)) {
+            return pExpCtx->mongoProcessInterface->determineSpecificMergeShard(pExpCtx->opCtx,
+                                                                               _from);
+        }
+    } else {
+        return ShardingState::get(pExpCtx->opCtx)->shardId();
+    }
+    return boost::none;
+}
+
 bool DocumentSourceGraphLookUp::foreignShardedGraphLookupAllowed() const {
-    return !pExpCtx->opCtx->inMultiDocumentTransaction();
+    const auto fcvSnapshot = serverGlobalParams.mutableFCV.acquireFCVSnapshot();
+    return !pExpCtx->opCtx->inMultiDocumentTransaction() ||
+        gFeatureFlagAllowAdditionalParticipants.isEnabled(fcvSnapshot);
 }
 
 boost::optional<DocumentSource::DistributedPlanLogic>
 DocumentSourceGraphLookUp::distributedPlanLogic() {
     // If $graphLookup into a sharded foreign collection is allowed, top-level $graphLookup
     // stages can run in parallel on the shards.
-    // TODO SERVER-83902: This check will fail if the inner side is a sharded view as we will not
-    // infer that '_from' is a view until we issue an aggregate to perform the search against
-    // '_from'. The result is that $graphLookup will execute on as a merger when the 'from'
-    // collection is a view (regardless of whether it is sharded or not).
-    if (foreignShardedGraphLookupAllowed() && pExpCtx->subPipelineDepth == 0 &&
-        pExpCtx->mongoProcessInterface->isSharded(_fromExpCtx->opCtx, _from)) {
+    if (foreignShardedGraphLookupAllowed() && pExpCtx->subPipelineDepth == 0) {
+        if (getMergeShardId()) {
+            return DistributedPlanLogic{nullptr, this, boost::none};
+        }
         return boost::none;
     }
 
@@ -276,7 +294,7 @@ void DocumentSourceGraphLookUp::doBreadthFirstSearch() {
             expectUnshardedCollectionInScope;
 
         const auto allowForeignSharded = foreignShardedGraphLookupAllowed();
-        if (!allowForeignSharded) {
+        if (!allowForeignSharded && !_fromExpCtx->inMongos) {
             // Enforce that the foreign collection must be unsharded for $graphLookup.
             expectUnshardedCollectionInScope =
                 _fromExpCtx->mongoProcessInterface->expectUnshardedCollectionInScope(
@@ -451,10 +469,11 @@ boost::optional<BSONObj> DocumentSourceGraphLookUp::makeMatchStageFromFrontier(
     // We wrap the query in a $match so that it can be parsed into a DocumentSourceMatch when
     // constructing a pipeline to execute.
 
-    // $match stages will conflate null, and undefined values. Keep track of which ones are
-    // present and eliminate documents that would match the others later.
+    // $graphLookup and regular $match semantics differ in treatment of null/missing. Regular $match
+    // stages may conflate null/missing values. Here, null only matches null.
+
+    // Keep track of whether we see null or missing in the frontier.
     bool matchNull = false;
-    bool matchUndefined = false;
     bool seenMissing = false;
     BSONObjBuilder match;
     {
@@ -474,8 +493,6 @@ boost::optional<BSONObj> DocumentSourceGraphLookUp::makeMatchStageFromFrontier(
                         for (auto&& value : _frontier) {
                             if (value.getType() == BSONType::jstNULL) {
                                 matchNull = true;
-                            } else if (value.getType() == BSONType::Undefined) {
-                                matchUndefined = true;
                             } else if (value.missing()) {
                                 seenMissing = true;
                             }
@@ -486,24 +503,9 @@ boost::optional<BSONObj> DocumentSourceGraphLookUp::makeMatchStageFromFrontier(
             }
             // We never want to see documents where the 'connectToField' is missing. Only add a
             // check for it in situations where we might match it accidentally.
-            if (matchNull || matchUndefined || seenMissing) {
+            if (matchNull || seenMissing) {
                 auto existsMatch = BSON(_connectToField.fullPath() << BSON("$exists" << true));
                 andObj << existsMatch;
-            }
-            // If matching null or undefined, make sure we don't match the other one.
-            // If seenMissing is true, we've already filtered out missing values above.
-            if (matchNull || matchUndefined) {
-                if (!matchUndefined) {
-                    auto notUndefined =
-                        BSON(_connectToField.fullPath() << BSON("$not" << BSON("$type"
-                                                                               << "undefined")));
-                    andObj << notUndefined;
-                } else if (!matchNull) {
-                    auto notUndefined =
-                        BSON(_connectToField.fullPath() << BSON("$not" << BSON("$type"
-                                                                               << "null")));
-                    andObj << notUndefined;
-                }
             }
         }
     }
@@ -527,6 +529,11 @@ void DocumentSourceGraphLookUp::performSearch() {
         _frontier.insert(startingValue);
         _frontierUsageBytes += startingValue.getApproximateSize();
     }
+
+    // Query settings are looked up after parsing and therefore are not populated in the
+    // '_fromExpCtx' as part of DocumentSourceGraphLookUp constructor. Assign query settings to the
+    // '_fromExpCtx' by copying them from the parent query ExpressionContext.
+    setQuerySettingsIfNeeded(_fromExpCtx, pExpCtx->getQuerySettings());
 
     try {
         doBreadthFirstSearch();
@@ -574,22 +581,7 @@ StageConstraints DocumentSourceGraphLookUp::constraints(Pipeline::SplitState pip
     // sharded (that is, it is either unsplittable or untracked), then we should merge on the shard
     // which owns the inner collection.
     if (pipeState == Pipeline::SplitState::kSplitForMerge) {
-        constraints.mergeShardId =
-            pExpCtx->mongoProcessInterface->determineSpecificMergeShard(pExpCtx->opCtx, _from);
-    }
-
-    // If we have not yet designated a merging shard, and are either executing on mongod, the
-    // foreign collection is unsharded, or sharded $graphLookup is not allowed, designate the
-    // current shard as the merging shard. This is done to prevent pushing this $graphLookup to the
-    // shards part of the pipeline. This is an important optimization as designating this
-    // $graphLookup as a merging stage allows us to execute a single $graphLookup (as opposed
-    // executing one $graphLookup on each involved shard). When this stage is part of a deeply
-    // nested pipeline, it prevents creating an exponential explosion of cursors/resources
-    // (proportional to the level of pipeline nesting).
-    if (!constraints.mergeShardId &&
-        !(pExpCtx->inMongos && pExpCtx->mongoProcessInterface->isSharded(pExpCtx->opCtx, _from) &&
-          foreignShardedGraphLookupAllowed())) {
-        constraints.mergeShardId = ShardingState::get(pExpCtx->opCtx)->shardId();
+        constraints.mergeShardId = getMergeShardId();
     }
 
     return constraints;
@@ -908,4 +900,16 @@ void DocumentSourceGraphLookUp::addInvolvedCollections(
         stage->addInvolvedCollections(collectionNames);
     }
 }
+
+void DocumentSourceGraphLookUp::setQuerySettingsIfNeeded(
+    const boost::intrusive_ptr<ExpressionContext>& expCtx,
+    const query_settings::QuerySettings& querySettings) {
+    if (_didSetQuerySettingsToPipeline) {
+        return;
+    }
+
+    expCtx->setQuerySettings(querySettings);
+    _didSetQuerySettingsToPipeline = true;
+}
+
 }  // namespace mongo

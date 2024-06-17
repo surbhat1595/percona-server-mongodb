@@ -75,8 +75,10 @@ struct CanonicalQueryParams {
     bool isSearchQuery = false;
 };
 
-boost::intrusive_ptr<ExpressionContext> makeExpressionContext(OperationContext* opCtx,
-                                                              FindCommandRequest& findCommand);
+boost::intrusive_ptr<ExpressionContext> makeExpressionContext(
+    OperationContext* opCtx,
+    FindCommandRequest& findCommand,
+    boost::optional<ExplainOptions::Verbosity> verbosity = boost::none);
 
 class CanonicalQuery {
 public:
@@ -123,7 +125,7 @@ public:
      */
     static Status isValidNormalized(const MatchExpression* root);
 
-    NamespaceString nss() const {
+    const NamespaceString& nss() const {
         invariant(_findCommand->getNamespaceOrUUID().isNamespaceString());
         return _findCommand->getNamespaceOrUUID().nss();
     }
@@ -256,10 +258,6 @@ public:
     boost::optional<ExplainOptions::Verbosity> getExplain() const {
         invariant(_expCtx);
         return _expCtx->explain;
-    }
-
-    bool getForceClassicEngine() const {
-        return _forceClassicEngine;
     }
 
     void setSbeCompatible(bool sbeCompatible) {
@@ -395,6 +393,12 @@ public:
         return getExplain() && !getExpCtxRaw()->inLookup;
     }
 
+    void optimizeProjection() {
+        if (_proj) {
+            _proj->optimize();
+        }
+    }
+
 private:
     void initCq(boost::intrusive_ptr<ExpressionContext> expCtx,
                 std::unique_ptr<ParsedFindCommand> parsedFind,
@@ -433,9 +437,6 @@ private:
     // are not pushed down into '_cqPipeline'. This is used by the executor to prepare corresponding
     // metadata.
     QueryMetadataBitSet _remainingSearchMetadataDeps;
-
-    // Determines whether the classic engine must be used.
-    bool _forceClassicEngine = true;
 
     // True if this query can be executed by the SBE.
     bool _sbeCompatible = false;

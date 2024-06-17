@@ -62,7 +62,7 @@ public:
         std::function<void(OperationContext* opCtx, const ShardIdentity& shardIdentity)>;
 
     ShardingInitializationMongoD();
-    ~ShardingInitializationMongoD();
+    ~ShardingInitializationMongoD() override;
 
     static ShardingInitializationMongoD* get(OperationContext* opCtx);
     static ShardingInitializationMongoD* get(ServiceContext* service);
@@ -110,17 +110,16 @@ private:
                                                      const ShardIdentity& shardIdentity);
 
     // Virtual methods coming from the ReplicaSetAwareService
-    void onStartup(OperationContext* opCtx) override final {}
-    void onSetCurrentConfig(OperationContext* opCtx) override final;
-    void onInitialDataAvailable(OperationContext* opCtx,
-                                bool isMajorityDataAvailable) override final;
-    void onShutdown() override final {}
-    void onStepUpBegin(OperationContext* opCtx, long long term) override final;
-    void onStepUpComplete(OperationContext* opCtx, long long term) override final {}
-    void onStepDown() override final;
-    void onRollback() override final {}
-    void onBecomeArbiter() override final {}
-    inline std::string getServiceName() const override final {
+    void onStartup(OperationContext* opCtx) final {}
+    void onSetCurrentConfig(OperationContext* opCtx) final;
+    void onInitialDataAvailable(OperationContext* opCtx, bool isMajorityDataAvailable) final;
+    void onShutdown() final {}
+    void onStepUpBegin(OperationContext* opCtx, long long term) final;
+    void onStepUpComplete(OperationContext* opCtx, long long term) final {}
+    void onStepDown() final;
+    void onRollback() final {}
+    void onBecomeArbiter() final {}
+    inline std::string getServiceName() const final {
         return "ShardingInitializationMongoD";
     }
 
@@ -138,10 +137,10 @@ private:
 };
 
 /**
- * Initialize the sharding components of this server, if they haven't already been set up. This can
- * be used on both shard and config servers.
+ * Initialize the sharding components for a mongod running as a config server (if they haven't
+ * already been set up).
  */
-void initializeGlobalShardingStateForMongoD(OperationContext* opCtx);
+void initializeGlobalShardingStateForConfigServer(OperationContext* opCtx);
 
 /**
  * Helper method to initialize sharding awareness from the shard identity document if it can be

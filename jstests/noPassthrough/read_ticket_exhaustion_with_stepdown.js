@@ -18,6 +18,7 @@
  * 0) Start ReplSet with special params:
  *     - lower read ticket concurrency
  *     - increase yielding
+ *     - hang the TTL Monitor
  * 1) Insert kNumDocs documents.
  * 2) Kick off many parallel readers that perform long collection scans that are subject to yields.
  * 3) Wait for many parallel read shells to run.
@@ -33,6 +34,7 @@
  *
  * @tags: [
  *   multiversion_incompatible,
+ *   requires_fcv_80,
  *   requires_replication,
  *   requires_wiredtiger,
  * ]
@@ -51,7 +53,8 @@ const replTest = new ReplSetTest({
             storageEngineConcurrentReadTransactions: kNumReadTickets,
             // Make yielding more common.
             internalQueryExecYieldPeriodMS: 1,
-            internalQueryExecYieldIterations: 1
+            internalQueryExecYieldIterations: 1,
+            "failpoint.hangTTLMonitorBetweenPasses": tojson({mode: "alwaysOn"}),
         }
     }
 });
@@ -94,11 +97,11 @@ function queuedLongReadsFunc(id) {
 // 0) Start ReplSet with special params:
 //     - lower read ticket concurrency
 //     - increase yielding
+//     - hang TTL Monitor
 replTest.startSet();
 replTest.initiate();
 let primary = replTest.getPrimary();
 let db = primary.getDB(dbName);
-let primaryAdmin = primary.getDB("admin");
 let primaryColl = db[collName];
 let queuedReaders = [];
 
@@ -140,14 +143,14 @@ assert.soon(
 jsTestLog("Wait for no available read tickets");
 assert.soon(() => {
     let stats = db.runCommand({serverStatus: 1});
-    jsTestLog(stats.wiredTiger.concurrentTransactions);
-    return stats.wiredTiger.concurrentTransactions.read.available == 0;
+    jsTestLog(stats.admission.execution);
+    return stats.admission.execution.read.available == 0;
 }, "Expected to have no available read tickets.");
 
 // 7) Hold stepDown so that we know that upon release, it will need a read ticket ~immediately.
 let stats = assert.commandWorked(db.runCommand({serverStatus: 1}));
 jsTestLog(stats.locks);
-jsTestLog(stats.wiredTiger.concurrentTransactions);
+jsTestLog(stats.admission.execution);
 
 stats = db.adminCommand({
     configureFailPoint: 'stepdownHangBeforeRSTLEnqueue',
@@ -199,8 +202,8 @@ jsTestLog("Hold tickets again so that we can verify that there are competing rea
 assert.commandWorked(db.adminCommand({configureFailPoint: 'hangTicketRelease', mode: 'alwaysOn'}));
 assert.soon(() => {
     let stats = db.runCommand({serverStatus: 1});
-    jsTestLog(stats.wiredTiger.concurrentTransactions);
-    return stats.wiredTiger.concurrentTransactions.read.available == 0;
+    jsTestLog(stats.admission.execution);
+    return stats.admission.execution.read.available == 0;
 }, "Expected to have no available read tickets.");
 
 jsTestLog("Allow stepDown to proceed");

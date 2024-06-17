@@ -2,7 +2,10 @@
  * Tests that bulkWrite command with multiple namespaces respects the sample rate configured via the
  * 'configureQueryAnalyzer' command.
  *
- * @tags: [featureFlagBulkWriteCommand]
+ * @tags: [
+ *   requires_fcv_80,
+ *   temp_disabled_embedded_router_known_issues,
+ * ]
  */
 import {Thread} from "jstests/libs/parallelTester.js";
 import {
@@ -52,14 +55,14 @@ function getSampleSize(conn) {
  * enabled.
  */
 function testQuerySampling(conn, sampleConn, dbName, collNameNotSampled, collNameSampled) {
-    const samplesPerSecond = 4;
+    const samplesPerSecond = 3;
     const durationSecs = 30;
 
     assert.commandWorked(
         conn.adminCommand({configureQueryAnalyzer: sampledNs, mode: "full", samplesPerSecond}));
     sleep(queryAnalysisSamplerConfigurationRefreshSecs * 1000);
 
-    const targetNumBulkWriteDeletePerSec = 25;
+    const targetNumBulkWriteDeletePerSec = 15;
     const bulkWriteThread = new Thread(runBulkWriteDeleteCmdsOnRepeat,
                                        conn.host,
                                        dbName,

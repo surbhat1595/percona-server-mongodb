@@ -86,6 +86,7 @@
 #include "mongo/db/query/plan_explainer.h"
 #include "mongo/db/query/plan_summary_stats.h"
 #include "mongo/db/query/plan_yield_policy.h"
+#include "mongo/db/query/plan_yield_policy_impl.h"
 #include "mongo/db/query/query_knobs_gen.h"
 #include "mongo/db/query/query_planner.h"
 #include "mongo/db/query/query_planner_params.h"
@@ -142,7 +143,7 @@ public:
         _client.dropCollection(nss);
     }
 
-    virtual ~QueryStageMultiPlanTest() {
+    ~QueryStageMultiPlanTest() override {
         dbtests::WriteContextForTests ctx(_opCtx.get(), nss.ns_forTest());
         _client.dropCollection(nss);
     }
@@ -167,6 +168,19 @@ public:
 
     ServiceContext* serviceContext() {
         return _opCtx->getServiceContext();
+    }
+
+    QueryPlannerParams makePlannerParams(const CollectionPtr& collection,
+                                         const CanonicalQuery& canonicalQuery) {
+        MultipleCollectionAccessor collections(collection);
+        return QueryPlannerParams{
+            QueryPlannerParams::ArgsForSingleCollectionQuery{
+                .opCtx = opCtx(),
+                .canonicalQuery = canonicalQuery,
+                .collections = collections,
+                .plannerOptions = QueryPlannerParams::DEFAULT,
+            },
+        };
     }
 
 protected:
@@ -314,21 +328,26 @@ TEST_F(QueryStageMultiPlanTest, MPSCollectionScanVsHighlySelectiveIXScan) {
     mps->addPlan(createQuerySolution(), std::move(ixScanRoot), sharedWs.get());
     mps->addPlan(createQuerySolution(), std::move(collScanRoot), sharedWs.get());
 
-    const auto* mpsPtr = mps.get();
-
-    // Takes ownership of arguments other than 'collection'.
-    auto statusWithPlanExecutor =
-        plan_executor_factory::make(std::move(cq),
-                                    std::move(sharedWs),
-                                    std::move(mps),
-                                    &coll,
-                                    PlanYieldPolicy::YieldPolicy::INTERRUPT_ONLY,
-                                    QueryPlannerParams::DEFAULT);
-    ASSERT_OK(statusWithPlanExecutor.getStatus());
-    auto exec = std::move(statusWithPlanExecutor.getValue());
-
+    auto* mpsPtr = mps.get();
+    auto planYieldPolicy = makeClassicYieldPolicy(opCtx(),
+                                                  nss,
+                                                  static_cast<PlanStage*>(mpsPtr),
+                                                  PlanYieldPolicy::YieldPolicy::INTERRUPT_ONLY,
+                                                  &coll);
+    ASSERT_OK(mpsPtr->pickBestPlan(planYieldPolicy.get()));
     ASSERT_TRUE(mpsPtr->bestPlanChosen());
     ASSERT_EQUALS(mpsPtr->getChildren()[mpsPtr->bestPlanIdx().get()].get(), ixScanRootPtr);
+
+    // Takes ownership of arguments other than 'collection'.
+    auto execResult = plan_executor_factory::make(std::move(cq),
+                                                  std::move(sharedWs),
+                                                  std::move(mps),
+                                                  &coll,
+                                                  PlanYieldPolicy::YieldPolicy::INTERRUPT_ONLY,
+                                                  QueryPlannerParams::DEFAULT,
+                                                  nss);
+    ASSERT_OK(execResult);
+    auto exec = std::move(execResult.getValue());
 
     // Get all our results out.
     int results = 0;
@@ -452,11 +471,8 @@ TEST_F(QueryStageMultiPlanTest, MPSBackupPlan) {
     bool forceIxisectOldValue = internalQueryForceIntersectionPlans.load();
     internalQueryForceIntersectionPlans.store(true);
 
-    // Get planner params.
-    QueryPlannerParams plannerParams;
-    fillOutPlannerParams(_opCtx.get(), collection.getCollection(), cq.get(), &plannerParams);
-
     // Plan.
+    auto plannerParams = makePlannerParams(collection.getCollection(), *cq);
     auto statusWithMultiPlanSolns = QueryPlanner::plan(*cq, plannerParams);
     ASSERT_OK(statusWithMultiPlanSolns.getStatus());
     auto solutions = std::move(statusWithMultiPlanSolns.getValue());
@@ -566,22 +582,25 @@ TEST_F(QueryStageMultiPlanTest, MPSExplainAllPlans) {
     mps->addPlan(std::make_unique<QuerySolution>(), std::move(firstPlan), ws.get());
     mps->addPlan(std::make_unique<QuerySolution>(), std::move(secondPlan), ws.get());
 
-    // Making a PlanExecutor chooses the best plan.
-    auto exec =
-        uassertStatusOK(plan_executor_factory::make(_expCtx,
-                                                    std::move(ws),
-                                                    std::move(mps),
-                                                    &ctx.getCollection(),
-                                                    PlanYieldPolicy::YieldPolicy::INTERRUPT_ONLY,
-                                                    QueryPlannerParams::DEFAULT));
-
-    auto execImpl = dynamic_cast<PlanExecutorImpl*>(exec.get());
-    ASSERT(execImpl);
-    auto root = static_cast<MultiPlanStage*>(execImpl->getRootStage());
-    ASSERT_TRUE(root->bestPlanChosen());
     // The first candidate plan should have won.
-    ASSERT_EQ(getBestPlanRoot(root), firstPlanPtr);
+    auto planYieldPolicy = makeClassicYieldPolicy(opCtx(),
+                                                  nss,
+                                                  static_cast<PlanStage*>(mps.get()),
+                                                  PlanYieldPolicy::YieldPolicy::INTERRUPT_ONLY,
+                                                  &ctx.getCollection());
+    ASSERT_OK(mps->pickBestPlan(planYieldPolicy.get()));
+    ASSERT_TRUE(mps->bestPlanChosen());
+    ASSERT_EQ(getBestPlanRoot(mps.get()), firstPlanPtr);
 
+    auto execResult = plan_executor_factory::make(_expCtx,
+                                                  std::move(ws),
+                                                  std::move(mps),
+                                                  &ctx.getCollection(),
+                                                  PlanYieldPolicy::YieldPolicy::INTERRUPT_ONLY,
+                                                  QueryPlannerParams::DEFAULT,
+                                                  nss);
+    ASSERT_OK(execResult);
+    auto exec = std::move(execResult.getValue());
     BSONObjBuilder bob;
     Explain::explainStages(exec.get(),
                            ctx.getCollection(),
@@ -591,7 +610,6 @@ TEST_F(QueryStageMultiPlanTest, MPSExplainAllPlans) {
                            BSONObj(),
                            &bob);
     BSONObj explained = bob.done();
-
     ASSERT_EQ(explained["executionStats"]["nReturned"].Int(), nDocs);
     ASSERT_EQ(explained["executionStats"]["executionStages"]["needTime"].Int(), 0);
     auto allPlansStats = explained["executionStats"]["allPlansExecution"].Array();
@@ -749,7 +767,7 @@ TEST_F(QueryStageMultiPlanTest, ShouldReportErrorIfKilledDuringPlanning) {
  */
 class ThrowyPlanStage : public PlanStage {
 protected:
-    StageState doWork(WorkingSetID* out) {
+    StageState doWork(WorkingSetID* out) override {
         uasserted(ErrorCodes::InternalError, "Mwahahaha! You've fallen into my trap.");
     }
 
@@ -761,10 +779,10 @@ public:
     StageType stageType() const final {
         return STAGE_UNKNOWN;
     }
-    virtual std::unique_ptr<PlanStageStats> getStats() final {
+    std::unique_ptr<PlanStageStats> getStats() final {
         return nullptr;
     }
-    virtual const SpecificStats* getSpecificStats() const final {
+    const SpecificStats* getSpecificStats() const final {
         return nullptr;
     }
 };

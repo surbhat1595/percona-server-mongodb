@@ -4,8 +4,6 @@
  * suboptimal due to a change in data.
  *
  * @tags: [
- *  # TODO SERVER-84429 Test isCached for CQF.
- *   cqf_incompatible,
  *   assumes_unsharded_collection,
  *   assumes_balancer_off,
  *   does_not_support_stepdowns,
@@ -46,8 +44,7 @@ function assertRejectedPlanCached(explain, indexName) {
                                    : getWinningPlan(getQueryPlanner(explain));
     assert(!winningPlan.isCached, explain);
     for (const rejectedPlan of getRejectedPlans(explain)) {
-        const inputStage = sbeEnabled ? rejectedPlan.queryPlan.inputStage
-                                      : getRejectedPlan(rejectedPlan).inputStage;
+        const inputStage = getRejectedPlan(rejectedPlan).inputStage;
         if (inputStage.stage === "IXSCAN" && inputStage.indexName === indexName) {
             assert(rejectedPlan.isCached, explain);
         } else {
@@ -82,8 +79,8 @@ function predicateTest(explainMode) {
     // Create indexes so we have plan alternatives and need to cache.
     coll.createIndex({a: 1});
     coll.createIndex({b: 1});
-    coll.createIndex({a: 1, b: 1});
-    coll.createIndex({b: 1, a: 1});
+    coll.createIndex({a: -1, b: 1});
+    coll.createIndex({b: -1, a: 1});
 
     // Nothing should be cached at first.
     assertWinningPlanCacheStatus(coll.find({a: {$eq: 1}}).explain(explainMode), false);

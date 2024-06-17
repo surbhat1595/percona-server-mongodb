@@ -78,6 +78,7 @@
 #include "mongo/rpc/op_msg.h"
 #include "mongo/s/sharding_feature_flags_gen.h"
 #include "mongo/s/sharding_state.h"
+#include "mongo/s/transaction_router.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/decorable.h"
 #include "mongo/util/fail_point.h"
@@ -156,7 +157,7 @@ public:
                         "sessionId"_attr = opCtx->getLogicalSessionId()->toBSON(),
                         "txnNumberAndRetryCounter"_attr = txnNumberAndRetryCounter);
 
-            if (!feature_flags::gTrackUnshardedCollectionsOnShardingCatalog.isEnabled(
+            if (!feature_flags::gCreateCollectionInPreparedTransactions.isEnabled(
                     serverGlobalParams.featureCompatibility.acquireFCVSnapshot())) {
                 uassert(ErrorCodes::OperationNotSupportedInTransaction,
                         "Cannot create new collections inside distributed transactions",
@@ -398,10 +399,11 @@ public:
             {
                 auto sessionTxnState = mongoDSessionCatalog->checkOutSession(opCtx);
                 auto txnParticipant = TransactionParticipant::get(opCtx);
-                txnParticipant.beginOrContinue(opCtx,
-                                               txnNumberAndRetryCounter,
-                                               false /* autocommit */,
-                                               boost::none /* startTransaction */);
+                txnParticipant.beginOrContinue(
+                    opCtx,
+                    txnNumberAndRetryCounter,
+                    false /* autocommit */,
+                    TransactionParticipant::TransactionActions::kContinue);
 
                 if (txnParticipant.transactionIsCommitted())
                     return;
@@ -420,10 +422,11 @@ public:
                 auto txnParticipant = TransactionParticipant::get(opCtx);
 
                 // Call beginOrContinue again in case the transaction number has changed.
-                txnParticipant.beginOrContinue(opCtx,
-                                               txnNumberAndRetryCounter,
-                                               false /* autocommit */,
-                                               boost::none /* startTransaction */);
+                txnParticipant.beginOrContinue(
+                    opCtx,
+                    txnNumberAndRetryCounter,
+                    false /* autocommit */,
+                    TransactionParticipant::TransactionActions::kContinue);
 
                 invariant(!txnParticipant.transactionIsOpen(),
                           "The participant should not be in progress after we waited for the "

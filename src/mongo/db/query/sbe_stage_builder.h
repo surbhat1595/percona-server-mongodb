@@ -126,15 +126,6 @@ buildSearchMetadataExecutorSBE(OperationContext* opCtx,
                                PlanYieldPolicySBE* yieldPolicy);
 
 /**
- * Associate a slot with a signature representing all the possible types that the value stored at
- * runtime in the slot can assume.
- */
-struct TypedSlot {
-    sbe::value::SlotId slotId;
-    TypeSignature typeSignature;
-};
-
-/**
  * The PlanStageSlots class is used by SlotBasedStageBuilder to return the output slots produced
  * after building a stage.
  */
@@ -181,7 +172,7 @@ public:
         using is_transparent = void;
     };
 
-    using SlotNameMap = absl::flat_hash_map<OwnedSlotName, TypedSlot, NameHasher, NameEq>;
+    using SlotNameMap = absl::flat_hash_map<OwnedSlotName, SbSlot, NameHasher, NameEq>;
     using SlotNameSet = absl::flat_hash_set<OwnedSlotName, NameHasher, NameEq>;
 
     using PlanStageTree = std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots>;
@@ -271,7 +262,7 @@ public:
 
     // Returns the slot corresponding to 'name'. This method will raise a tassert if
     // this PlanStageSlots does not have a mapping for 'name'.
-    TypedSlot get(const UnownedSlotName& name) const {
+    SbSlot get(const UnownedSlotName& name) const {
         auto it = _data->slotNameToIdMap.find(name);
         invariant(it != _data->slotNameToIdMap.end());
         return it->second;
@@ -279,7 +270,7 @@ public:
 
     // Returns the slot corresponding to 'name' if this PlanStageSlot has a mapping for 'name',
     // otherwise returns boost::none.
-    boost::optional<TypedSlot> getIfExists(const UnownedSlotName& name) const {
+    boost::optional<SbSlot> getIfExists(const UnownedSlotName& name) const {
         if (auto it = _data->slotNameToIdMap.find(name); it != _data->slotNameToIdMap.end()) {
             return it->second;
         }
@@ -287,7 +278,7 @@ public:
     }
 
     // This method is like getIfExists(), except that it returns 'boost::optional<SlotId>'
-    // instead of 'boost::optional<TypedSlot>'.
+    // instead of 'boost::optional<SbSlot>'.
     boost::optional<sbe::value::SlotId> getSlotIfExists(const UnownedSlotName& name) const {
         if (auto it = _data->slotNameToIdMap.find(name); it != _data->slotNameToIdMap.end()) {
             return it->second.slotId;
@@ -296,16 +287,10 @@ public:
     }
 
     // Maps 'name' to 'slot' and clears any prior mapping the 'name' may have had.
-    void set(const UnownedSlotName& name, sbe::value::SlotId slot) {
-        set(name, TypedSlot{slot, TypeSignature::kAnyScalarType});
-    }
-    void set(OwnedSlotName name, sbe::value::SlotId slot) {
-        set(std::move(name), TypedSlot{slot, TypeSignature::kAnyScalarType});
-    }
-    void set(const UnownedSlotName& name, TypedSlot slot) {
+    void set(const UnownedSlotName& name, SbSlot slot) {
         _data->slotNameToIdMap.insert_or_assign(name, slot);
     }
-    void set(OwnedSlotName name, TypedSlot slot) {
+    void set(OwnedSlotName name, SbSlot slot) {
         _data->slotNameToIdMap.insert_or_assign(std::move(name), slot);
     }
 
@@ -405,9 +390,13 @@ public:
         return has(kResult) && !_data->resultInfoChanges.has_value();
     }
 
+    bool hasBlockOutput() const {
+        return has(kBlockSelectivityBitmap);
+    }
+
     // Returns the slot that holds the materialized result object. This method will tassert
     // if 'hasResultObj()' is false.
-    TypedSlot getResultObj() const {
+    SbSlot getResultObj() const {
         tassert(8428000, "Expected result object to be set", hasResultObj());
 
         auto it = _data->slotNameToIdMap.find(kResult);
@@ -418,7 +407,7 @@ public:
 
     // If 'hasResultObj()' is true this method returns the slot that holds the materialized result
     // object, otherwise it will return boost::none.
-    boost::optional<TypedSlot> getResultObjIfExists() const {
+    boost::optional<SbSlot> getResultObjIfExists() const {
         if (hasResultObj()) {
             return getResultObj();
         }
@@ -426,7 +415,7 @@ public:
     }
 
     // This method is like getResultObjIfExists(), except that it returns 'boost::optional<SlotId>'
-    // instead of 'boost::optional<TypedSlot>'.
+    // instead of 'boost::optional<SbSlot>'.
     boost::optional<sbe::value::SlotId> getResultObjSlotIfExists() const {
         if (hasResultObj()) {
             return getResultObj().slotId;
@@ -437,12 +426,9 @@ public:
     // Maps kResult to 'slot', designates kResult as being a "materialized result object", and
     // clears any prior mapping or designation that kResult may have had. setResultObj() also
     // clears any ResultInfo-related state that may have been set.
-    void setResultObj(TypedSlot slot) {
+    void setResultObj(SbSlot slot) {
         set(kResult, slot);
         _data->resultInfoChanges.reset();
-    }
-    void setResultObj(sbe::value::SlotId slot) {
-        setResultObj(TypedSlot{slot, TypeSignature::kAnyScalarType});
     }
 
     // Returns true if this PlanStageSlots has "ResultInfo" (kResult mapped to a base object, a list
@@ -453,7 +439,7 @@ public:
 
     // Returns the slot that holds the ResultInfo base object. This method will tassert if
     // 'hasResultInfo()' is false.
-    TypedSlot getResultInfoBaseObj() const {
+    SbSlot getResultInfoBaseObj() const {
         tassert(8428001, "Expected ResultInfo to be set", hasResultInfo());
 
         auto it = _data->slotNameToIdMap.find(kResult);
@@ -464,7 +450,7 @@ public:
 
     // If 'hasResultInfo()' is true this method returns the slot that holds the ResultInfo base
     // object, otherwise it will return boost::none.
-    boost::optional<TypedSlot> getResultInfoBaseObjIfExists() const {
+    boost::optional<SbSlot> getResultInfoBaseObjIfExists() const {
         if (hasResultInfo()) {
             return getResultInfoBaseObj();
         }
@@ -474,12 +460,9 @@ public:
     // Maps kResult to 'slot', designates kResult as being as a "ResultInfo base object", clears
     // any prior mapping or designation that kResult may have had, and sets 'resultInfoChanges' to
     // hold an empty list of changed fields.
-    void setResultInfoBaseObj(TypedSlot slot) {
+    void setResultInfoBaseObj(SbSlot slot) {
         set(kResult, slot);
         _data->resultInfoChanges.emplace();
-    }
-    void setResultInfoBaseObj(sbe::value::SlotId slot) {
-        setResultInfoBaseObj(TypedSlot{slot, TypeSignature::kAnyScalarType});
     }
 
     // Returns the list of changed fields stored in 'resultInfoChanges'. This method will tassert
@@ -500,29 +483,26 @@ public:
         changes = ProjectionEffects(FieldSet::makeOpenSet(drops), modifys, {}).compose(changes);
     }
 
-    // Return the type information associated with the requested slot.
-    TypeSignature getSignatureForSlot(sbe::value::SlotId slotId);
-
     // Returns a sorted list of all the names in this PlanStageSlots has that are required by
     // 'reqs', plus any additional names needed by 'reqs' that this PlanStageSlots does not satisfy.
     std::vector<OwnedSlotName> getRequiredNamesInOrder(const PlanStageReqs& reqs) const;
 
     // Returns a list of slots that correspond pairwise to the list of names produced by calling
     // 'getRequiredNamesInOrder(reqs)'.
-    std::vector<TypedSlot> getRequiredSlotsInOrder(const PlanStageReqs& reqs) const;
+    SbSlotVector getRequiredSlotsInOrder(const PlanStageReqs& reqs) const;
 
     // This method returns a de-dupped list of all the slots that correspond to the names produced
     // calling by 'getRequiredNamesInOrder(reqs)'. The list returned by this method is sorted by
     // slot ID.
-    std::vector<TypedSlot> getRequiredSlotsUnique(const PlanStageReqs& reqs) const;
+    SbSlotVector getRequiredSlotsUnique(const PlanStageReqs& reqs) const;
 
     // Returns a sorted list of all the name->slot mappings in this PlanStageSlots, sorted by
     // slot name.
-    std::vector<std::pair<UnownedSlotName, TypedSlot>> getAllNameSlotPairsInOrder() const;
+    std::vector<std::pair<UnownedSlotName, SbSlot>> getAllNameSlotPairsInOrder() const;
 
     // This method calls getAllNameSlotPairsInOrder() and then returns a list of the slots only,
     // sorted by slot name.
-    std::vector<TypedSlot> getAllSlotsInOrder() const;
+    SbSlotVector getAllSlotsInOrder() const;
 
     // This method computes the list of required names 'L = getRequiredNamesInOrder(reqs)', and
     // then it adds a mapping 'N->NothingSlot' for each name N in list L where 'has(N)' is false.
@@ -1025,8 +1005,27 @@ private:
     std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> buildMatch(
         const QuerySolutionNode* root, const PlanStageReqs& reqs);
 
+    /**
+     * Builds a complete $unwind stage, including extraction of the field to be unwound from the
+     * source document, performing the unwind, and projecting the results to the output document.
+     */
     std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> buildUnwind(
         const QuerySolutionNode* root, const PlanStageReqs& reqs);
+    /**
+     * Enables an $LU stage to build the absorbed $unwind's unwinding and results projection only,
+     * as the $lookup, which is conceptually the child of the $unwind, is built directly via a call
+     * to buildEqLookupUnwind() with no parent call to buildUnwind() since the $unwind was erased
+     * from the pipeline before the plan was finalized. Used for the special case of a nonexistent
+     * foreign collection, where the $lookup result array is empty and thus its materialization is
+     * not a performance or memory problem.
+     */
+    std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> buildOnlyUnwind(
+        const UnwindNode* un,
+        const PlanStageReqs& reqs,
+        std::unique_ptr<sbe::PlanStage>& stage,
+        PlanStageSlots& outputs,
+        sbe::value::SlotId childResultSlot,
+        sbe::value::SlotId getFieldSlot);
 
     std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> buildReplaceRoot(
         const QuerySolutionNode* root, const PlanStageReqs& reqs);
@@ -1077,31 +1076,44 @@ private:
     std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> buildGroup(
         const QuerySolutionNode* root, const PlanStageReqs& reqs);
 
-    std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> buildGroupImpl(
-        const GroupNode* groupNode,
+    std::tuple<SbStage, std::vector<std::string>, SbSlotVector, PlanStageSlots> buildGroupImpl(
+        std::unique_ptr<sbe::PlanStage> stage,
         const PlanStageReqs& reqs,
-        std::unique_ptr<sbe::PlanStage> childStage,
-        PlanStageSlots childOutputs);
+        PlanStageSlots childOutputs,
+        const GroupNode* groupNode);
 
-    std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> buildLookup(
+    std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> buildEqLookup(
+        const QuerySolutionNode* root, const PlanStageReqs& reqs);
+
+    std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> buildEqLookupUnwind(
         const QuerySolutionNode* root, const PlanStageReqs& reqs);
 
     std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> buildUnpackTsBucket(
         const QuerySolutionNode* root, const PlanStageReqs& reqs);
 
+    MONGO_COMPILER_NOINLINE
     std::unique_ptr<BuildProjectionPlan> makeBuildProjectionPlan(const QuerySolutionNode* root,
                                                                  const PlanStageReqs& reqs);
 
-    std::unique_ptr<sbe::PlanStage> buildBlockToRow(std::unique_ptr<sbe::PlanStage> stage,
-                                                    PlanStageSlots& outputs);
+    MONGO_COMPILER_NOINLINE
+    std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> buildProjectionImpl(
+        const QuerySolutionNode* root,
+        const PlanStageReqs& reqs,
+        std::unique_ptr<BuildProjectionPlan> plan,
+        std::unique_ptr<sbe::PlanStage> stage,
+        PlanStageSlots outputs);
 
-    // Given an expression built on top of scalar processing, along with the definition of the
-    // visible slots (some of which could be marked as holding block of values), produce an
-    // expression tree that can be executed directly on top of them. Returns an empty result if the
-    // expression isn't vectorizable.
-    boost::optional<TypedExpression> buildVectorizedExpr(SbExpr scalarExpression,
-                                                         PlanStageSlots& outputs,
-                                                         bool forFilterStage);
+    /**
+     * Given a scalar filter Expression it tries to produced the vectorised stage. If this is
+     * possible it returns a pair {vectorisedStage, true}. If this is not possible it adds a
+     * block-to-row transition and returns {newStage, false}.
+     */
+    std::pair<std::unique_ptr<sbe::PlanStage>, bool> buildVectorizedFilterExpr(
+        std::unique_ptr<sbe::PlanStage> stage,
+        const PlanStageReqs& reqs,
+        SbExpr scalarFilterExpression,
+        PlanStageSlots& outputs,
+        PlanNodeId nodeId);
 
     std::unique_ptr<sbe::EExpression> buildLimitSkipAmountExpression(
         LimitSkipParameterization canBeParameterized,
@@ -1127,7 +1139,11 @@ private:
     absl::flat_hash_set<InListData*> _inListsSet;
 
     // Hash set tracking the Collators used by the SBE plan being built.
-    absl::flat_hash_map<const CollatorInterface*, const CollatorInterface*> _collatorMap;
+    absl::flat_hash_map<const CollatorInterface*, const CollatorInterface*> _collatorsMap;
+
+    // Maintains a mapping from AccumulationStatements / WindowFunctionStatements to their
+    // corresponding SortSpecs (stored in slots).
+    absl::flat_hash_map<const void*, sbe::value::SlotId> _sortSpecMap;
 
     const MultipleCollectionAccessor& _collections;
 
@@ -1153,4 +1169,13 @@ private:
     StageBuilderState _state;
 };  // class SlotBasedStageBuilder
 
+std::unique_ptr<sbe::PlanStage> buildBlockToRow(std::unique_ptr<sbe::PlanStage> stage,
+                                                StageBuilderState& state,
+                                                PlanStageSlots& outputs);
+
+std::pair<std::unique_ptr<sbe::PlanStage>, SbSlotVector> buildBlockToRow(
+    std::unique_ptr<sbe::PlanStage> stage,
+    StageBuilderState& state,
+    PlanStageSlots& outputs,
+    SbSlotVector individualSlots);
 }  // namespace mongo::stage_builder

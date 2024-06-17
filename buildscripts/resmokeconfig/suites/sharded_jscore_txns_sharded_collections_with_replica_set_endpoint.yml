@@ -15,7 +15,7 @@ selector:
   - jstests/core/txns/transactions_profiling_with_drops.js
 
   # Implicitly creates a database through a collection rename, which does not work in a sharded
-  # cluster.
+  # cluster. TODO SERVER-84330
   - jstests/core/txns/transactions_block_ddl.js
 
   # transactionLifetimeLimitSeconds parameter is not available in mongos.
@@ -42,12 +42,6 @@ selector:
   # TODO (SERVER-75855): Support running the find command via mongos by specifying a UUID
   # (instead of a collection name).
   - jstests/core/txns/banned_collection_reads_in_txn.js
-  # TODO (SERVER-84263): ServiceEntryPointCommon may try to verify contract for a command before
-  # clearing access and privilege checks from the previous command in the same auth session.
-  - jstests/core/txns/commands_banning_txnnumber_outside_transactions.js
-  # TODO (SERVER-85410): Investigate why timeseries_reads_in_txns.js sometimes fail with
-  # ShardCannotRefreshDueToLocksHeld.
-  - jstests/core/txns/timeseries/timeseries_reads_in_txns.js
 
   exclude_with_any_tags:
   - assumes_against_mongod_not_mongos
@@ -103,9 +97,8 @@ executor:
     mongod_options:
       set_parameters:
         enableTestCommands: 1
-        featureFlagEmbeddedRouter: 1
-        featureFlagReplicaSetEndpoint: 1
-    # TODO (SERVER-84184): Test multi-node shards with embedded router.
-    num_rs_nodes_per_shard: 1
+        featureFlagRouterPort: true
+        featureFlagReplicaSetEndpoint: true
+    num_rs_nodes_per_shard: 2
     embedded_router: 1
     replica_set_endpoint: 1

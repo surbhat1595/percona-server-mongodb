@@ -38,15 +38,29 @@ export const testClusteredCollectionBoundedScan = function(coll, clusterKey) {
     // Checks that the number of docs examined matches the expected number. There are separate
     // expected args for Classic vs SBE because in Classic there is an extra cursor->next() call
     // beyond the end of the range if EOF has not been hit, but in SBE there is not. This function
-    // also handles that this stat is in different places for the two engines:
+    // also handles that this stat is in different places for the two engines and when using a
+    // sharded cluster:
     //   Classic: executionStats.executionStages.docsExamined
     //   SBE:     executionStats.totalDocsExamined
+    //   Sharded: executionStats.totalDocsExamined
     function assertDocsExamined(executionStats, expectedClassic, expectedSbe) {
         let sbe = false;
-        let docsExamined = executionStats.executionStages.docsExamined;
-        if (docsExamined == undefined) {
-            sbe = true;
+        let docsExamined = undefined;
+        const shards = executionStats.executionStages.shards;
+
+        if (shards == undefined) {
+            // single node case
+            docsExamined = executionStats.executionStages.docsExamined;
+            if (docsExamined == undefined) {
+                sbe = true;
+                docsExamined = executionStats.totalDocsExamined;
+            }
+        } else {
+            // sharded case
             docsExamined = executionStats.totalDocsExamined;
+            if (shards[0].executionStages.docsExamined == undefined) {
+                sbe = true;
+            }
         }
         if (sbe) {
             assert.eq(expectedSbe, docsExamined);
@@ -59,7 +73,8 @@ export const testClusteredCollectionBoundedScan = function(coll, clusterKey) {
         initAndPopulate(coll, clusterKey);
 
         const expl = assert.commandWorked(coll.getDB().runCommand({
-            explain: {find: coll.getName(), filter: {[clusterKeyFieldName]: 5}},
+            // use batchSize to avoid selecting EXPRESS instead of CLUSTERED_IXSCAN
+            explain: {find: coll.getName(), filter: {[clusterKeyFieldName]: 5}, batchSize: 20},
             verbosity: "executionStats"
         }));
 
@@ -221,12 +236,12 @@ export const testClusteredCollectionBoundedScan = function(coll, clusterKey) {
         // exist.
         testLT("$_internalExprLt", 10, 11, 12);
         testLT("$_internalExprLte", 10, 12, 13);
-        testGT("$_internalExprGt", 89, 11, 12, 11);
+        testGT("$_internalExprGt", 89, 11, 11);
         testGT("$_internalExprGte", 89, 12, 12);
-        testRange("$_internalExprGt", 20, "$_internalExprLt", 40, 19, 21, 19);
-        testRange("$_internalExprGte", 20, "$_internalExprLt", 40, 20, 21, 20);
-        testRange("$_internalExprGt", 20, "$_internalExprLte", 40, 20, 22, 20);
-        testRange("$_internalExprGte", 20, "$_internalExprLte", 40, 21, 22, 21);
+        testRange("$_internalExprGt", 20, "$_internalExprLt", 40, 19, 20);
+        testRange("$_internalExprGte", 20, "$_internalExprLt", 40, 20, 21);
+        testRange("$_internalExprGt", 20, "$_internalExprLte", 40, 20, 21);
+        testRange("$_internalExprGte", 20, "$_internalExprLte", 40, 21, 22);
     }
 
     function testBoundedScans(coll, clusterKey) {
@@ -242,29 +257,25 @@ export const testClusteredCollectionBoundedScan = function(coll, clusterKey) {
 
         // As of SERVER-75604, clustered collection scans can be inclusive or exclusive at either
         // end; the filter does not need to examine a record at the lower bound to then discard it.
-        // Expect docsExamined == nReturned + 1 + 1 due to (not returned, due to type bracketing)
-        // null id, and the by-design additional cursor 'next' beyond the range.
-        testLT("$lt", 10, 10, 12, 10);
-        // Expect docsExamined == nReturned + 1 + 1 due to (not returned, due to type bracketing)
-        // null id, and the by-design additional cursor 'next' beyond the range.
-        testLT("$lte", 10, 11, 13, 11);
-        // Expect docsExamined == nReturned + 1 + 1 due to (not returned, due to type bracketing)
+        // Expect docsExamined == nReturned + 1 due to the by-design additional cursor 'next' beyond
+        // the range. The null id is not examined due to the use of bounded seek.
+        testLT("$lt", 10, 10, 11);
+        // Expect docsExamined == nReturned + 1 due to the by-design additional cursor 'next' beyond
+        // the range.
+        testLT("$lte", 10, 11, 12);
+        // Expect docsExamined == nReturned + 1 due to (not returned, due to type bracketing)
         // "foo" id. Note that unlike the 'testLT' cases, there's no additional cursor 'next' beyond
-        // the range because we hit EOF. However, Classic needs to examine and discard the value
-        // equal to bound, as this is an exclusive bound.
-        testGT("$gt", 89, 10, 12, 10);
+        // the range because we hit EOF. A forward seek excluding the lower bound is used.
+        testGT("$gt", 89, 10, 11, 10);
         // Expect docsExamined == nReturned + 1 due to (not returned, due to type bracketing)
         // "foo" id.
         testGT("$gte", 89, 11, 12, 11);
         // docsExamined reflects the fact that by design we do an additional cursor 'next' beyond
         // the range.
-        // In addition, Classic needs to examine and discard the value equal to bound,
-        // while SBE's scan starts after the bound.
-        testRange("$gt", 20, "$lt", 40, 19, 21, 19);
-        testRange("$gte", 20, "$lt", 40, 20, 21, 20);
-        // Again, Classic and SBE differ by 2 for the above reasons.
-        testRange("$gt", 20, "$lte", 40, 20, 22, 20);
-        testRange("$gte", 20, "$lte", 40, 21, 22, 21);
+        testRange("$gt", 20, "$lt", 40, 19, 20);
+        testRange("$gte", 20, "$lt", 40, 20, 21);
+        testRange("$gt", 20, "$lte", 40, 20, 21);
+        testRange("$gte", 20, "$lte", 40, 21, 22);
         testIn();
 
         testNonClusterKeyScan();

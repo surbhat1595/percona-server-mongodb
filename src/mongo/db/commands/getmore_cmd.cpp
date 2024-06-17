@@ -51,6 +51,7 @@
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/timestamp.h"
 #include "mongo/client/read_preference.h"
+#include "mongo/db/admission/execution_admission_context.h"
 #include "mongo/db/api_parameters.h"
 #include "mongo/db/auth/authorization_checks.h"
 #include "mongo/db/auth/authorization_session.h"
@@ -359,7 +360,7 @@ class GetMoreCmd final : public Command {
 public:
     GetMoreCmd() : Command("getMore") {}
 
-    const std::set<std::string>& apiVersions() const {
+    const std::set<std::string>& apiVersions() const override {
         return kApiVersions1;
     }
 
@@ -397,6 +398,10 @@ public:
             return kSupportsReadConcernResult;
         }
 
+        bool isSubjectToIngressAdmissionControl() const override {
+            return !_cmd.getTerm().has_value();
+        }
+
         bool allowsAfterClusterTime() const override {
             return false;
         }
@@ -407,6 +412,10 @@ public:
 
         NamespaceString ns() const override {
             return NamespaceStringUtil::deserialize(_cmd.getDbName(), _cmd.getCollection());
+        }
+
+        const DatabaseName& db() const override {
+            return _cmd.getDbName();
         }
 
         void doCheckAuthorization(OperationContext* opCtx) const override {
@@ -779,6 +788,14 @@ public:
                 curOp->debug().cursorExhausted = true;
             }
 
+            // Collect and increment metrics now that we have enough information. It's important
+            // we do so before generating the response so that the response can include metrics.
+            auto& metricsCollector = ResourceConsumption::MetricsCollector::get(opCtx);
+            metricsCollector.incrementDocUnitsReturned(curOp->getNS(), docUnitsReturned);
+            curOp->debug().additiveMetrics.nBatches = 1;
+            curOp->setEndOfOpMetrics(numResults);
+            collectQueryStatsMongod(opCtx, cursorPin);
+
             boost::optional<CursorMetrics> metrics = _cmd.getIncludeQueryStatsMetrics()
                 ? boost::make_optional(CurOp::get(opCtx)->debug().getCursorMetrics())
                 : boost::none;
@@ -786,14 +803,6 @@ public:
                            nss,
                            metrics,
                            SerializationContext::stateCommandReply(_cmd.getSerializationContext()));
-
-            // Increment this metric once we have generated a response and we know it will return
-            // documents.
-            auto& metricsCollector = ResourceConsumption::MetricsCollector::get(opCtx);
-            metricsCollector.incrementDocUnitsReturned(curOp->getNS(), docUnitsReturned);
-            curOp->debug().additiveMetrics.nBatches = 1;
-            curOp->setEndOfOpMetrics(numResults);
-            collectQueryStatsMongod(opCtx, cursorPin);
 
             if (respondWithId) {
                 cursorDeleter.dismiss();
@@ -816,6 +825,7 @@ public:
 
             // The presence of a term in the request indicates that this is an internal replication
             // oplog read request.
+            boost::optional<ScopedAdmissionPriority<ExecutionAdmissionContext>> admissionPriority;
             if (_cmd.getTerm() && nss == NamespaceString::kRsOplogNamespace) {
                 // Validate term before acquiring locks.
                 auto replCoord = repl::ReplicationCoordinator::get(opCtx);
@@ -831,8 +841,11 @@ public:
                 // Stalling on ticket acquisition can cause complicated deadlocks. Primaries may
                 // depend on data reaching secondaries in order to proceed; and secondaries may get
                 // stalled replicating because of an inability to acquire a read ticket.
-                shard_role_details::getLocker(opCtx)->setAdmissionPriority(
-                    AdmissionContext::Priority::kImmediate);
+                admissionPriority.emplace(opCtx, AdmissionContext::Priority::kExempt);
+            }
+
+            if (_cmd.getIncludeQueryStatsMetrics()) {
+                curOp->debug().queryStatsInfo.metricsRequested = true;
             }
 
             // Perform validation checks which don't cause the cursor to be deleted on failure.

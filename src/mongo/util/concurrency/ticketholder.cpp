@@ -31,18 +31,12 @@
 
 #include <algorithm>
 #include <boost/none.hpp>
-#include <mutex>
 
 #include <boost/move/utility_core.hpp>
 #include <boost/optional/optional.hpp>
 
-#include "mongo/db/feature_flag.h"
-#include "mongo/db/operation_context.h"
-#include "mongo/db/storage/execution_control/concurrency_adjustment_parameters_gen.h"
-#include "mongo/db/storage/storage_engine_feature_flags_gen.h"
-#include "mongo/idl/idl_parser.h"
 #include "mongo/util/duration.h"
-#include "mongo/util/fail_point.h"
+#include "mongo/util/interruptible.h"
 #include "mongo/util/scopeguard.h"
 #include "mongo/util/tick_source.h"
 
@@ -50,29 +44,23 @@
 
 namespace mongo {
 
-MONGO_FAIL_POINT_DEFINE(hangTicketRelease);
-
-namespace {
-void updateQueueStatsOnRelease(ServiceContext* serviceContext,
-                               TicketHolder::QueueStats& queueStats,
-                               AdmissionContext* admCtx) {
+void TicketHolder::_updateQueueStatsOnRelease(TicketHolder::QueueStats& queueStats,
+                                              const Ticket& ticket) {
     queueStats.totalFinishedProcessing.fetchAndAddRelaxed(1);
-    auto startTime = admCtx->getStartProcessingTime();
-    auto tickSource = serviceContext->getTickSource();
-    auto delta = tickSource->ticksTo<Microseconds>(tickSource->getTicks() - startTime);
+    auto tickSource = _serviceContext->getTickSource();
+    auto delta =
+        tickSource->ticksTo<Microseconds>(tickSource->getTicks() - ticket._acquisitionTime);
     queueStats.totalTimeProcessingMicros.fetchAndAddRelaxed(delta.count());
 }
 
-void updateQueueStatsOnTicketAcquisition(ServiceContext* serviceContext,
-                                         TicketHolder::QueueStats& queueStats,
-                                         AdmissionContext* admCtx) {
+void TicketHolder::_updateQueueStatsOnTicketAcquisition(AdmissionContext* admCtx,
+                                                        TicketHolder::QueueStats& queueStats) {
     if (admCtx->getAdmissions() == 0) {
         queueStats.totalNewAdmissions.fetchAndAddRelaxed(1);
     }
-    admCtx->start(serviceContext->getTickSource());
+    admCtx->recordAdmission();
     queueStats.totalStartedProcessing.fetchAndAddRelaxed(1);
 }
-}  // namespace
 
 TicketHolder::TicketHolder(ServiceContext* svcCtx, int32_t numTickets, bool trackPeakUsed)
     : _trackPeakUsed(trackPeakUsed), _outof(numTickets), _serviceContext(svcCtx) {}
@@ -81,7 +69,7 @@ bool TicketHolder::resize(int32_t newSize, Date_t deadline) noexcept {
     stdx::lock_guard<Latch> lk(_resizeMutex);
 
     auto difference = newSize - _outof.load();
-    AdmissionContext admCtx;
+    MockAdmissionContext admCtx;
     if (difference > 0) {
         // Hand out tickets one-by-one until we've given them all out.
         for (auto remaining = difference; remaining > 0; remaining--) {
@@ -94,7 +82,7 @@ bool TicketHolder::resize(int32_t newSize, Date_t deadline) noexcept {
         for (auto remaining = -difference; remaining > 0; remaining--) {
             // This call bypasses statistics reporting.
             auto ticket =
-                _waitForTicketUntilImpl(nullptr /* not interruptible */, &admCtx, deadline);
+                _waitForTicketUntilImpl(*Interruptible::notInterruptible(), &admCtx, deadline);
             if (!ticket) {
                 // We timed out getting a ticket, fail the resize.
                 return false;
@@ -110,63 +98,62 @@ void TicketHolder::appendStats(BSONObjBuilder& b) const {
     b.append("out", used());
     b.append("available", available());
     b.append("totalTickets", outof());
-    b.append("immediatePriorityAdmissionsCount", getImmediatePriorityAdmissionsCount());
+    {
+        BSONObjBuilder bb(b.subobjStart("exempt"));
+        _appendCommonQueueImplStats(bb, _exemptQueueStats);
+        bb.done();
+    }
+
     _appendImplStats(b);
 }
 
-void TicketHolder::_releaseToTicketPool(AdmissionContext* admCtx) noexcept {
-    if (MONGO_unlikely(hangTicketRelease.shouldFail())) {
-        LOGV2(8435300,
-              "Hanging hangTicketRelease in _releaseToTicketPool() due to 'hangTicketRelease' "
-              "failpoint");
-        hangTicketRelease.pauseWhileSet();
+void TicketHolder::_releaseToTicketPool(Ticket& ticket) noexcept {
+    if (ticket._priority == AdmissionContext::Priority::kExempt) {
+        _updateQueueStatsOnRelease(_exemptQueueStats, ticket);
+        return;
     }
-    auto& queueStats = _getQueueStatsToUse(admCtx);
-    updateQueueStatsOnRelease(_serviceContext, queueStats, admCtx);
-    _releaseToTicketPoolImpl(admCtx);
+
+    auto& queueStats = _getQueueStatsToUse(ticket._priority);
+    _updateQueueStatsOnRelease(queueStats, ticket);
+    _releaseToTicketPoolImpl(ticket._admissionContext);
 }
 
-Ticket TicketHolder::waitForTicket(OperationContext* opCtx, AdmissionContext* admCtx) {
-    auto res = waitForTicketUntil(opCtx, admCtx, Date_t::max());
+Ticket TicketHolder::waitForTicket(Interruptible& interruptible, AdmissionContext* admCtx) {
+    auto res = waitForTicketUntil(interruptible, admCtx, Date_t::max());
     invariant(res);
     return std::move(*res);
 }
 
 boost::optional<Ticket> TicketHolder::tryAcquire(AdmissionContext* admCtx) {
-    // 'kImmediate' operations should always bypass the ticketing system.
-    invariant(admCtx && admCtx->getPriority() != AdmissionContext::Priority::kImmediate);
-    auto ticket = _tryAcquireImpl(admCtx);
+    if (admCtx->getPriority() == AdmissionContext::Priority::kExempt) {
+        _updateQueueStatsOnTicketAcquisition(admCtx, _exemptQueueStats);
+        return Ticket{this, admCtx};
+    }
 
+    auto ticket = _tryAcquireImpl(admCtx);
     if (ticket) {
-        auto& queueStats = _getQueueStatsToUse(admCtx);
-        updateQueueStatsOnTicketAcquisition(_serviceContext, queueStats, admCtx);
+        auto& queueStats = _getQueueStatsToUse(admCtx->getPriority());
+        _updateQueueStatsOnTicketAcquisition(admCtx, queueStats);
         _updatePeakUsed();
     }
+
     return ticket;
 }
 
-
-boost::optional<Ticket> TicketHolder::waitForTicketUntil(OperationContext* opCtx,
+boost::optional<Ticket> TicketHolder::waitForTicketUntil(Interruptible& interruptible,
                                                          AdmissionContext* admCtx,
                                                          Date_t until) {
-    invariant(admCtx && admCtx->getPriority() != AdmissionContext::Priority::kImmediate);
-
     // Attempt a quick acquisition first.
     if (auto ticket = tryAcquire(admCtx)) {
         return ticket;
     }
 
-    auto& queueStats = _getQueueStatsToUse(admCtx);
+    auto& queueStats = _getQueueStatsToUse(admCtx->getPriority());
     auto tickSource = _serviceContext->getTickSource();
-    auto currentWaitTime = tickSource->getTicks();
-    auto updateQueuedTime = [&]() {
-        auto oldWaitTime = std::exchange(currentWaitTime, tickSource->getTicks());
-        auto waitDelta = tickSource->ticksTo<Microseconds>(currentWaitTime - oldWaitTime).count();
-        queueStats.totalTimeQueuedMicros.fetchAndAddRelaxed(waitDelta);
-    };
     queueStats.totalAddedQueue.fetchAndAddRelaxed(1);
-    ON_BLOCK_EXIT([&] {
-        updateQueuedTime();
+    ON_BLOCK_EXIT([&, startWaitTime = tickSource->getTicks()] {
+        auto waitDelta = tickSource->ticksTo<Microseconds>(tickSource->getTicks() - startWaitTime);
+        queueStats.totalTimeQueuedMicros.fetchAndAddRelaxed(waitDelta.count());
         queueStats.totalRemovedQueue.fetchAndAddRelaxed(1);
     });
 
@@ -175,11 +162,12 @@ boost::optional<Ticket> TicketHolder::waitForTicketUntil(OperationContext* opCtx
         queueStats.totalCanceled.fetchAndAddRelaxed(1);
     });
 
-    auto ticket = _waitForTicketUntilImpl(opCtx, admCtx, until);
+    WaitingForAdmissionGuard waitForAdmission(admCtx, _serviceContext->getTickSource());
+    auto ticket = _waitForTicketUntilImpl(interruptible, admCtx, until);
 
     if (ticket) {
         cancelWait.dismiss();
-        updateQueueStatsOnTicketAcquisition(_serviceContext, queueStats, admCtx);
+        _updateQueueStatsOnTicketAcquisition(admCtx, queueStats);
         _updatePeakUsed();
         return ticket;
     } else {
@@ -238,15 +226,15 @@ boost::optional<Ticket> MockTicketHolder::tryAcquire(AdmissionContext* admCtx) {
     return Ticket{this, admCtx};
 }
 
-Ticket MockTicketHolder::waitForTicket(OperationContext*, AdmissionContext* admCtx) {
+Ticket MockTicketHolder::waitForTicket(Interruptible& interruptible, AdmissionContext* admCtx) {
     auto ticket = tryAcquire(admCtx);
     invariant(ticket);
     return std::move(ticket.get());
 }
 
-boost::optional<Ticket> MockTicketHolder::waitForTicketUntil(OperationContext*,
+boost::optional<Ticket> MockTicketHolder::waitForTicketUntil(Interruptible& interruptible,
                                                              AdmissionContext* admCtx,
-                                                             Date_t) {
+                                                             Date_t until) {
     return tryAcquire(admCtx);
 }
 
@@ -254,7 +242,7 @@ boost::optional<Ticket> MockTicketHolder::_tryAcquireImpl(AdmissionContext* admC
     return tryAcquire(admCtx);
 }
 
-boost::optional<Ticket> MockTicketHolder::_waitForTicketUntilImpl(OperationContext* opCtx,
+boost::optional<Ticket> MockTicketHolder::_waitForTicketUntilImpl(Interruptible&,
                                                                   AdmissionContext* admCtx,
                                                                   Date_t until) {
     return tryAcquire(admCtx);

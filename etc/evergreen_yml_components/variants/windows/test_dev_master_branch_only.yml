@@ -1,5 +1,8 @@
 # Windows build variants for testing development environments
-# that should run only on master branch projects
+#
+# After the branching variants in this file
+# should NOT run on a new rapid release (v7.1, v7.2 etc.)
+# and LTS release (v7.0, v6.0 etc.) branch projects
 
 variables:
 # THIS HAS COPIES IN:
@@ -15,8 +18,8 @@ variables:
     # This is added because of EVG-18211.
     # Without this we are adding extra dependencies on evergreen and it is causing strain
     omit_generated_tasks: true
-  - name: generate_buildid_to_debug_symbols_mapping
-    variant: windows-compile-required
+  # - name: generate_buildid_to_debug_symbols_mapping
+  #   variant: windows-compile-required
 
 # THIS HAS COPIES IN:
 # - etc/evergreen_yml_components/variants/windows/test_dev_master_branch_only.yml
@@ -27,7 +30,7 @@ variables:
   burn_in_tests_build_variant: enterprise-windows-all-feature-flags-required
   exe: ".exe"
   content_type: application/zip
-  python: '/cygdrive/c/python/python39/python.exe'
+  python: '/cygdrive/c/python/python310/python.exe'
   ext: zip
   multiversion_platform: windows
   multiversion_edition: enterprise
@@ -47,7 +50,7 @@ buildvariants:
 # Note that this task is currently optional;
 # This will eventually become suggested, then required.
 - name: &windows-bazel-compile windows-bazel-compile
-  display_name: "Windows Bazel Compile"
+  display_name: "Windows Enterprise Bazel Compile"
   cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
   tags: ["bazel_check"]
   run_on:
@@ -64,17 +67,16 @@ buildvariants:
       LIBPATH="c:/sasl/lib"
       -j$(bc <<< "$(grep -c '^processor' /proc/cpuinfo) / 1.8")
       --win-version-min=win10
-    python: '/cygdrive/c/python/python39/python.exe'
+    python: '/cygdrive/c/python/python310/python.exe'
     compile_variant: *windows-bazel-compile
   tasks:
     - name: compile_bazel_windows_TG
+    - name: compile_bazel_ninja_TG
 
 - name: &windows-dev-compile-suggested windows-dev-compile-suggested
-  display_name: "* Windows Dev Compile"
+  display_name: "* Windows Enterprise Dev Compile"
   run_on:
   - windows-vsCurrent-xlarge
-  modules:
-  - enterprise
   expansions:
     exe: ".exe"
     ext: zip
@@ -83,44 +85,19 @@ buildvariants:
       CPPPATH="c:/sasl/include"
       LIBPATH="c:/sasl/lib"
     num_scons_link_jobs_available: 0.2
-    python: '/cygdrive/c/python/python39/python.exe'
+    python: '/cygdrive/c/python/python310/python.exe'
     scons_cache_scope: shared
     compile_variant: *windows-dev-compile-suggested
   tasks:
     - name: scons_compile_smoke_test_TG
     - name: ninja_compile_smoke_test_TG
 
-- name: &windows-dynamic-visibility-test windows-dynamic-visibility-test
-  display_name: "~ Shared Library Windows (visibility test)"
-  cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
-  expansions:
-    # --link-model=dynamic is set by visiblity_test's task_compile_flags
-    # expansion
-    compile_flags: >-
-      CPPPATH="c:/sasl/include"
-      LIBPATH="c:/sasl/lib"
-      -j$(( $(grep -c ^processor /proc/cpuinfo) / 2 ))
-      --win-version-min=win10
-    python: '/cygdrive/c/python/python39/python.exe'
-    ext: zip
-    has_packages: false
-    scons_cache_scope: shared
-    scons_cache_mode: all
-    num_scons_link_jobs_available: 0.99
-    compile_variant: *windows-dynamic-visibility-test
-  tasks:
-  - name: visibility_test_TG
-    distros:
-    - windows-vsCurrent-large
-
 ### QO & QE Patch-Specific Build Variants ###
 - name: &windows-compile-query-patch-only windows-compile-query-patch-only
-  display_name: "~ Windows Compile Query Patch Only"
+  display_name: "~ Windows Enterprise Compile Query Patch Only"
   cron: "0 4 * * 0" # From the ${project_weekly_cron} parameter # This is a patch-only variant but we run on mainline to pick up task history.
   run_on:
   - windows-vsCurrent-small
-  modules:
-  - enterprise
   expansions:
     additional_package_targets: >-
       archive-mongocryptd
@@ -136,7 +113,7 @@ buildvariants:
       -j$(( $(grep -c ^processor /proc/cpuinfo) / 2 ))
       --win-version-min=win10
     num_scons_link_jobs_available: 0.5
-    python: '/cygdrive/c/python/python39/python.exe'
+    python: '/cygdrive/c/python/python310/python.exe'
     ext: zip
     scons_cache_scope: shared
     multiversion_platform: windows
@@ -156,8 +133,6 @@ buildvariants:
   name: &enterprise-windows-all-feature-flags-required enterprise-windows-all-feature-flags-required
   display_name: "! Enterprise Windows (all feature flags)"
   cron: "0 */4 * * *" # From the ${project_required_suggested_cron} parameter
-  modules:
-  - enterprise
   run_on:
   - windows-vsCurrent-small
   expansions:
@@ -165,7 +140,7 @@ buildvariants:
     burn_in_tests_build_variant: enterprise-windows-all-feature-flags-required
     exe: ".exe"
     content_type: application/zip
-    python: '/cygdrive/c/python/python39/python.exe'
+    python: '/cygdrive/c/python/python310/python.exe'
     ext: zip
     multiversion_platform: windows
     multiversion_edition: enterprise
@@ -184,8 +159,6 @@ buildvariants:
     # run too long and hit execution timeouts.
     # burn_in_task_name: jsCore
   tasks:
-  - name: .cqf
-  - name: query_golden_classic
   # - name: burn_in_tasks_gen
   #   depends_on:
   #   - name: version_burn_in_gen
@@ -193,48 +166,14 @@ buildvariants:
   #     omit_generated_tasks: true
   #   - name: archive_dist_test_debug
   #     variant: *windows_compile_variant_name
-  - name: audit
-  - name: auth_audit_gen
-  - name: buildscripts_test
-  - name: .bulk_write
-  - name: causally_consistent_jscore_txns_passthrough
-    distros:
-    - windows-vsCurrent-large
-  - name: .encrypt !.aggregation !.replica_sets !.sharding !.jscore
-  - name: external_auth
-  - name: external_auth_aws
-  - name: external_auth_windows
-    distros:
-    - windows-2016-dc
-  - name: .jscore .common !.sharding
-  - name: jsCore_auth
-  - name: jsCore_column_store_indexes
-  - name: jsCore_ese
-  - name: jsCore_txns_large_txns_format
-  - name: jsCore_wildcard_indexes
-  - name: .jstestfuzz .common
-  - name: noPassthrough_gen
-  - name: noPassthroughWithMongod_gen
-  - name: .replica_sets .common
-  - name: .replica_sets .multi_oplog !.gcm
-  - name: sasl
-  - name: .sharding .txns
-  - name: sharding_auth_audit_gen
-  - name: sharding_max_mirroring_opportunistic_secondary_targeting_ese_gen
-  - name: query_stats_aggregation_passthrough
-  - name: query_stats_mongos_aggregation_passthrough
-  - name: query_stats_mongos_passthrough
-  - name: query_stats_passthrough
-  - name: .timeseries_crud
-  - name: unittest_shell_hang_analyzer_gen
+  - name: .development_critical !.requires_compile_variant !.incompatible_development_variant !.incompatible_windows !.incompatible_all_feature_flags
+  - name: .release_critical !.requires_compile_variant !.incompatible_development_variant !.incompatible_windows !.incompatible_all_feature_flags
 
 - name: &enterprise-windows-benchmarks enterprise-windows-benchmarks
   display_name: "* Enterprise Windows (Benchmarks)"
   cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
   run_on:
-  - windows-vsCurrent-small
-  modules:
-  - enterprise
+  - windows-vsCurrent-large # To accommodate OOD issues noted in BF-31698
   expansions:
     additional_package_targets: >-
       archive-mongocryptd
@@ -250,7 +189,7 @@ buildvariants:
       -j$(( $(grep -c ^processor /proc/cpuinfo) / 2 ))
       --win-version-min=win10
     num_scons_link_jobs_available: 0.5
-    python: '/cygdrive/c/python/python39/python.exe'
+    python: '/cygdrive/c/python/python310/python.exe'
     ext: zip
     scons_cache_scope: shared
     multiversion_platform: windows

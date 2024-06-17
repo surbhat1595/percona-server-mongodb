@@ -81,6 +81,7 @@ public:
           _taskExecutor(taskExecutor),
           _metadataMergeProtocolVersion(spec.getMetadataMergeProtocolVersion()),
           _limit(spec.getLimit().value_or(0)),
+          _queryReferencesSearchMeta(spec.getRequiresSearchMetaCursor().value_or(true)),
           _mongotDocsRequested(mongotDocsRequested),
           _requiresSearchSequenceToken(requiresSearchSequenceToken) {
         if (spec.getSortSpec().has_value()) {
@@ -111,14 +112,14 @@ public:
 
     const char* getSourceName() const override;
 
-    virtual boost::optional<DistributedPlanLogic> distributedPlanLogic() override {
+    boost::optional<DistributedPlanLogic> distributedPlanLogic() override {
         // The desugaring of DocumentSourceSearch happens after sharded planning, so we should never
         // execute distributedPlanLogic here, instead it should be called against
         // DocumentSourceSearch.
         MONGO_UNREACHABLE_TASSERT(7815902);
     }
 
-    virtual boost::intrusive_ptr<DocumentSource> clone(
+    boost::intrusive_ptr<DocumentSource> clone(
         const boost::intrusive_ptr<ExpressionContext>& newExpCtx) const override {
         auto expCtx = newExpCtx ? newExpCtx : pExpCtx;
         if (_metadataMergeProtocolVersion) {
@@ -130,6 +131,7 @@ public:
             if (_sortSpec.has_value()) {
                 remoteSpec.setSortSpec(_sortSpec->getOwned());
             }
+            remoteSpec.setRequiresSearchMetaCursor(_queryReferencesSearchMeta);
             return make_intrusive<DocumentSourceInternalSearchMongotRemote>(
                 std::move(remoteSpec), expCtx, _taskExecutor, _mongotDocsRequested);
         } else {
@@ -196,6 +198,10 @@ public:
         return _metadataMergeProtocolVersion;
     }
 
+    bool queryReferencesSearchMeta() {
+        return _queryReferencesSearchMeta;
+    }
+
     void addVariableRefs(std::set<Variables::Id>* refs) const final {}
 
     auto isStoredSource() const {
@@ -210,7 +216,7 @@ protected:
      */
     Value serializeWithoutMergePipeline(const SerializationOptions& opts) const;
 
-    virtual Value serialize(const SerializationOptions& opts) const override;
+    Value serialize(const SerializationOptions& opts) const override;
 
     /**
      * Inspects the cursor to see if it set any vars, and propogates their definitions to the
@@ -292,6 +298,14 @@ private:
      * Sort key generator used to populate $sortKey. Has a value iff '_sortSpec' has a value.
      */
     boost::optional<SortKeyGenerator> _sortKeyGen;
+
+    /**
+     * Flag indicating whether or not the total user pipeline references the $$SEARCH_META variable.
+     * In sharded search, mongos will set this value send it to mongod; mongod should not try to
+     * recompute this value since it may incorrectly think it doesn't need metadata if only the
+     * merging pipeline (and not the shard's pipeline) references $$SEARCH_META.
+     */
+    bool _queryReferencesSearchMeta = true;
 
     /**
      * This will populate the docsRequested field of the cursorOptions document sent as part of the

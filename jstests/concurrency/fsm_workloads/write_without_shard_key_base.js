@@ -161,7 +161,7 @@ export const $config = extendWorkload($baseConfig, function($config, $super) {
 
             if (doUpsert) {
                 assert.neq(res.upsertedId, null, res);
-                assert.eq(db[collName].find({"_id": res.upsertedId}).itcount(), 1);
+                assert.eq(db[collName].countDocuments({"_id": res.upsertedId}), 1);
 
                 // Clean up, remove upserted document.
                 assert.commandWorked(db[collName].deleteOne({"_id": res.upsertedId}));
@@ -199,13 +199,27 @@ export const $config = extendWorkload($baseConfig, function($config, $super) {
                   "updateType: " + updateType + "\n" +
                   "containsMatchedDocs: " + containsMatchedDocs);
 
+        // If the suite runs this function as a txn with retries already as in
+        // concurrency_sharded_multi_stmt_txn suites, we skip creating a retryable writes session.
+        // In this case the write is run as WriteType::Ordinary in a txn. In all other cases, we
+        // create a new retryable writes session to test WriteType::WithoutShardKeyWithId as
+        // currently we only categorize non transactional retryable writes into this write type.
+        let session;
+        let collection;
+        if (!db.getSession()._serverSession.isTxnActive()) {
+            session = db.getMongo().startSession({retryWrites: true});
+            collection = session.getDatabase(db.getName()).getCollection(collName);
+        } else {
+            collection = db[collName];
+        }
+
         let res;
         if (updateType === 0 /* Update operator document */) {
             const update = {[this.secondaryDocField]: newValue};
-            res = db[collName].updateOne(query, {$set: update});
+            res = collection.updateOne(query, {$set: update});
         } else { /* Aggregation pipeline update */
             const update = {[this.secondaryDocField]: newValue};
-            res = db[collName].updateOne(query, [{$set: update}]);
+            res = collection.updateOne(query, [{$set: update}]);
         }
         assert.commandWorked(res);
 
@@ -220,6 +234,9 @@ export const $config = extendWorkload($baseConfig, function($config, $super) {
         // In case the modification results in no change to the document, matched may be higher
         // than modified.
         assert.gte(res.matchedCount, res.modifiedCount, res);
+        if (session) {
+            session.endSession();
+        }
     };
 
     /**
@@ -275,7 +292,8 @@ export const $config = extendWorkload($baseConfig, function($config, $super) {
                 if (res.code === ErrorCodes.LockTimeout || res.code === ErrorCodes.StaleConfig ||
                     res.code === ErrorCodes.ConflictingOperationInProgress ||
                     res.code === ErrorCodes.ShardCannotRefreshDueToLocksHeld ||
-                    res.code == ErrorCodes.WriteConflict) {
+                    res.code == ErrorCodes.WriteConflict ||
+                    res.code == ErrorCodes.SnapshotUnavailable) {
                     if (!msg.includes(otherErrorsInChangeShardKeyMsg)) {
                         return false;
                     }
@@ -396,7 +414,7 @@ export const $config = extendWorkload($baseConfig, function($config, $super) {
                 assert.eq(res.lastErrorObject.n, 1, res);
                 assert.eq(res.lastErrorObject.updatedExisting, false, res);
                 assert.neq(res.lastErrorObject.upserted, null, res);
-                assert.eq(db[collName].find({"_id": res.lastErrorObject.upserted}).itcount(), 1);
+                assert.eq(db[collName].countDocuments({"_id": res.lastErrorObject.upserted}), 1);
 
                 // Clean up, remove upserted document.
                 assert.commandWorked(db[collName].deleteOne({"_id": res.lastErrorObject.upserted}));
@@ -405,7 +423,7 @@ export const $config = extendWorkload($baseConfig, function($config, $super) {
                 assert.eq(res.lastErrorObject.updatedExisting, false, res);
             }
         } else { /* Remove */
-            const numMatchedDocsBefore = db[collName].find(query).itcount();
+            const numMatchedDocsBefore = db[collName].countDocuments(query);
             const cmdObj = {
                 findAndModify: collName,
                 query: query,
@@ -422,7 +440,7 @@ export const $config = extendWorkload($baseConfig, function($config, $super) {
 
             res = assert.commandWorked(db.runCommand(cmdObj));
 
-            const numMatchedDocsAfter = db[collName].find(query).itcount();
+            const numMatchedDocsAfter = db[collName].countDocuments(query);
 
             if (numMatchedDocsBefore > 0) {
                 assert.eq(res.lastErrorObject.n, 1, res);
@@ -469,7 +487,7 @@ export const $config = extendWorkload($baseConfig, function($config, $super) {
 
         // Used for validation after running the write operation.
         const containsMatchedDocs = db[collName].findOne(query) != null;
-        const numMatchedDocsBefore = db[collName].find(query).itcount();
+        const numMatchedDocsBefore = db[collName].countDocuments(query);
 
         jsTestLog("deleteOne state running with query: " + tojson(query) + "\n" +
                   "containsMatchedDocs: " + containsMatchedDocs + "\n" +
@@ -477,7 +495,7 @@ export const $config = extendWorkload($baseConfig, function($config, $super) {
 
         let res = assert.commandWorked(db[collName].deleteOne(query));
 
-        const numMatchedDocsAfter = db[collName].find(query).itcount();
+        const numMatchedDocsAfter = db[collName].countDocuments(query);
 
         if (containsMatchedDocs) {
             assert.eq(res.deletedCount, 1, res);
@@ -504,17 +522,31 @@ export const $config = extendWorkload($baseConfig, function($config, $super) {
             tid: this.tid
         };
 
+        // If the suite runs this function as a txn with retries already as in
+        // concurrency_sharded_multi_stmt_txn suites, we skip creating a retryable writes session.
+        // In this case the write is run as WriteType::Ordinary in a txn. In all other cases, we
+        // create a new retryable writes session to test WriteType::WithoutShardKeyWithId as
+        // currently we only categorize non transactional retryable writes into this write type.
+        let session;
+        let collection;
+        if (!db.getSession()._serverSession.isTxnActive()) {
+            session = db.getMongo().startSession({retryWrites: true});
+            collection = session.getDatabase(db.getName()).getCollection(collName);
+        } else {
+            collection = db[collName];
+        }
+
         // Used for validation after running the write operation.
-        const containsMatchedDocs = db[collName].findOne(query) != null;
-        const numMatchedDocsBefore = db[collName].find(query).itcount();
+        const containsMatchedDocs = collection.findOne(query) != null;
+        const numMatchedDocsBefore = collection.countDocuments(query);
 
         jsTestLog("deleteOneWithId state running with query: " + tojson(query) + "\n" +
                   "containsMatchedDocs: " + containsMatchedDocs + "\n" +
                   "numMatchedDocsBefore: " + numMatchedDocsBefore);
 
-        let res = assert.commandWorked(db[collName].deleteOne(query));
+        let res = assert.commandWorked(collection.deleteOne(query));
 
-        const numMatchedDocsAfter = db[collName].find(query).itcount();
+        const numMatchedDocsAfter = collection.countDocuments(query);
 
         if (containsMatchedDocs) {
             assert.eq(res.deletedCount, 1, res);
@@ -524,6 +556,9 @@ export const $config = extendWorkload($baseConfig, function($config, $super) {
 
             // The count should both be 0.
             assert.eq(numMatchedDocsAfter, numMatchedDocsBefore);
+        }
+        if (session) {
+            session.endSession();
         }
         jsTestLog("Finished deleteOneWithId state");
     };

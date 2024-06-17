@@ -75,8 +75,6 @@ struct StageConstraints {
         // router to a shard to execute if some other stage in the pipeline needs to run on a
         // shard. The stage provides its own data and is independent of any collection.
         kRunOnceAnyNode,
-        // Indicates that the stage must run on the primary shard.
-        kPrimaryShard,
         // Indicates that the stage must run on any participating shard.
         kAnyShard,
         // Indicates that the stage can only run on mongoS.
@@ -198,7 +196,6 @@ struct StageConstraints {
         // shard, since it needs to be able to run on mongoS in a cluster.
         invariant(!(changeStreamRequirement == ChangeStreamRequirement::kAllowlist &&
                     (hostRequirement == HostTypeRequirement::kAnyShard ||
-                     hostRequirement == HostTypeRequirement::kPrimaryShard ||
                      hostRequirement == HostTypeRequirement::kAllShardHosts)));
 
         // A stage which is allowlisted for $changeStream cannot have a position requirement.
@@ -363,9 +360,9 @@ struct StageConstraints {
     //   documents because our implementation of $sample shuffles the order
     bool canSwapWithSkippingOrLimitingStage = false;
 
-    // If true, then any stage of kind 'DocumentSourceSingleDocumentTransformation' can be swapped
-    // ahead of this stage.
-    bool canSwapWithSingleDocTransform = false;
+    // If true, then any stage of kind 'DocumentSourceSingleDocumentTransformation' or $redact can
+    // be swapped ahead of this stage.
+    bool canSwapWithSingleDocTransformOrRedact = false;
 
     // Indicates that a stage is allowed within a pipeline-style update.
     bool isAllowedWithinUpdatePipeline = false;
@@ -397,7 +394,7 @@ struct StageConstraints {
             isIndependentOfAnyCollection == other.isIndependentOfAnyCollection &&
             canSwapWithMatch == other.canSwapWithMatch &&
             canSwapWithSkippingOrLimitingStage == other.canSwapWithSkippingOrLimitingStage &&
-            canSwapWithSingleDocTransform == other.canSwapWithSingleDocTransform &&
+            canSwapWithSingleDocTransformOrRedact == other.canSwapWithSingleDocTransformOrRedact &&
             canAppearOnlyOnceInPipeline == other.canAppearOnlyOnceInPipeline &&
             isAllowedWithinUpdatePipeline == other.isAllowedWithinUpdatePipeline &&
             unionRequirement == other.unionRequirement &&

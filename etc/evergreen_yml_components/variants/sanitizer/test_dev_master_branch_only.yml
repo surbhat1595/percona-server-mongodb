@@ -1,5 +1,8 @@
 # Instrumented build variants for testing development environments
-# that should run only on master branch projects
+#
+# After the branching variants in this file
+# should NOT run on a new rapid release (v7.1, v7.2 etc.)
+# and LTS release (v7.0, v6.0 etc.) branch projects
 
 variables:
 # THIS HAS COPIES IN:
@@ -16,8 +19,8 @@ variables:
     # This is added because of EVG-18211.
     # Without this we are adding extra dependencies on evergreen and it is causing strain
     omit_generated_tasks: true
-  - name: generate_buildid_to_debug_symbols_mapping
-    variant: linux-x86-dynamic-compile
+  # - name: generate_buildid_to_debug_symbols_mapping
+  #   variant: linux-x86-dynamic-compile
 
 # THIS HAS COPIES IN:
 # - etc/evergreen_yml_components/variants/sanitizer/test_dev_master_branch_only.yml
@@ -33,8 +36,8 @@ variables:
     # This is added because of EVG-18211.
     # Without this we are adding extra dependencies on evergreen and it is causing strain
     omit_generated_tasks: true
-  - name: generate_buildid_to_debug_symbols_mapping
-    variant: linux-debug-aubsan-compile-required
+  # - name: generate_buildid_to_debug_symbols_mapping
+  #   variant: linux-debug-aubsan-compile-required
 
 # THIS HAS COPIES IN:
 # - etc/evergreen_yml_components/variants/rhel/test_dev_master_branch_only.yml
@@ -116,8 +119,6 @@ buildvariants:
 - name: &enterprise-rhel-80-64-bit-dynamic-debug-mode enterprise-rhel-80-64-bit-dynamic-debug-mode
   display_name: "Shared Library Enterprise RHEL 8.0 Debug Mode"
   cron: "0 4 * * 0" # From the ${project_weekly_cron} parameter
-  modules:
-  - enterprise
   run_on:
   - rhel80-small
   stepback: false
@@ -159,8 +160,8 @@ buildvariants:
   - name: .change_streams !.no_debug_mode
   - name: .change_stream_fuzzer
   - name: .misc_js !.no_debug_mode
-  - name: .concurrency !.large !.no_txns !.no_debug_mode
-  - name: .concurrency .large !.no_txns !.no_debug_mode
+  - name: .concurrency !.large !.no_txns !.no_debug_mode !.feature_flag_guarded
+  - name: .concurrency .large !.no_txns !.no_debug_mode !.feature_flag_guarded
     distros:
     - rhel80-medium
   - name: .config_fuzzer !.large
@@ -185,7 +186,7 @@ buildvariants:
   - name: jsCore_txns_large_txns_format
   - name: json_schema
   # TODO(SERVER-69996) reenable after ticket is complete
-  # - name: .jstestfuzz !.flow_control
+  # - name: .jstestfuzz !.feature_flag_guarded !.flow_control
   - name: libunwind_tests
   - name: .multiversion_sanity_check
   - name: .multi_shard !.no_debug_mode
@@ -226,7 +227,7 @@ buildvariants:
   - name: search_pinned_connections_auth
   - name: search_ssl
   - name: session_jscore_passthrough
-  - name: .sharding .jscore !.wo_snapshot !.multi_stmt !.no_debug_mode
+  - name: .sharding .jscore !.wo_snapshot !.multi_stmt !.no_debug_mode !.feature_flag_guarded
   - name: sharding_api_version_jscore_passthrough_gen
   - name: .stitch
   - name: .crypt
@@ -237,12 +238,12 @@ buildvariants:
     - rhel80-xlarge
   - name: .updatefuzzer !.no_debug_mode
   - name: secondary_reads_passthrough_gen
-  - name: server_discovery_and_monitoring_json_test_TG
+  - name: server_discovery_and_monitoring_json_test
   # TODO(SERVER-70015) reenable after ticket is complete
   # - name: .serverless
   #   distros:
   #   - rhel80-xlarge
-  - name: server_selection_json_test_TG
+  - name: server_selection_json_test
     distros:
     - rhel80-xlarge
   - name: streams
@@ -271,77 +272,34 @@ buildvariants:
       -j$(bc <<< "$(grep -c '^processor' /proc/cpuinfo) / 1.8")
       MONGO_DISTMOD=windows
       --use-diagnostic-latches=on
+      --modules=
     num_scons_link_jobs_available: 0.2
-    python: '/cygdrive/c/python/python39/python.exe'
+    python: '/cygdrive/c/python/python310/python.exe'
     ext: zip
     scons_cache_scope: shared
     multiversion_platform: windows
     multiversion_edition: enterprise
     large_distro_name: windows-vsCurrent-large
-    test_flags: &windows_common_test_excludes --excludeWithAnyTags=incompatible_with_windows_tls
+    test_flags: >-
+      --excludeWithAnyTags=incompatible_with_windows_tls
+      --enableEnterpriseTests=off
     compile_variant: *windows-debug-suggested
   tasks:
   - name: compile_test_serial_TG
     distros:
     - windows-vsCurrent-xxlarge
-  - name: compile_build_tools_next_TG
+  - name: compile_test_parallel_unittest_stream_TG
     distros:
-    - windows-vsCurrent-xlarge
+    - windows-vsCurrent-xxlarge
   - name: compile_integration_and_test_no_audit_parallel_stream_TG
     distros:
     - windows-vsCurrent-xlarge
-  - name: .aggregation !.auth !.encrypt !.feature_flag_guarded
-  - name: aggregation_expression_multiversion_fuzzer_gen
-  - name: aggregation_expression_optimization_fuzzer_gen
-  - name: auth_gen
-  - name: .causally_consistent !.sharding
-  - name: .change_streams
-  - name: .misc_js !.non_win_dbg
-  - name: .concurrency
-    distros:
-    - windows-vsCurrent-large
-  - name: .config_fuzzer !.large !.linux_only
-  - name: .config_fuzzer .large !.linux_only !.sharded
-    distros:
-    - windows-vsCurrent-large
-  - name: disk_wiredtiger
-  - name: initial_sync_fuzzer_gen
-  - name: fcv_upgrade_downgrade_replica_sets_jscore_passthrough_gen
-  - name: fcv_upgrade_downgrade_sharding_jscore_passthrough_gen
-  - name: fcv_upgrade_downgrade_sharded_collections_jscore_passthrough_gen
-  - name: .jscore .common !.auth !.sharding
-  - name: jsCore_txns_large_txns_format
-  - name: json_schema
-  - name: multi_shard_multi_stmt_txn_jscore_passthrough_gen
-  - name: multi_stmt_txn_jscore_passthrough_with_migration_gen
-  - name: .read_write_concern !.large
-  - name: .read_write_concern .large
-    distros:
-    - windows-vsCurrent-large
-  - name: .read_only
-  - name: .rollbackfuzzer
-  - name: .replica_sets !.large !.encrypt !.auth !.fcbis
-  - name: .replica_sets .large !.fcbis
-    distros:
-    - windows-vsCurrent-large
-  - name: replica_sets_max_mirroring_large_txns_format_gen
-  - name: .resharding_fuzzer
-  - name: retryable_writes_jscore_passthrough_gen
-  - name: retryable_writes_jscore_stepdown_passthrough_gen
-    distros:
-    - windows-vsCurrent-large
-  - name: session_jscore_passthrough
-  - name: sharding_gen
-  - name: sharding_max_mirroring_opportunistic_secondary_targeting_gen
-  - name: .stitch
-  - name: server_discovery_and_monitoring_json_test_TG
-  - name: server_selection_json_test_TG
+  - name: .development_critical !.incompatible_development_variant !.incompatible_community !.incompatible_windows !.requires_all_feature_flags
+  - name: .release_critical !.incompatible_development_variant !.incompatible_community !.incompatible_windows !.requires_all_feature_flags
 
 - name: &enterprise-windows-debug-unoptimized enterprise-windows-debug-unoptimized
   display_name: "Enterprise Windows DEBUG (Unoptimized)"
   cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
-  modules:
-  - enterprise
   run_on:
   - windows-vsCurrent-small
   expansions:
@@ -362,11 +320,12 @@ buildvariants:
       --win-version-min=win10
       --use-diagnostic-latches=on
     num_scons_link_jobs_available: 0.25
-    python: '/cygdrive/c/python/python39/python.exe'
+    python: '/cygdrive/c/python/python310/python.exe'
     ext: zip
     resmoke_jobs_max: 1
     scons_cache_scope: shared
-    test_flags: *windows_common_test_excludes
+    test_flags: >-
+      --excludeWithAnyTags=incompatible_with_windows_tls
   tasks:
   # This variant tests that unoptimized, DEBUG mongos and mongod binaries can run on Windows.
   # It has a minimal amount of tasks because unoptimized builds are slow, which causes
@@ -392,7 +351,9 @@ buildvariants:
   - macos-1100
   expansions: &macos-debug-expansions
     compile_variant: *macos-debug-suggested
-    test_flags: --excludeWithAnyTags=incompatible_with_macos
+    test_flags: >-
+      --excludeWithAnyTags=incompatible_with_macos
+      --enableEnterpriseTests=off
     resmoke_jobs_max: 6
     compile_env: DEVELOPER_DIR=/Applications/Xcode13.app
     compile_flags: >-
@@ -403,28 +364,17 @@ buildvariants:
       --libc++
       --variables-files=etc/scons/xcode_macosx.vars
       --use-diagnostic-latches=on
+      --modules=
     num_scons_link_jobs_available: 0.99
   tasks:
   - name: compile_test_serial_TG
-  - name: compile_build_tools_next_TG
-  - name: aggregation !.feature_flag_guarded
-  - name: auth_gen
-  - name: causally_consistent_jscore_txns_passthrough
-  - name: disk_wiredtiger
-  - name: failpoints
-  - name: .jscore .common !.auth !.sharding
-  - name: jsCore_txns_large_txns_format
-  - name: mongosTest
-  - name: replica_sets_gen
-  - name: replica_sets_max_mirroring_large_txns_format_gen
-  - name: .ssl
-  - name: .stitch
+  - name: compile_test_parallel_unittest_stream_TG
+  - name: .development_critical !.incompatible_development_variant !.incompatible_community !.incompatible_mac !.requires_all_feature_flags
+  - name: .release_critical !.incompatible_development_variant !.incompatible_community !.incompatible_mac !.requires_all_feature_flags
 
 - name: &enterprise-macos enterprise-macos
   display_name: "Enterprise macOS DEBUG"
   cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
-  modules:
-  - enterprise
   run_on:
   - macos-1100
   expansions:
@@ -443,14 +393,13 @@ buildvariants:
     num_scons_link_jobs_available: 0.99
   tasks:
   - name: compile_test_serial_TG
+  - name: compile_test_parallel_unittest_stream_TG
   - name: audit
   - name: auth_audit_gen
-  - name: causally_consistent_jscore_txns_passthrough
-  - name: .encrypt !.replica_sets !.sharding !.aggregation !.jscore !.ssl
+  - name: fle
+  - name: fle2
   - name: .jscore .common !.decimal !.sharding
   - name: replica_sets_auth_gen
-  - name: replica_sets_jscore_passthrough_gen
-  - name: timeseries_crud_jscore_passthrough_gen
   - name: sasl
   - name: .crypt
 
@@ -462,8 +411,6 @@ buildvariants:
   name: &rhel80-debug-ubsan-all-feature-flags rhel80-debug-ubsan-all-feature-flags
   display_name: "* Shared Library UBSAN Enterprise RHEL 8.0 DEBUG (all feature flags)"
   cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
-  modules:
-  - enterprise
   run_on:
   - rhel80-build
   stepback: false
@@ -474,20 +421,21 @@ buildvariants:
       archive-mongocryptd-debug
     lang_environment: LANG=C
     san_options: *ubsan_options
+    # TODO SERVER-86610 add tcmalloc-google as the allocator for ubsan
     compile_flags: >-
       --variables-files=etc/scons/mongodbtoolchain_${toolchain_version}_clang.vars
       --dbg=on
       --opt=on
       --sanitize=undefined
       --ssl
-      --ocsp-stapling=off
+      --allocator=tcmalloc-gperf
       -j$(grep -c ^processor /proc/cpuinfo)
       --use-diagnostic-latches=on
     compile_variant: *rhel80-debug-ubsan-all-feature-flags
     # To force disable feature flags even on the all feature flags variant, please use this file:
     # buildscripts/resmokeconfig/fully_disabled_feature_flags.yml
     test_flags: >-
-      --excludeWithAnyTags=requires_ocsp_stapling,requires_increased_memlock_limits,all_feature_flags_incompatible
+      --excludeWithAnyTags=requires_increased_memlock_limits,all_feature_flags_incompatible
       --runAllFeatureFlagTests
     multiversion_platform: rhel80
     multiversion_edition: enterprise
@@ -506,8 +454,6 @@ buildvariants:
   name: &rhel80-debug-aubsan-lite-all-feature-flags-required rhel80-debug-aubsan-lite-all-feature-flags-required
   display_name: "! Shared Library {A,UB}SAN Enterprise RHEL 8.0 DEBUG (all feature flags)"
   cron: "0 */4 * * *" # From the ${project_required_suggested_cron} parameter
-  modules:
-  - enterprise
   run_on:
   - rhel80-build
   expansions:
@@ -515,7 +461,6 @@ buildvariants:
     # To force disable feature flags even on the all feature flags variant, please use this file:
     # buildscripts/resmokeconfig/fully_disabled_feature_flags.yml
     test_flags: >-
-      --excludeWithAnyTags=requires_ocsp_stapling
       --runAllFeatureFlagTests
   tasks:
   - name: jsCore
@@ -532,81 +477,17 @@ buildvariants:
     # To force disable feature flags even on the all feature flags variant, please use this file:
     # buildscripts/resmokeconfig/fully_disabled_feature_flags.yml
     test_flags: >-
-      --excludeWithAnyTags=requires_ocsp_stapling
       --runAllFeatureFlagTests
   tasks:
-  - name: audit
-  - name: .aggregation
-  - name: .auth
-  - name: .bulk_write
-  - name: .concurrency !.no_txns !.repl !.kill_terminate
-  - name: .config_fuzzer
-  - name: .config_fuzzer_stress
-  - name: .cqf
-  - name: .causally_consistent !.wo_snapshot
-  - name: .change_streams
-  # TODO SERVER-57866: Remove the explicit mentions of change stream multitenant suites.
-  - name: change_streams_multitenant_passthrough
-  - name: change_streams_multitenant_sharded_collections_passthrough
-  # - name: disk_wiredtiger
-  - name: embedded_router_jscore_passthrough_gen
-  - name: embedded_router_jscore_passthrough_with_config_shard_gen
-  - name: external_auth
-  - name: external_auth_aws
-  - name: external_auth_oidc
-  - name: .encrypt
-  - name: generate_buildid_to_debug_symbols_mapping
-  - name: initial_sync_fuzzer_gen
-  - name: fcv_upgrade_downgrade_replica_sets_jscore_passthrough_gen
-  - name: fcv_upgrade_downgrade_sharding_jscore_passthrough_gen
-  - name: fcv_upgrade_downgrade_sharded_collections_jscore_passthrough_gen
-  - name: .jscore .common
-  - name: jsCore_column_store_indexes
-  - name: jsCore_min_batch_repeat_queries_ese_gsm
-  - name: jsCore_txns_large_txns_format
-  - name: jsCore_wildcard_indexes
-  - name: json_schema
-  - name: .misc_js
-  - name: move_collection_fuzzer_gen
-  - name: .multi_shard .common
-  - name: query_golden_classic
-  - name: .query_fuzzer !.cqf_only
-  - name: .read_write_concern
-  - name: replica_sets_large_txns_format_jscore_passthrough
-  - name: replica_sets_jscore_passthrough_with_auto_bootstrap_and_replica_set_endpoint_gen
-  - name: .replica_sets !.multi_oplog
-  - name: .replica_sets .encrypt
-  - name: .resharding_fuzzer
-  - name: .retry
-  - name: .read_only
-  - name: .rollbackfuzzer
-  - name: sasl
-  - name: secondary_reads_passthrough_gen
-  - name: session_jscore_passthrough
-  - name: sharded_collections_jscore_passthrough_with_replica_set_endpoint_gen
-  - name: sharded_jscore_txns_with_replica_set_endpoint_gen
-  - name: sharded_jscore_txns_sharded_collections_with_replica_set_endpoint_gen
-  - name: sharding_jscore_passthrough_with_replica_set_endpoint_gen
-  - name: streams
-  - name: .sharding .jscore !.wo_snapshot
-  - name: .sharding .common !.csrs
-  - name: .serverless
-  - name: .shard_split
-  - name: query_stats_aggregation_passthrough
-  - name: query_stats_mongos_aggregation_passthrough
-  - name: query_stats_mongos_passthrough
-  - name: query_stats_passthrough
-  - name: .unsplittable_collections
-  - name: unshard_collection_fuzzer_gen
-  - name: .updatefuzzer
-  - name: .watchdog
+  - name: .development_critical !.requires_compile_variant !.incompatible_development_variant !.incompatible_aubsan !.incompatible_all_feature_flags
+  - name: .release_critical !.requires_compile_variant !.incompatible_development_variant !.incompatible_aubsan !.incompatible_all_feature_flags
+  - name: .default !.requires_compile_variant !.incompatible_development_variant !.incompatible_aubsan !.incompatible_all_feature_flags
+  - name: .non_deterministic !.requires_compile_variant !.incompatible_development_variant !.incompatible_aubsan !.incompatible_all_feature_flags
 
 - &enterprise-rhel80-debug-tsan-template
   name: &enterprise-rhel80-debug-tsan enterprise-rhel80-debug-tsan
   display_name: "* TSAN Enterprise RHEL 8.0 DEBUG"
   cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
-  modules:
-  - enterprise
   run_on:
   - rhel80-large
   stepback: false
@@ -628,7 +509,7 @@ buildvariants:
     # thread leaks, which we have because we don't do a clean shutdown
     # of the ServiceContext.
     #
-    san_options: TSAN_OPTIONS="abort_on_error=1:disable_coredump=0:handle_abort=1:halt_on_error=1:report_thread_leaks=0:die_after_fork=0:history_size=4:suppressions=etc/tsan.suppressions:external_symbolizer_path=/opt/mongodbtoolchain/v4/bin/llvm-symbolizer"
+    san_options: TSAN_OPTIONS="abort_on_error=1:disable_coredump=0:handle_abort=1:halt_on_error=1:report_thread_leaks=0:die_after_fork=0:history_size=5:suppressions=etc/tsan.suppressions:external_symbolizer_path=/opt/mongodbtoolchain/v4/bin/llvm-symbolizer"
     compile_flags: >-
       --variables-files=etc/scons/mongodbtoolchain_${toolchain_version}_clang.vars
       --dbg=on
@@ -644,59 +525,51 @@ buildvariants:
     resmoke_jobs_factor: 0.3
     scons_cache_scope: shared
     separate_debug: off
-    large_distro_name: rhel80-medium
-    core_analyzer_distro_name: rhel80-xlarge
+    large_distro_name: rhel80-xlarge
+    xlarge_distro_name: rhel80-xxlarge
+    core_analyzer_distro_name: rhel80-xxlarge
     multiversion_platform: rhel80
     multiversion_edition: enterprise
     test_flags: >-
       --excludeWithAnyTags=tsan_incompatible
   tasks:
   - name: compile_test_serial_TG
+  - name: compile_test_parallel_unittest_stream_TG
   - name: compile_integration_and_test_parallel_stream_TG
   - name: check_feature_flag_tags
-  # TODO SERVER-82766: timeseries and multiversion fuzzers had been timing out on TSAN builds.
-  - name: .aggfuzzer !.feature_flag_guarded !.timeseries !.multiversion
+  # TODO SERVER-82766: timeseries, multiversion, and optimization fuzzers had been timing out on TSAN builds.
+  - name: .aggfuzzer !.feature_flag_guarded !.timeseries !.multiversion !.optimization !.no_debug_mode
   - name: .aggregation !.feature_flag_guarded
   - name: audit
-  # - name: .auth  # Not passing
+  - name: .auth
   - name: buildscripts_test
   - name: unittest_shell_hang_analyzer_gen
-  # - name: .config_fuzzer # Not passing
+  - name: .config_fuzzer
   - name: config_fuzzer_jsCore
-  - name: cqf
-  - name: cqf_disabled_pipeline_opt
-  - name: cqf_parallel
-  - name: query_golden_cqf
-  - name: cqf_experimental_jscore_passthrough
-  - name: cqf_experimental_aggregation_passthrough
   - name: .causally_consistent !.sharding
   - name: .change_streams
   - name: .change_stream_fuzzer
   - name: .misc_js
-  # - name: .concurrency !.large !.no_txns # Not passing
-  # - name: .concurrency .large !.no_txns # Not passing
-  #   distros:
-  #   - rhel80-medium
+  - name: .concurrency !.large !.no_txns !.feature_flag_guarded
+  - name: .concurrency .large !.no_txns !.feature_flag_guarded
+    distros:
+    - rhel80-xlarge
   - name: disk_wiredtiger
-  # - name: .encrypt # Not passing
+  - name: .encrypt
   - name: external_auth
   - name: initial_sync_fuzzer_gen
   - name: jsCore
     distros:
     - rhel80-xlarge
-  # - name: .jscore .common !jsCore # Not passing
+  - name: .jscore .common !jsCore
   - name: jsCore_min_batch_repeat_queries_ese_gsm
   - name: jsCore_txns_large_txns_format
   - name: json_schema
-  - name: .jstestfuzz !.flow_control  # Flow control jstestfuzz take longer.
-  # - name: libunwind_tests # Cant be used because tsan does not use libunwind
-  # - name: .multiversion_sanity_check # Multiversion does not pass yet, also making this work is going to be pretty tricky
+  - name: .jstestfuzz !.feature_flag_guarded !.flow_control  # Flow control jstestfuzz take longer.
   - name: .multi_shard
   - name: multi_stmt_txn_jscore_passthrough_with_migration_gen
-  # - name: multiversion_gen # Multiversion does not pass yet, also making this work is going to be pretty tricky
   - name: .query_fuzzer !.feature_flag_guarded
   - name: query_golden_classic
-  # - name: .random_multiversion_ds # Multiversion does not pass yet, also making this work is going to be pretty tricky
   - name: .read_write_concern .large
     distros:
     - rhel80-medium
@@ -736,22 +609,18 @@ buildvariants:
   - name: search_pinned_connections_auth
   - name: search_ssl
   - name: session_jscore_passthrough
-  - name: .sharding .jscore !.wo_snapshot !.multi_stmt
+  - name: .sharding .jscore !.wo_snapshot !.multi_stmt !.feature_flag_guarded
   - name: sharding_api_version_jscore_passthrough_gen
   - name: .sharding .txns
-  # - name: .sharding .common # Not passing
+  - name: .sharding .common !.feature_flag_guarded
   - name: sharding_max_mirroring_opportunistic_secondary_targeting_ese_gcm_gen
   - name: .stitch
-  # - name: .crypt # Doesn't pass on v4
-  #   distros:
-  #   - rhel80-xlarge
-  # - name: .updatefuzzer # Cannot find the variant on older versions. Should not be enabled with TSAN
   - name: secondary_reads_passthrough_gen
-  - name: server_discovery_and_monitoring_json_test_TG
-  # - name: .serverless # Not passing
-  #   distros:
-  #   - rhel80-xlarge
-  - name: server_selection_json_test_TG
+  - name: server_discovery_and_monitoring_json_test
+  - name: .serverless
+    distros:
+    - rhel80-xlarge
+  - name: server_selection_json_test
     distros:
     - rhel80-xlarge
   - name: streams
@@ -760,47 +629,10 @@ buildvariants:
   - name: vector_search_ssl
   - name: generate_buildid_to_debug_symbols_mapping
 
-- &enterprise-rhel80-debug-complete-tsan-template
-  name: &enterprise-rhel80-debug-complete-tsan enterprise-rhel80-debug-complete-tsan
-  display_name: "~ TSAN Enterprise RHEL 8.0 COMPLETE DEBUG"
-  cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
-  activate: false
-  modules:
-  - enterprise
-  run_on:
-  - rhel80-large
-  stepback: false
-  expansions:
-    <<: *enterprise-rhel80-debug-tsan-expansions-template
-    large_distro_name: rhel80-xlarge
-    core_analyzer_distro_name: rhel80-xlarge
-    compile_variant: *enterprise-rhel80-debug-complete-tsan
-  tasks:
-  - name: compile_test_serial_TG
-  - name: .auth
-  - name: .concurrency !.no_txns !.compute_mode
-  - name: .config_fuzzer
-  - name: .encrypt
-  - name: .jscore .common !jsCore
-  # - name: libunwind_tests # Cant be used because tsan does not use libunwind
-  # - name: .multiversion_sanity_check # Multiversion does not pass yet, also making this work is going to be pretty tricky
-  # - name: multiversion_gen # Multiversion does not pass yet, also making this work is going to be pretty tricky
-  # - name: .random_multiversion_ds # Multiversion does not pass yet, also making this work is going to be pretty tricky
-  - name: .sharding .common
-  # - name: .crypt # Doesn't pass on v4
-  #   distros:
-  #   - rhel80-xlarge
-  # - name: .updatefuzzer # Cannot find the variant on older versions. Should not be enabled with TSAN.
-  - name: .serverless
-    distros:
-    - rhel80-xlarge
-  - name: generate_buildid_to_debug_symbols_mapping
-
 - name: &enterprise-rhel80-unoptimized-64-bit enterprise-rhel80-unoptimized-64-bit
   display_name: "~ Enterprise RHEL 8.0 DEBUG (Unoptimized)"
   cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
-  modules:
-  - enterprise
+  tags: ["bazel_check"]
   expansions:
     compile_flags: >-
       MONGO_DISTMOD=rhel80
@@ -809,6 +641,7 @@ buildvariants:
       --opt=off
       --variables-files=etc/scons/mongodbtoolchain_stable_gcc.vars
       --detect-odr-violations
+      --linker=gold
       --link-model=dynamic
       --use-diagnostic-latches=on
     scons_cache_mode: all

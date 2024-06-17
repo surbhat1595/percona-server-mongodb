@@ -31,10 +31,6 @@
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
-// IWYU pragma: no_include "cxxabi.h"
-#include <string>
-#include <thread>
-#include <type_traits>
 
 #include "mongo/base/error_extra_info.h"
 #include "mongo/base/string_data.h"
@@ -51,7 +47,6 @@
 #include "mongo/platform/random.h"
 #include "mongo/stdx/thread.h"
 #include "mongo/transport/baton.h"
-#include "mongo/transport/session.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/clock_source.h"
 #include "mongo/util/fail_point.h"
@@ -59,7 +54,6 @@
 #include "mongo/util/waitable.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kDefault
-
 
 namespace mongo {
 
@@ -379,13 +373,6 @@ void OperationContext::markKilled(ErrorCodes::Error killCode) {
 
     if (killCode == getClient()->getDisconnectErrorCode()) {
         LOGV2(20883, "Interrupted operation as its client disconnected", "opId"_attr = getOpID());
-    }
-
-    // Record that a kill was requested on this operationContext due to replication state change
-    // since it is possible to call markKilled() multiple times but only the first killCode will
-    // be preserved.
-    if (killCode == ErrorCodes::InterruptedDueToReplStateChange) {
-        _killRequestedForReplStateChange.store(true);
     }
 
     if (auto status = ErrorCodes::OK; _killCode.compareAndSwap(&status, killCode)) {

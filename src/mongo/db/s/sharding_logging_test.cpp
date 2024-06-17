@@ -101,11 +101,11 @@ protected:
             ASSERT_EQUALS(configHost, request.target);
             ASSERT_EQUALS(DatabaseName::kConfig, request.dbname);
 
-            const auto opMsg = OpMsgRequest::fromDBAndBody(request.dbname, request.cmdObj);
+            const auto opMsg = static_cast<OpMsgRequest>(request);
             const auto batchRequest(BatchedCommandRequest::parseInsert(opMsg));
             const auto& insertReq(batchRequest.getInsertRequest());
 
-            ASSERT_EQ(DatabaseName::kConfig.db(), insertReq.getNamespace().db_forTest());
+            ASSERT_EQ(DatabaseName::kConfig.db(omitTenant), insertReq.getNamespace().db_forTest());
             ASSERT_EQ(collName, insertReq.getNamespace().coll());
 
             const auto& inserts = insertReq.getDocuments();

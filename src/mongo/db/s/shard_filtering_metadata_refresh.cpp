@@ -44,6 +44,7 @@
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status_with.h"
+#include "mongo/db/admission/execution_admission_context.h"
 #include "mongo/db/cancelable_operation_context.h"
 #include "mongo/db/client.h"
 #include "mongo/db/concurrency/d_concurrency.h"
@@ -241,12 +242,14 @@ SharedSemiFuture<void> recoverRefreshDbVersion(OperationContext* opCtx,
 
             if (status.isOK() || status == ErrorCodes::NamespaceNotFound) {
                 LOGV2(6697204, "Refreshed database metadata", logAttrs(dbName));
-            } else {
-                LOGV2_ERROR(6697205,
-                            "Failed database metadata refresh",
-                            logAttrs(dbName),
-                            "error"_attr = redact(status));
+                return Status::OK();
             }
+
+            LOGV2_ERROR(6697205,
+                        "Failed database metadata refresh",
+                        logAttrs(dbName),
+                        "error"_attr = redact(status));
+            return status;
         })
         .semi()
         .share();
@@ -561,8 +564,8 @@ void onCollectionPlacementVersionMismatch(OperationContext* opCtx,
         {
             // The refresh threads do not perform any data reads themselves, therefore they don't
             // need to go through admission control.
-            ScopedAdmissionPriorityForLock skipAdmissionControl(
-                shard_role_details::getLocker(opCtx), AdmissionContext::Priority::kImmediate);
+            ScopedAdmissionPriority<ExecutionAdmissionContext> skipAdmissionControl(
+                opCtx, AdmissionContext::Priority::kExempt);
 
             boost::optional<Lock::DBLock> dbLock;
             boost::optional<Lock::CollectionLock> collLock;

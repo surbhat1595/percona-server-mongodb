@@ -49,7 +49,6 @@
 #include "mongo/db/exec/sbe/stages/scan.h"
 #include "mongo/db/exec/sbe/values/bson.h"
 #include "mongo/db/exec/sbe/values/value.h"
-#include "mongo/db/exec/trial_run_tracker.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/query/query_knobs_gen.h"
 #include "mongo/db/repl/optime.h"
@@ -92,7 +91,8 @@ ScanStage::ScanStage(UUID collUuid,
     : PlanStage(seekRecordIdSlot ? "seek"_sd : "scan"_sd,
                 yieldPolicy,
                 nodeId,
-                participateInTrialRunTracking),
+                participateInTrialRunTracking,
+                TrialRunTrackingType::TrackReads),
       _state(std::make_shared<ScanStageState>(collUuid,
                                               recordSlot,
                                               recordIdSlot,
@@ -130,7 +130,8 @@ ScanStage::ScanStage(const std::shared_ptr<ScanStageState>& state,
     : PlanStage(state->seekRecordIdSlot ? "seek"_sd : "scan"_sd,
                 yieldPolicy,
                 nodeId,
-                participateInTrialRunTracking),
+                participateInTrialRunTracking,
+                TrialRunTrackingType::TrackReads),
       _state(state),
       _includeScanStartRecordId(includeScanStartRecordId),
       _includeScanEndRecordId(includeScanEndRecordId),
@@ -141,7 +142,7 @@ std::unique_ptr<PlanStage> ScanStage::clone() const {
                                        _yieldPolicy,
                                        _commonStats.nodeId,
                                        _lowPriority,
-                                       _participateInTrialRunTracking,
+                                       participateInTrialRunTracking(),
                                        _includeScanStartRecordId,
                                        _includeScanEndRecordId);
 }
@@ -333,22 +334,12 @@ void ScanStage::doDetachFromOperationContext() {
 void ScanStage::doAttachToOperationContext(OperationContext* opCtx) {
     if (_lowPriority && _open && gDeprioritizeUnboundedUserCollectionScans.load() &&
         opCtx->getClient()->isFromUserConnection() &&
-        shard_role_details::getLocker(opCtx)->shouldWaitForTicket()) {
-        _priority.emplace(shard_role_details::getLocker(opCtx), AdmissionContext::Priority::kLow);
+        shard_role_details::getLocker(opCtx)->shouldWaitForTicket(opCtx)) {
+        _priority.emplace(opCtx, AdmissionContext::Priority::kLow);
     }
     if (auto cursor = getActiveCursor()) {
         cursor->reattachToOperationContext(opCtx);
     }
-}
-
-void ScanStage::doDetachFromTrialRunTracker() {
-    _tracker = nullptr;
-}
-
-PlanStage::TrialRunTrackerAttachResultMask ScanStage::doAttachToTrialRunTracker(
-    TrialRunTracker* tracker, TrialRunTrackerAttachResultMask childrenAttachResult) {
-    _tracker = tracker;
-    return childrenAttachResult | TrialRunTrackerAttachResultFlags::AttachedToStreamingStage;
 }
 
 RecordCursor* ScanStage::getActiveCursor() const {
@@ -455,8 +446,8 @@ PlanState ScanStage::getNext() {
 
     if (_lowPriority && !_priority && gDeprioritizeUnboundedUserCollectionScans.load() &&
         _opCtx->getClient()->isFromUserConnection() &&
-        shard_role_details::getLocker(_opCtx)->shouldWaitForTicket()) {
-        _priority.emplace(shard_role_details::getLocker(_opCtx), AdmissionContext::Priority::kLow);
+        shard_role_details::getLocker(_opCtx)->shouldWaitForTicket(_opCtx)) {
+        _priority.emplace(_opCtx, AdmissionContext::Priority::kLow);
     }
 
     // We are about to call next() on a storage cursor so do not bother saving our internal state in
@@ -488,15 +479,13 @@ PlanState ScanStage::getNext() {
     //     from. If it is present, the code below expects us to leave the cursor on that record to
     //     do some checks, and there will be a FilterStage above the scan to filter out this record.
     //   o '_minRecordIdAccessor' and/or '_maxRecordIdAccessor' mean we are doing a bounded scan on
-    //     a clustered collection, and we will do a seekNear() to the start bound on the first call.
+    //     a clustered collection, and we will do a seek() to the start bound on the first call.
     //     - If the bound(s) came in via an expression, we are to assume both bounds are inclusive.
     //       A FilterStage above this stage will exist to filter out any that are really exclusive.
     //     - If the bound(s) came in via the "min" and/or "max" keywords, this stage must enforce
     //       them directly as there may be no FilterStage above it. In this case the start bound is
     //       always inclusive, so the logic is unchanged, but the end bound is always exclusive, so
-    //       we use '_excludeScanEndRecordId' to indicate this for scan termination.
-    //     - Since there may not be a FilterStage for a bounded scan, we need to skip the first
-    //       record here if the seekNear() positioned on a recordId before the target range.
+    //       we use '_includeScanEndRecordId' to indicate this for scan termination.
     bool doSeekExact = false;
     boost::optional<Record> nextRecord;
     if (!_state->useRandomCursor) {
@@ -504,14 +493,6 @@ PlanState ScanStage::getNext() {
             nextRecord = _cursor->next();
         } else {
             _firstGetNext = false;
-            auto seekAndSkipUntil =
-                [](auto& cursor, const auto& startRecordId, const auto& condition) {
-                    auto record = cursor->seekNear(startRecordId);
-                    while (record && !condition(record->id <=> startRecordId)) {
-                        record = cursor->next();
-                    }
-                    return record;
-                };
             if (_seekRecordIdAccessor) {  // fetch or scan resume
                 if (_seekRecordId.isNull()) {
                     // Attempting to resume from a null record ID gives a null '_seekRecordId'.
@@ -525,15 +506,18 @@ PlanState ScanStage::getNext() {
                 doSeekExact = true;
                 nextRecord = _cursor->seekExact(_seekRecordId);
             } else if (_minRecordIdAccessor && _state->forward) {
-                // seekNear() may land on the record just before the start bound.
-                // Additionally, the range may be exclusive of the start record.
-                // Keep advancing until the first record equal to _minRecordId
+                // The range may be exclusive of the start record.
+                // Find the first record equal to _minRecordId
                 // or, if exclusive, the first record "after" it.
-                nextRecord = seekAndSkipUntil(
-                    _cursor, _minRecordId, _includeScanStartRecordId ? std::is_gteq : std::is_gt);
+                nextRecord = _cursor->seek(_minRecordId,
+                                           _includeScanStartRecordId
+                                               ? SeekableRecordCursor::BoundInclusion::kInclude
+                                               : SeekableRecordCursor::BoundInclusion::kExclude);
             } else if (_maxRecordIdAccessor && !_state->forward) {
-                nextRecord = seekAndSkipUntil(
-                    _cursor, _maxRecordId, _includeScanStartRecordId ? std::is_lteq : std::is_lt);
+                nextRecord = _cursor->seek(_maxRecordId,
+                                           _includeScanStartRecordId
+                                               ? SeekableRecordCursor::BoundInclusion::kInclude
+                                               : SeekableRecordCursor::BoundInclusion::kExclude);
             } else {
                 nextRecord = _cursor->next();
             }
@@ -662,15 +646,7 @@ PlanState ScanStage::getNext() {
     }
 
     ++_specificStats.numReads;
-    if (_tracker && _tracker->trackProgress<TrialRunTracker::kNumReads>(1)) {
-        // If we're collecting execution stats during multi-planning and reached the end of the
-        // trial period because we've performed enough physical reads, bail out from the trial run
-        // by raising a special exception to signal a runtime planner that this candidate plan has
-        // completed its trial run early. Note that a trial period is executed only once per a
-        // PlanStage tree, and once completed never run again on the same tree.
-        _tracker = nullptr;
-        uasserted(ErrorCodes::QueryTrialRunCompleted, "Trial run early exit in scan");
-    }
+    trackRead();
     return trackPlanState(PlanState::ADVANCED);
 }
 
@@ -900,7 +876,7 @@ std::unique_ptr<PlanStage> ParallelScanStage::clone() const {
                                                _yieldPolicy,
                                                _commonStats.nodeId,
                                                _scanCallbacks,
-                                               _participateInTrialRunTracking);
+                                               participateInTrialRunTracking());
 }
 
 void ParallelScanStage::prepare(CompileCtx& ctx) {
@@ -953,6 +929,7 @@ value::SlotAccessor* ParallelScanStage::getAccessor(CompileCtx& ctx, value::Slot
 
 void ParallelScanStage::doSaveState(bool relinquishCursor) {
 #if defined(MONGO_CONFIG_DEBUG_BUILD)
+    _lastReturned.clear();
     if (slotsAccessible()) {
         if (_recordSlot && _recordAccessor.getViewOfValue().first != value::TypeTags::Nothing) {
             auto [tag, val] = _recordAccessor.getViewOfValue();
@@ -979,12 +956,6 @@ void ParallelScanStage::doSaveState(bool relinquishCursor) {
     for (auto& accessor : _scanFieldAccessors) {
         prepareForYielding(accessor, slotsAccessible());
     }
-
-#if defined(MONGO_CONFIG_DEBUG_BUILD)
-    if (!_recordSlot || !slotsAccessible()) {
-        _lastReturned.clear();
-    }
-#endif
 
     if (_cursor) {
         _cursor->save();

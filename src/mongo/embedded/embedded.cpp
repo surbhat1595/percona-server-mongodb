@@ -33,7 +33,6 @@
 #include <cstdlib>
 #include <functional>
 #include <memory>
-#include <mutex>
 #include <ostream>
 #include <set>
 #include <string>
@@ -65,22 +64,22 @@
 #include "mongo/db/dbdirectclient.h"
 #include "mongo/db/index/index_descriptor.h"
 #include "mongo/db/index_builds_coordinator.h"
-#include "mongo/db/op_observer/op_observer.h"
 #include "mongo/db/op_observer/op_observer_impl.h"
 #include "mongo/db/op_observer/op_observer_registry.h"
 #include "mongo/db/operation_context.h"
+#include "mongo/db/query/query_settings/query_settings_manager.h"
 #include "mongo/db/read_write_concern_defaults.h"
 #include "mongo/db/repl/repl_settings.h"
 #include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/repl/storage_interface.h"
 #include "mongo/db/repl/storage_interface_impl.h"
 #include "mongo/db/s/collection_sharding_state.h"
-#include "mongo/db/s/collection_sharding_state_factory_standalone.h"
 #include "mongo/db/server_options.h"
 #include "mongo/db/service_context.h"
-#include "mongo/db/service_liaison_mongod.h"
 #include "mongo/db/session/logical_session_cache.h"
 #include "mongo/db/session/logical_session_cache_impl.h"
+#include "mongo/db/session/service_liaison_impl.h"
+#include "mongo/db/session/service_liaison_shard.h"
 #include "mongo/db/session/sessions_collection.h"
 #include "mongo/db/session/sessions_collection_standalone.h"
 #include "mongo/db/startup_recovery.h"
@@ -122,11 +121,82 @@ namespace mongo {
 namespace embedded {
 namespace {
 
+class UnshardedCollection final : public ScopedCollectionDescription::Impl {
+public:
+    UnshardedCollection() = default;
+
+    const CollectionMetadata& get() override {
+        return metadata;
+    }
+
+private:
+    CollectionMetadata metadata;
+};
+
+const std::shared_ptr<UnshardedCollection> kUnshardedCollection =
+    std::make_shared<UnshardedCollection>();
+
+class CollectionShardingStateStandalone final : public CollectionShardingState {
+public:
+    CollectionShardingStateStandalone() = default;
+
+    ScopedCollectionDescription getCollectionDescription(OperationContext* opCtx) const override {
+        return {kUnshardedCollection};
+    }
+
+    ScopedCollectionDescription getCollectionDescription(OperationContext* opCtx,
+                                                         bool operationIsVersioned) const override {
+        return {kUnshardedCollection};
+    }
+
+    ScopedCollectionFilter getOwnershipFilter(OperationContext*,
+                                              OrphanCleanupPolicy orphanCleanupPolicy,
+                                              bool supportNonVersionedOperations) const override {
+        return {kUnshardedCollection};
+    }
+
+    boost::optional<CollectionIndexes> getCollectionIndexes(
+        OperationContext* opCtx) const override {
+        return boost::none;
+    }
+
+    boost::optional<ShardingIndexesCatalogCache> getIndexes(
+        OperationContext* opCtx) const override {
+        return boost::none;
+    }
+
+    ScopedCollectionFilter getOwnershipFilter(
+        OperationContext* opCtx,
+        OrphanCleanupPolicy orphanCleanupPolicy,
+        const ShardVersion& receivedShardVersion) const override {
+        return {kUnshardedCollection};
+    }
+
+    void checkShardVersionOrThrow(OperationContext* opCtx) const override {}
+
+    void checkShardVersionOrThrow(OperationContext* opCtx,
+                                  const ShardVersion& shardVersion) const override {}
+
+    void appendShardVersion(BSONObjBuilder* builder) const override {}
+};
+
+class CollectionShardingStateFactoryEmbedded final : public CollectionShardingStateFactory {
+public:
+    CollectionShardingStateFactoryEmbedded() = default;
+
+    std::unique_ptr<CollectionShardingState> make(const NamespaceString&) override {
+        return std::make_unique<CollectionShardingStateStandalone>();
+    }
+};
+
 // Noop, to fulfill dependencies for other initializers.
 MONGO_INITIALIZER_GENERAL(ForkServer, ("EndStartupOptionHandling"), ("default"))
 (InitializerContext* context) {}
 
-namespace {
+MONGO_INITIALIZER(FsyncLockedForWriting)(InitializerContext* context) {
+    setLockedForWritingImpl([]() { return false; });
+}
+
 ServiceContext::ConstructorActionRegisterer registerWireSpec{
     "RegisterWireSpec", [](ServiceContext* service) {
         // The featureCompatibilityVersion behavior defaults to the downgrade behavior while the
@@ -140,7 +210,6 @@ ServiceContext::ConstructorActionRegisterer registerWireSpec{
 
         WireSpec::getWireSpec(service).initialize(std::move(spec));
     }};
-}  // namespace
 
 void setUpCatalog(ServiceContext* serviceContext) {
     DatabaseHolder::set(serviceContext, std::make_unique<DatabaseHolderImpl>());
@@ -160,10 +229,6 @@ ServiceContext::ConstructorActionRegisterer replicationManagerInitializer(
                                     std::make_unique<IndexBuildsCoordinatorEmbedded>());
     });
 
-MONGO_INITIALIZER(fsyncLockedForWriting)(InitializerContext* context) {
-    setLockedForWritingImpl([]() { return false; });
-}
-
 GlobalInitializerRegisterer filterAllowedIndexFieldNamesEmbeddedInitializer(
     "FilterAllowedIndexFieldNamesEmbedded",
     [](InitializerContext* service) {
@@ -182,7 +247,7 @@ ServiceContext::ConstructorActionRegisterer shardingStateRegisterer{
     [](ServiceContext* service) {
         ShardingState::create(service);
         CollectionShardingStateFactory::set(
-            service, std::make_unique<CollectionShardingStateFactoryStandalone>(service));
+            service, std::make_unique<CollectionShardingStateFactoryEmbedded>());
     },
     [](ServiceContext* service) {
         CollectionShardingStateFactory::clear(service);
@@ -380,7 +445,7 @@ ServiceContext* initialize(const char* yaml_config) {
 
     // Notify the storage engine that startup is completed before repair exits below, as repair sets
     // the upgrade flag to true.
-    serviceContext->getStorageEngine()->notifyStartupComplete(startupOpCtx.get());
+    serviceContext->getStorageEngine()->notifyStorageStartupRecoveryComplete();
 
     if (storageGlobalParams.upgrade) {
         LOGV2(22553, "finished checking dbs");
@@ -391,23 +456,27 @@ ServiceContext* initialize(const char* yaml_config) {
     srand((unsigned)(curTimeMicros64()) ^ (unsigned(uintptr_t(&startupOpCtx))));  // NOLINT
 
     // Set up the logical session cache
-    LogicalSessionCache::set(serviceContext,
-                             std::make_unique<LogicalSessionCacheImpl>(
-                                 std::make_unique<ServiceLiaisonMongod>(),
-                                 std::make_shared<SessionsCollectionStandalone>(),
-                                 [](OperationContext*, SessionsCollection&, Date_t) {
-                                     return 0; /* No op */
-                                 }));
+    LogicalSessionCache::set(
+        serviceContext,
+        std::make_unique<LogicalSessionCacheImpl>(
+            std::make_unique<ServiceLiaisonImpl>(
+                service_liaison_shard_callbacks::getOpenCursorSessions,
+                service_liaison_shard_callbacks::killCursorsWithMatchingSessions),
+            std::make_shared<SessionsCollectionStandalone>(),
+            [](OperationContext*, SessionsCollection&, Date_t) {
+                return 0; /* No op */
+            }));
 
     // MessageServer::run will return when exit code closes its socket and we don't need the
     // operation context anymore
     startupOpCtx.reset();
 
-    serviceContext->notifyStartupComplete();
+    serviceContext->notifyStorageStartupRecoveryComplete();
 
     // Init succeeded, no need for global deinit.
     giGuard.dismiss();
 
+    mongo::query_settings::QuerySettingsManager::create(serviceContext, {});
     return serviceContext;
 }
 

@@ -172,7 +172,7 @@ namespace {
  */
 class IndexBulkBuilderSSS : public ServerStatusSection {
 public:
-    IndexBulkBuilderSSS() : ServerStatusSection("indexBulkBuilder") {}
+    using ServerStatusSection::ServerStatusSection;
 
     bool includeByDefault() const final {
         return true;
@@ -209,8 +209,10 @@ public:
     // the external sorter and may be useful in diagnosing situations where the process is
     // close to exhausting this finite resource.
     SorterFileStats sorterFileStats = {&sorterTracker};
+};
 
-} indexBulkBuilderSSS;
+auto& indexBulkBuilderSSS =
+    *ServerStatusSectionBuilder<IndexBulkBuilderSSS>("indexBulkBuilder").forShard();
 
 /**
  * Returns true if at least one prefix of any of the indexed fields causes the index to be
@@ -731,9 +733,9 @@ Status SortedDataIndexAccessMethod::doUpdate(OperationContext* opCtx,
     return Status::OK();
 }
 
-Status SortedDataIndexAccessMethod::compact(OperationContext* opCtx,
-                                            boost::optional<int64_t> freeSpaceTargetMB) {
-    return this->_newInterface->compact(opCtx, freeSpaceTargetMB);
+StatusWith<int64_t> SortedDataIndexAccessMethod::compact(OperationContext* opCtx,
+                                                         const CompactOptions& options) {
+    return this->_newInterface->compact(opCtx, options);
 }
 
 std::shared_ptr<Ident> SortedDataIndexAccessMethod::getSharedIdent() const {

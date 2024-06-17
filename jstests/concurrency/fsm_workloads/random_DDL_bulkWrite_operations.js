@@ -12,15 +12,13 @@
  *   does_not_support_stepdowns,
  *   # Can be removed once PM-1965-Milestone-1 is completed.
  *   does_not_support_transactions,
- *   # TODO SERVER-52419 Remove this tag.
- *   featureFlagBulkWriteCommand,
+ *   requires_fcv_80
  *  ]
  */
 
 import {
     uniformDistTransitions
 } from "jstests/concurrency/fsm_workload_helpers/state_transition_utils.js";
-import {FeatureFlagUtil} from "jstests/libs/feature_flag_util.js";
 import {extractUUIDFromObject} from "jstests/libs/uuid_util.js";
 
 export const $config = (function() {
@@ -212,18 +210,11 @@ export const $config = (function() {
             }
         },
         checkDatabaseMetadataConsistency: function(db, collName, connCache) {
-            if (this.skipMetadataChecks) {
-                return;
-            }
             jsTestLog('Check database metadata state');
             const inconsistencies = db.checkMetadataConsistency().toArray();
             assert.eq(0, inconsistencies.length, tojson(inconsistencies));
         },
         checkCollectionMetadataConsistency: function(db, collName, connCache) {
-            if (this.skipMetadataChecks) {
-                return;
-            }
-
             let tid = this.tid;
             while (tid === this.tid)
                 tid = Random.randInt(this.threadCount);
@@ -356,10 +347,6 @@ export const $config = (function() {
     };
 
     let setup = function(db, collName, cluster) {
-        this.skipMetadataChecks =
-            // TODO SERVER-70396: remove this flag
-            !FeatureFlagUtil.isEnabled(db.getMongo(), 'CheckMetadataConsistency');
-
         for (let tid = 0; tid < this.threadCount; ++tid) {
             db[data.BulkWriteMutex].insert({tid: tid, mutex: 0});
         }

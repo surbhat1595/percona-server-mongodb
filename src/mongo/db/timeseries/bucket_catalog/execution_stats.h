@@ -33,6 +33,7 @@
 
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/platform/atomic_word.h"
+#include "mongo/util/tracked_types.h"
 
 namespace mongo::timeseries::bucket_catalog {
 
@@ -50,6 +51,8 @@ struct ExecutionStats {
     AtomicWord<long long> numBucketsClosedDueToReopening;
     AtomicWord<long long> numBucketsArchivedDueToMemoryThreshold;
     AtomicWord<long long> numBucketsArchivedDueToTimeBackward;
+    AtomicWord<long long> numBucketsFrozen;
+    AtomicWord<long long> numCompressedBucketsConvertedToUnsorted;
     AtomicWord<long long> numCommits;
     AtomicWord<long long> numMeasurementsGroupCommitted;
     AtomicWord<long long> numWaits;
@@ -62,10 +65,10 @@ struct ExecutionStats {
     AtomicWord<long long> numBucketQueriesFailed;
     AtomicWord<long long> numBucketReopeningsFailed;
     AtomicWord<long long> numDuplicateBucketsReopened;
-    AtomicWord<long long> numBytesUncompressed;
-    AtomicWord<long long> numBytesCompressed;
 
     // TODO SERVER-70605: Remove the metrics below.
+    AtomicWord<long long> numBytesUncompressed;
+    AtomicWord<long long> numBytesCompressed;
     AtomicWord<long long> numSubObjCompressionRestart;
     AtomicWord<long long> numCompressedBuckets;
     AtomicWord<long long> numUncompressedBuckets;
@@ -74,7 +77,7 @@ struct ExecutionStats {
 
 class ExecutionStatsController {
 public:
-    ExecutionStatsController(const std::shared_ptr<ExecutionStats>& collectionStats,
+    ExecutionStatsController(const shared_tracked_ptr<ExecutionStats>& collectionStats,
                              ExecutionStats& globalStats)
         : _collectionStats(collectionStats), _globalStats(&globalStats) {}
 
@@ -93,6 +96,8 @@ public:
     void incNumBucketsClosedDueToReopening(long long increment = 1);
     void incNumBucketsArchivedDueToMemoryThreshold(long long increment = 1);
     void incNumBucketsArchivedDueToTimeBackward(long long increment = 1);
+    void incNumBucketsFrozen(long long increment = 1);
+    void incNumCompressedBucketsConvertedToUnsorted(long long increment = 1);
     void incNumCommits(long long increment = 1);
     void incNumMeasurementsGroupCommitted(long long increment = 1);
     void incNumWaits(long long increment = 1);
@@ -113,7 +118,7 @@ public:
     void incNumFailedDecompressBuckets(long long increment = 1);
 
 private:
-    std::shared_ptr<ExecutionStats> _collectionStats;
+    shared_tracked_ptr<ExecutionStats> _collectionStats;
     ExecutionStats* _globalStats;
 };
 

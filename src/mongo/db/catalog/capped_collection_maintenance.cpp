@@ -122,6 +122,14 @@ void cappedDeleteUntilBelowConfiguredMaximum(OperationContext* opCtx,
         return;
 
     const auto& nss = collection->ns();
+
+    if (nss.isTemporaryReshardingCollection()) {
+        // Don't do capped deletes if this is a temporary resharding collection since that could
+        // lead to multi-timestamp violation. The recipient shard will apply the capped delete oplog
+        // entries from the donor shard anyway.
+        return;
+    }
+
     auto& ccs = cappedCollectionState(*collection->getSharedDecorations());
 
     stdx::unique_lock<Latch> cappedFirstRecordMutex(ccs.cappedFirstRecordMutex, stdx::defer_lock);
@@ -166,15 +174,16 @@ void cappedDeleteUntilBelowConfiguredMaximum(OperationContext* opCtx,
     boost::optional<Record> record;
     auto cursor = collection->getCursor(opCtx, /*forward=*/true);
 
-    // If the next RecordId to be deleted is known, navigate to it using seekNear(). Using a cursor
+    // If the next RecordId to be deleted is known, navigate to it using seek(). Using a cursor
     // and advancing it to the first element by calling next() will be slow for capped collections
     // on particular storage engines, such as WiredTiger. In WiredTiger, there may be many
     // tombstones (invisible deleted records) to traverse at the beginning of the table.
     if (!ccs.cappedFirstRecord.isNull()) {
-        // Use seekNear instead of seekExact. If this node steps down and a new primary starts
+        // Use a bounded seek instead of seekExact. If this node steps down and a new primary starts
         // deleting capped documents then this node's cached record will become stale. If this node
         // steps up again afterwards, then the cached record will be an already deleted document.
-        record = cursor->seekNear(ccs.cappedFirstRecord);
+        record =
+            cursor->seek(ccs.cappedFirstRecord, SeekableRecordCursor::BoundInclusion::kInclude);
     } else {
         record = cursor->next();
     }

@@ -119,6 +119,8 @@
 namespace mongo {
 namespace {
 
+constexpr size_t kMaxDatabaseCreationAttempts = 3u;
+
 using QuerySamplingOptions = OperationContext::QuerySamplingOptions;
 
 const ReadPreferenceSetting kPrimaryOnlyReadPreference(ReadPreference::PrimaryOnly);
@@ -322,10 +324,11 @@ void handleWouldChangeOwningShardErrorTransaction(
             inlineExecutor);
 
         txn.run(opCtx,
-                [sharedBlock, fleCrudProcessed](const txn_api::TransactionClient& txnClient,
-                                                ExecutorPtr txnExec) -> SemiFuture<void> {
+                [opCtx, sharedBlock, fleCrudProcessed](const txn_api::TransactionClient& txnClient,
+                                                       ExecutorPtr txnExec) -> SemiFuture<void> {
                     return documentShardKeyUpdateUtil::updateShardKeyForDocument(
                                txnClient,
+                               opCtx,
                                txnExec,
                                sharedBlock->nss,
                                sharedBlock->changeInfo,
@@ -543,13 +546,6 @@ boost::optional<ShardId> targetPotentiallySingleShard(
     const BSONObj& query,
     const BSONObj& collation,
     bool isTimeseriesViewRequest) {
-    // Special case: there's only one shard owning all the chunks.
-    if (cm.getNShardsOwningChunks() == 1) {
-        std::set<ShardId> shardIds;
-        cm.getAllShardIds(&shardIds);
-        return *shardIds.begin();
-    }
-
     std::set<ShardId> shardIds;
     getShardIdsForQuery(expCtx,
                         getQueryForShardKey(expCtx, cm, query, isTimeseriesViewRequest),
@@ -605,7 +601,7 @@ Status FindAndModifyCmd::explain(OperationContext* opCtx,
                                  const OpMsgRequest& request,
                                  ExplainOptions::Verbosity verbosity,
                                  rpc::ReplyBuilderInterface* result) const {
-    const DatabaseName dbName = request.getDbName();
+    const DatabaseName dbName = request.parseDbName();
     auto bodyBuilder = result->getBodyBuilder();
     BSONObj cmdObj = [&]() {
         // Check whether the query portion needs to be rewritten for FLE.
@@ -705,7 +701,12 @@ Status FindAndModifyCmd::explain(OperationContext* opCtx,
         *shardId, response, shard->getConnString().getServers().front()};
 
     return ClusterExplain::buildExplainResult(
-        opCtx, {arsResponse}, ClusterExplain::kSingleShard, millisElapsed, cmdObj, &bodyBuilder);
+        ExpressionContext::makeBlankExpressionContext(opCtx, nss),
+        {arsResponse},
+        ClusterExplain::kSingleShard,
+        millisElapsed,
+        cmdObj,
+        &bodyBuilder);
 }
 
 bool FindAndModifyCmd::run(OperationContext* opCtx,
@@ -719,13 +720,35 @@ bool FindAndModifyCmd::run(OperationContext* opCtx,
     }
 
     // Collect metrics.
-    _updateMetrics.collectMetrics(cmdObj);
+    _updateMetrics->collectMetrics(cmdObj);
 
-    // Technically, findAndModify should only be creating database if upsert is true, but this
-    // would require that the parsing be pulled into this function.
-    cluster::createDatabase(opCtx, nss.dbName());
 
-    auto cri = getCollectionRoutingInfo(opCtx, cmdObj, nss);
+    auto cri = [&]() {
+        size_t attempts = 1u;
+        while (true) {
+            try {
+                // Technically, findAndModify should only be creating database if upsert is true,
+                // but this would require that the parsing be pulled into this function.
+                cluster::createDatabase(opCtx, nss.dbName());
+                return getCollectionRoutingInfo(opCtx, cmdObj, nss);
+            } catch (const ExceptionFor<ErrorCodes::NamespaceNotFound>&) {
+                LOGV2_INFO(8584300,
+                           "Failed initialization of routing info because the database has been "
+                           "concurrently dropped",
+                           logAttrs(nss.dbName()),
+                           "attemptNumber"_attr = attempts,
+                           "maxAttempts"_attr = kMaxDatabaseCreationAttempts);
+
+                if (attempts++ >= kMaxDatabaseCreationAttempts) {
+                    // The maximum number of attempts has been reached, so the procedure fails as it
+                    // could be a logical error. At this point, it is unlikely that the error is
+                    // caused by concurrent drop database operations.
+                    throw;
+                }
+            }
+        }
+    }();
+
     const auto& cm = cri.cm;
     auto isTrackedTimeseries = cm.hasRoutingTable() && cm.getTimeseriesFields();
     auto isTimeseriesViewRequest = false;
@@ -1003,8 +1026,9 @@ void FindAndModifyCmd::_runExplainWithoutShardKey(OperationContext* opCtx,
         ClusterQueryWithoutShardKey clusterQueryWithoutShardKeyCommand(cmdObjForPassthrough);
         const auto explainClusterQueryWithoutShardKeyCmd =
             ClusterExplain::wrapAsExplain(clusterQueryWithoutShardKeyCommand.toBSON({}), verbosity);
-        auto opMsg =
-            OpMsgRequest::fromDBAndBody(nss.dbName(), explainClusterQueryWithoutShardKeyCmd);
+        auto opMsg = OpMsgRequestBuilder::create(auth::ValidatedTenancyScope::get(opCtx),
+                                                 nss.dbName(),
+                                                 explainClusterQueryWithoutShardKeyCmd);
         return CommandHelpers::runCommandDirectly(opCtx, opMsg).getOwned();
     }();
 
@@ -1018,8 +1042,9 @@ void FindAndModifyCmd::_runExplainWithoutShardKey(OperationContext* opCtx,
             write_without_shard_key::targetDocForExplain);
         const auto explainClusterWriteWithoutShardKeyCmd =
             ClusterExplain::wrapAsExplain(clusterWriteWithoutShardKeyCommand.toBSON({}), verbosity);
-        auto opMsg =
-            OpMsgRequest::fromDBAndBody(nss.dbName(), explainClusterWriteWithoutShardKeyCmd);
+        auto opMsg = OpMsgRequestBuilder::create(auth::ValidatedTenancyScope::get(opCtx),
+                                                 nss.dbName(),
+                                                 explainClusterWriteWithoutShardKeyCmd);
         return CommandHelpers::runCommandDirectly(opCtx, opMsg).getOwned();
     }();
 

@@ -61,12 +61,11 @@ void AuthorizationSessionTestFixture::setUp() {
     _opCtx = _client->makeOperationContext();
     managerState->setAuthzVersion(_opCtx.get(), AuthorizationManager::schemaVersion26Final);
 
-    authzManager = AuthorizationManager::get(getServiceContext());
+    authzManager = AuthorizationManager::get(_client->getService());
     auto localSessionState = std::make_unique<AuthzSessionExternalStateMock>(authzManager);
     sessionState = localSessionState.get();
     authzSession = std::make_unique<AuthorizationSessionForTest>(
         std::move(localSessionState), AuthorizationSessionImpl::InstallMockForTestingOrAuthImpl{});
-    authzManager->setAuthEnabled(true);
     authzSession->startContractTracking();
 
     credentials =
@@ -79,9 +78,7 @@ void AuthorizationSessionTestFixture::setUp() {
     // assume tenantId is from security token with no expectPrefix
     _sc = SerializationContext(SerializationContext::Source::Command,
                                SerializationContext::CallerType::Request,
-                               SerializationContext::Prefix::Default,
-                               true /* nonPrefixedTenantId */,
-                               false /* authExpectTenantPrefix */);
+                               SerializationContext::Prefix::ExcludePrefix);
 }
 
 Status AuthorizationSessionTestFixture::createUser(const UserName& username,

@@ -72,12 +72,14 @@
 #include "mongo/db/repl/read_concern_level.h"
 #include "mongo/db/repl/repl_client_info.h"
 #include "mongo/db/resource_yielder.h"
+#include "mongo/db/s/config/initial_split_policy.h"
 #include "mongo/db/s/remove_tags_gen.h"
 #include "mongo/db/s/sharding_logging.h"
 #include "mongo/db/server_options.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/session/logical_session_id.h"
 #include "mongo/db/vector_clock.h"
+#include "mongo/db/vector_clock_mutable.h"
 #include "mongo/db/write_concern.h"
 #include "mongo/executor/async_rpc.h"
 #include "mongo/executor/async_rpc_util.h"
@@ -182,10 +184,12 @@ void deleteChunks(OperationContext* opCtx,
         return deleteOp;
     }());
 
-    request.setWriteConcern(writeConcern.toBSON());
-
-    auto response = configShard->runBatchWriteCommand(
-        opCtx, Milliseconds::max(), request, Shard::RetryPolicy::kIdempotentOrCursorInvalidated);
+    auto response =
+        configShard->runBatchWriteCommand(opCtx,
+                                          Milliseconds::max(),
+                                          request,
+                                          writeConcern,
+                                          Shard::RetryPolicy::kIdempotentOrCursorInvalidated);
 
     uassertStatusOK(response.toStatus());
 }
@@ -272,10 +276,12 @@ void deleteShardingIndexCatalogMetadata(OperationContext* opCtx,
         return deleteOp;
     }());
 
-    request.setWriteConcern(writeConcern.toBSON());
-
-    auto response = configShard->runBatchWriteCommand(
-        opCtx, Milliseconds::max(), request, Shard::RetryPolicy::kIdempotentOrCursorInvalidated);
+    auto response =
+        configShard->runBatchWriteCommand(opCtx,
+                                          Milliseconds::max(),
+                                          request,
+                                          writeConcern,
+                                          Shard::RetryPolicy::kIdempotentOrCursorInvalidated);
 
     uassertStatusOK(response.toStatus());
 }
@@ -468,7 +474,7 @@ boost::optional<CreateCollectionResponse> checkIfCollectionAlreadyTrackedWithOpt
     // If the collection is already sharded, fail if the deduced options in this request do not
     // match the options the collection was originally sharded with.
     uassert(ErrorCodes::AlreadyInitialized,
-            str::stream() << "collection already tracked with different options for collection "
+            str::stream() << "collection already exists with different options for collection "
                           << nss.toStringForErrorMsg(),
             SimpleBSONObjComparator::kInstance.evaluate(cm.getShardKeyPattern().toBSON() == key) &&
                 SimpleBSONObjComparator::kInstance.evaluate(defaultCollator == collation) &&
@@ -543,8 +549,8 @@ void performNoopMajorityWriteLocally(OperationContext* opCtx) {
     const auto updateOp = buildNoopWriteRequestCommand();
 
     DBDirectClient client(opCtx);
-    const auto commandResponse =
-        client.runCommand(OpMsgRequestBuilder::create(updateOp.getDbName(), updateOp.toBSON({})));
+    const auto commandResponse = client.runCommand(OpMsgRequestBuilder::create(
+        auth::ValidatedTenancyScope::kNotRequired, updateOp.getDbName(), updateOp.toBSON({})));
 
     const auto commandReply = commandResponse->getCommandReply();
     uassertStatusOK(getStatusFromWriteCommandReply(commandReply));
@@ -595,9 +601,14 @@ void runTransactionOnShardingCatalog(OperationContext* opCtx,
     // The Internal Transactions API receives the write concern option and osi through the
     // passed Operation context. We opt for creating a new one to avoid any possible side
     // effects.
-    auto newClient = opCtx->getServiceContext()
-                         ->getService(ClusterRole::ShardServer)
-                         ->makeClient("ShardingCatalogTransaction");
+    auto newClient = [&]() {
+        if (auto service = opCtx->getServiceContext()->getService(ClusterRole::RouterServer)) {
+            return service->makeClient("ShardingCatalogTransaction");
+        }
+        return opCtx->getServiceContext()
+            ->getService(ClusterRole::ShardServer)
+            ->makeClient("ShardingCatalogTransaction");
+    }();
 
     AuthorizationSession::get(newClient.get())->grantInternalAuthorization(newClient.get());
     AlternativeClientRegion acr(newClient);
@@ -636,8 +647,7 @@ void runTransactionOnShardingCatalog(OperationContext* opCtx,
             inlineExecutor,
             sleepInlineExecutor,
             executor,
-            std::make_unique<txn_api::details::ClusterSEPTransactionClientBehaviors>(
-                newOpCtx->getServiceContext()));
+            std::make_unique<txn_api::details::ClusterSEPTransactionClientBehaviors>(newOpCtx));
     }();
 
     if (osi.getSessionId()) {
@@ -653,6 +663,8 @@ void runTransactionOnShardingCatalog(OperationContext* opCtx,
                                             inlineExecutor,
                                             std::move(customTxnClient));
     txn.run(newOpCtx, std::move(transactionChain));
+
+    VectorClockMutable::get(opCtx)->waitForDurableConfigTime().get(opCtx);
 }
 
 const KeyPattern& unsplittableCollectionShardKey() {
@@ -734,6 +746,63 @@ std::vector<BatchedCommandRequest> getOperationsToCreateOrShardCollectionOnShard
     ret.emplace_back(std::move(upsertCollection));
     ret.emplace_back(std::move(insertPlacementHistory));
     return ret;
+}
+
+std::vector<BatchedCommandRequest> getOperationsToCreateUnsplittableCollectionOnShardingCatalog(
+    OperationContext* opCtx,
+    const NamespaceString& nss,
+    const UUID& collectionUuid,
+    const BSONObj& defaultCollation,
+    const ShardId& shardId) {
+    const auto unsplittableShardKeyPattern = ShardKeyPattern(unsplittableCollectionShardKey());
+    const auto initialChunks = SingleChunkOnPrimarySplitPolicy().createFirstChunks(
+        opCtx, unsplittableShardKeyPattern, {collectionUuid, shardId});
+    invariant(initialChunks.chunks.size() == 1);
+    const auto& placementVersion = initialChunks.chunks.front().getVersion();
+
+    auto coll = CollectionType(nss,
+                               placementVersion.epoch(),
+                               placementVersion.getTimestamp(),
+                               Date_t::now(),
+                               collectionUuid,
+                               unsplittableCollectionShardKey().toBSON());
+    coll.setUnsplittable(true);
+    coll.setDefaultCollation(defaultCollation);
+
+    return getOperationsToCreateOrShardCollectionOnShardingCatalog(
+        coll, initialChunks.chunks, placementVersion, {shardId});
+}
+
+void runTransactionWithStmtIdsOnShardingCatalog(
+    OperationContext* opCtx,
+    const std::shared_ptr<executor::TaskExecutor>& executor,
+    const OperationSessionInfo& osi,
+    const std::vector<BatchedCommandRequest>&& ops) {
+    const auto transactionChain = [&](const txn_api::TransactionClient& txnClient,
+                                      ExecutorPtr txnExec) {
+        StmtId statementsCounter = 0;
+        for (auto&& op : ops) {
+            const auto numOps = op.sizeWriteOps();
+            std::vector<StmtId> statementIds(numOps);
+            std::iota(statementIds.begin(), statementIds.end(), statementsCounter);
+            statementsCounter += numOps;
+            const auto response = txnClient.runCRUDOpSync(op, std::move(statementIds));
+            uassertStatusOK(response.toStatus());
+        }
+
+        return SemiFuture<void>::makeReady();
+    };
+
+    // Ensure that this function will only return once the transaction gets majority committed
+    auto wc = WriteConcernOptions{WriteConcernOptions::kMajority,
+                                  WriteConcernOptions::SyncMode::UNSET,
+                                  WriteConcernOptions::kNoTimeout};
+
+    // This always runs in the shard role so should use a cluster transaction to guarantee targeting
+    // the config server.
+    bool useClusterTransaction = true;
+    sharding_ddl_util::runTransactionOnShardingCatalog(
+        opCtx, std::move(transactionChain), wc, osi, useClusterTransaction, executor);
 }
 
 }  // namespace sharding_ddl_util

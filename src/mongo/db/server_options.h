@@ -41,7 +41,6 @@
 
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobj.h"
-#include "mongo/client/connection_string.h"
 #include "mongo/db/auth/cluster_auth_mode.h"
 #include "mongo/db/cluster_role.h"
 #include "mongo/logv2/log_format.h"
@@ -78,6 +77,7 @@ struct ServerGlobalParams {
 #ifdef MONGO_CONFIG_GRPC
         DefaultGRPCServerPort = 27021,
 #endif
+        DefaultMagicRestorePort = 27022,
     };
 
     enum MaintenanceMode { None, ReplicaSetMode, StandaloneMode };
@@ -114,8 +114,10 @@ struct ServerGlobalParams {
     AtomicWord<double> sampleRate{1.0};    // --samplerate rate at which to sample slow queries
     int defaultLocalThresholdMillis = 15;  // --localThreshold in ms to consider a node local
 
-    bool noUnixSocket = false;    // --nounixsocket
-    bool doFork = false;          // --fork
+    bool noUnixSocket = false;  // --nounixsocket
+    bool doFork = false;        // --fork
+    bool isMongoBridge = false;
+
     std::string socket = "/tmp";  // UNIX domain socket directory
 
     size_t maxConns = DEFAULT_MAX_CONN;  // Maximum number of simultaneous open connections.
@@ -329,8 +331,6 @@ struct ServerGlobalParams {
     std::vector<std::string> disabledSecureAllocatorDomains;
 
     bool enableMajorityReadConcern = true;
-
-    ConnectionString configdbs;
 };
 
 extern ServerGlobalParams serverGlobalParams;

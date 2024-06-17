@@ -158,6 +158,8 @@ struct ParsedCollModRequest {
     bool dryRun = false;
     boost::optional<long long> cappedSize;
     boost::optional<long long> cappedMax;
+    boost::optional<bool> timeseriesBucketsMayHaveMixedSchemaData;
+    boost::optional<bool> recordIdsReplicated;
 };
 
 Status getNotSupportedOnViewError(StringData fieldName) {
@@ -440,6 +442,11 @@ StatusWith<std::pair<ParsedCollModRequest, BSONObj>> parseCollModRequest(
         }
 
         if (cmdIndex.getPrepareUnique()) {
+            // Check if prepareUnique is being set on a time-series collection index.
+            if (isTimeseries) {
+                return {ErrorCodes::InvalidOptions,
+                        "cannot set 'prepareUnique' for indexes of a time-series collection."};
+            }
             parsed.numModifications++;
             // Attempting to modify with the same value should be treated as a no-op.
             if (cmrIndex->idx->prepareUnique() == *cmdIndex.getPrepareUnique() ||
@@ -625,6 +632,37 @@ StatusWith<std::pair<ParsedCollModRequest, BSONObj>> parseCollModRequest(
 
         BSONObjBuilder subObjBuilder(oplogEntryBuilder.subobjStart(CollMod::kTimeseriesFieldName));
         timeseries->serialize(&subObjBuilder);
+    }
+
+    if (auto mixedSchema = cmr.getTimeseriesBucketsMayHaveMixedSchemaData()) {
+        if (!gCollModTimeseriesBucketsMayHaveMixedSchemaData.isEnabled(
+                serverGlobalParams.featureCompatibility.acquireFCVSnapshot())) {
+            return {ErrorCodes::InvalidOptions,
+                    "The timeseriesBucketsMayHaveMixedSchemaData parameter is not enabled"};
+        }
+
+        if (!isTimeseries) {
+            return getOnlySupportedOnTimeseriesError(
+                CollMod::kTimeseriesBucketsMayHaveMixedSchemaDataFieldName);
+        }
+
+        if (!*mixedSchema) {
+            return {ErrorCodes::InvalidOptions,
+                    "Cannot set timeseriesBucketsMayHaveMixedSchemaData to false"};
+        }
+
+        parsed.timeseriesBucketsMayHaveMixedSchemaData = mixedSchema;
+        oplogEntryBuilder.append(CollMod::kTimeseriesBucketsMayHaveMixedSchemaDataFieldName,
+                                 *mixedSchema);
+    }
+
+    if (auto recordIdsReplicated = cmr.getRecordIdsReplicated()) {
+        if (*recordIdsReplicated) {
+            return {ErrorCodes::InvalidOptions, "Cannot set recordIdsReplicated to true"};
+        }
+
+        parsed.recordIdsReplicated = recordIdsReplicated;
+        oplogEntryBuilder.append(CollMod::kRecordIdsReplicatedFieldName, false);
     }
 
     if (const auto& dryRun = cmr.getDryRun()) {
@@ -946,6 +984,23 @@ Status _collModInternal(OperationContext* opCtx,
                                             oldCollOptions,
                                             coll.getWritableCollection(opCtx),
                                             *cmd.getExpireAfterSeconds());
+        }
+
+        if (auto mixedSchema = cmrNew.timeseriesBucketsMayHaveMixedSchemaData) {
+            coll.getWritableCollection(opCtx)->setTimeseriesBucketsMayHaveMixedSchemaData(
+                opCtx, mixedSchema);
+        }
+
+        if (auto recordIdsReplicated = cmrNew.recordIdsReplicated) {
+            // Must be false if present.
+            invariant(
+                !(*recordIdsReplicated),
+                fmt::format(
+                    "Unexpected true value for 'recordIdsReplicated' in collMod options for {}: {}",
+                    nss.toStringForErrorMsg(),
+                    cmd.toBSON({}).toString()));
+
+            coll.getWritableCollection(opCtx)->unsetRecordIdsReplicated(opCtx);
         }
 
         // Handle index modifications.

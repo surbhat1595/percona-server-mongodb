@@ -41,6 +41,7 @@ imports:
     - "mongo/db/repl/replication_types.idl"
     - "mongo/db/multitenancy.idl"
     - "mongo/s/sharding_types.idl"
+    - "mongo/db/record_id.idl"
 
 enums:
     OpType:
@@ -61,6 +62,45 @@ enums:
         values:
             kPreImage: "preImage"
             kPostImage: "postImage"
+    MultiOplogEntryType:
+        description: >-
+            Describes this oplog entry's role in a chain of oplog entries.
+            kLegacyMultiOpType: Role must be determined by consulting session/txn, prevOpTime
+                                and partialTxn fields
+            kApplyOpsAppliedSeparately: This oplog entry is an applyOps which should be applied
+                                        independently of other applyOps entries in the chain.
+                                        Used for vectored inserts which require more than one
+                                        storage transaction.
+        type: int
+        values:
+            kLegacyMultiOpType: 0
+            kApplyOpsAppliedSeparately: 1
+    CommandType:
+        description: "The type of the command in an oplog entry"
+        type: string
+        values:
+            kNotCommand: ""
+            kCreate: "create"
+            kRenameCollection: "renameCollection"
+            kDbCheck: "dbCheck"
+            kDrop: "drop"
+            kCollMod: "collMod"
+            kApplyOps: "applyOps"
+            kDropDatabase: "dropDatabase"
+            kEmptyCapped: "emptycapped"
+            kCreateIndexes: "createIndexes"
+            kStartIndexBuild: "startIndexBuild"
+            kCommitIndexBuild: "commitIndexBuild"
+            kAbortIndexBuild: "abortIndexBuild"
+            kDropIndexes: "dropIndexes"
+            # TODO SERVER-87911: Remove 'deleteIndexes' as CommandType.
+            kDeleteIndexes: "deleteIndexes"
+            kCommitTransaction: "commitTransaction"
+            kAbortTransaction: "abortTransaction"
+            kImportCollection: "importCollection"
+            kModifyCollectionShardingIndexCatalog: "modifyCollectionShardingIndexCatalog"
+            kCreateGlobalIndex: "createGlobalIndex"
+            kDropGlobalIndex: "dropGlobalIndex"
 
 types:
     zeroOneManyStmtId:
@@ -72,6 +112,8 @@ types:
         default: std::vector<StmtId>()
         serializer: ::mongo::repl::zeroOneManyStmtIdAppend
         deserializer: ::mongo::repl::parseZeroOneManyStmtId
+        # std::vector<StmtId> is not a view.
+        is_view: false
 structs:
     DurableReplOperation:
         description: "A document that represents an operation. Should never be used directly in
@@ -104,6 +146,13 @@ structs:
                 type: object
                 optional: true
                 description: "Additional information about the operation applied"
+            rid:
+                cpp_name: recordId
+                type: RecordId
+                optional: true
+                description: "The RecordId corresponding to the CRUD operation that generated
+                              this oplog entry. Added when operating on a collection with
+                              'recordIdsReplicated' set to true."
             b:
                 cpp_name: upsert
                 type: bool
@@ -199,3 +248,8 @@ structs:
                 type: optime
                 optional: true # Only for writes that are part of a transaction
                 description: "The opTime of the previous write with the same transaction."
+            multiOpType:
+                cpp_name: multiOpType
+                type: MultiOplogEntryType
+                optional: true
+                description: "This oplog entry's role in an oplog entry chain."

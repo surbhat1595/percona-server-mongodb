@@ -36,6 +36,7 @@
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
 #include "mongo/base/string_data.h"
+#include "mongo/bson/bson_validate_gen.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobj.h"
@@ -45,6 +46,7 @@
 #include "mongo/db/catalog/collection_validation.h"
 #include "mongo/db/catalog/validate_results.h"
 #include "mongo/db/commands.h"
+#include "mongo/db/commands/test_commands_enabled.h"
 #include "mongo/db/database_name.h"
 #include "mongo/db/dbdirectclient.h"
 #include "mongo/db/namespace_string.h"
@@ -197,7 +199,7 @@ public:
             << "Cannot specify both {full: true, background: true}.";
     }
 
-    virtual bool supportsWriteConcern(const BSONObj& cmd) const override {
+    bool supportsWriteConcern(const BSONObj& cmd) const override {
         return false;
     }
 
@@ -232,7 +234,7 @@ public:
     bool run(OperationContext* opCtx,
              const DatabaseName& dbName,
              const BSONObj& cmdObj,
-             BSONObjBuilder& result) {
+             BSONObjBuilder& result) override {
         if (MONGO_unlikely(validateCmdCollectionNotValid.shouldFail())) {
             result.appendBool("valid", false);
             return true;
@@ -243,10 +245,9 @@ public:
             reqSerializationCtx.setPrefixState(expectPrefix.boolean());
         }
         if (auto vts = auth::ValidatedTenancyScope::get(opCtx)) {
-            reqSerializationCtx.setTenantIdSource(vts->hasTenantId());
             // TODO SERVER-82320 we should no longer need to check here once expectPrefix only comes
             // from the unsigned security token.
-            if (reqSerializationCtx.getPrefix() == SerializationContext::Prefix::Default) {
+            if (reqSerializationCtx.getPrefix() == SerializationContext::Prefix::ExcludePrefix) {
                 reqSerializationCtx.setPrefixState(vts->isFromAtlasProxy());
             }
         }
@@ -433,7 +434,9 @@ public:
         CollectionValidation::AdditionalOptions additionalOptions;
         additionalOptions.enforceTimeseriesBucketsAreAlwaysCompressed =
             cmdObj["enforceTimeseriesBucketsAreAlwaysCompressed"].trueValue();
-        additionalOptions.warnOnSchemaValidation = cmdObj["warnOnSchemaValidation"].trueValue();
+        additionalOptions.validationVersion = getTestCommandsEnabled()
+            ? (ValidationVersion)bsonTestValidationVersion
+            : currentValidationVersion;
 
         ValidateResults validateResults;
         Status status = CollectionValidation::validate(

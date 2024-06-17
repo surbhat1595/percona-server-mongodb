@@ -16,8 +16,6 @@
 //   requires_fcv_62,
 //   # Plan cache state is node-local and will not get migrated alongside tenant data.
 //   tenant_migration_incompatible,
-//   # TODO SERVER-67607: Test plan cache with CQF enabled.
-//   cqf_experimental_incompatible,
 //   references_foreign_collection,
 //   # This tests perform queries and expect a particular number of candidate plans to be evaluated,
 //   # creating unanticipated indexes can lead to a different number of candidate plans.
@@ -64,7 +62,7 @@ function getPlansForCacheEntry(query = {}, sort = {}, projection = {}) {
 }
 
 function getPlansForCacheEntryFromPipeline(pipeline) {
-    const keyHash = getPlanCacheKeyFromPipeline(pipeline, coll, db);
+    const keyHash = getPlanCacheKeyFromPipeline(pipeline, coll);
 
     const res =
         coll.aggregate([{$planCacheStats: {}}, {$match: {planCacheKey: keyHash}}]).toArray();
@@ -205,15 +203,17 @@ if (!isSbeEnabled) {
     const explain = coll.explain().aggregate(pipeline);
     assert.commandWorked(explain);
 
-    const lookupStage = getPlanStage(explain, "EQ_LOOKUP");
-    assert.neq(null, lookupStage, explain);
-    assert.eq(lookupStage.strategy, "IndexedLoopJoin", explain);
-    assert.eq(lookupStage.indexName, "b_1");
+    if (!explain.splitPipeline) {
+        const lookupStage = getPlanStage(explain, "EQ_LOOKUP");
+        assert.neq(null, lookupStage, explain);
+        assert.eq(lookupStage.strategy, "IndexedLoopJoin", explain);
+        assert.eq(lookupStage.indexName, "b_1");
 
-    // The '$planCacheStats' pipeline executed against the foreign collection shouldn't include
-    // cached $lookup plans.
-    const res = foreignColl.aggregate([{$planCacheStats: {}}]).toArray();
-    assert.eq(0, res.length, dumpPlanCacheState());
+        // The '$planCacheStats' pipeline executed against the foreign collection shouldn't include
+        // cached $lookup plans.
+        const res = foreignColl.aggregate([{$planCacheStats: {}}]).toArray();
+        assert.eq(0, res.length, dumpPlanCacheState());
+    }
 }
 
 // Ensure query setting entry is present in $planCacheStats output.
@@ -224,14 +224,18 @@ if (FeatureFlagUtil.isPresentAndEnabled(db, "QuerySettings") && !FixtureHelpers.
 
     // Specify 'allowedIndexes' with more than one index, otherwise it will result in single
     // solution plan, that won't be cached in classic.
-    const settings = {indexHints: {allowedIndexes: ["a_1", "a_1_b_1"]}};
-    const filter = {a: 1};
+    const settings = {
+        indexHints:
+            {ns: {db: db.getName(), coll: coll.getName()}, allowedIndexes: ["a_1_b_1", "b_1_a_1"]}
+    };
+    assert.commandWorked(coll.createIndex({b: 1, a: 1}));
+    const filter = {a: 1, b: 1};
     const query = qsutils.makeFindQueryInstance({filter});
     assert.commandWorked(db.adminCommand({setQuerySettings: query, settings: settings}));
     qsutils.assertQueryShapeConfiguration([qsutils.makeQueryShapeConfiguration(settings, query)]);
 
     // Run the query, such that a plan cache entry is created.
-    assert.eq(3, coll.find(filter).itcount());
+    assert.eq(1, coll.find(filter).itcount());
 
     // Ensure plan cache entry contains 'settings'.
     const planCacheEntry = getPlansForCacheEntry(filter);

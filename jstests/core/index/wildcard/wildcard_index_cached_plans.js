@@ -39,11 +39,9 @@ function getCacheEntryForQuery(query) {
     const match = {
         planCacheKey: getPlanCacheKeyFromShape({query: query, collection: coll, db: db})
     };
-    const aggRes = FixtureHelpers.getPrimaryForNodeHostingDatabase(db)
-                       .getCollection(coll.getFullName())
-                       .aggregate([{$planCacheStats: {}}, {$match: match}])
-                       .toArray();
-    assert.lte(aggRes.length, 1);
+    const aggRes = coll.aggregate([{$planCacheStats: {}}, {$match: match}]).toArray();
+
+    assert.lte(aggRes.length, FixtureHelpers.numberOfShardsForCollection(coll));
     if (aggRes.length > 0) {
         return aggRes[0];
     }
@@ -161,8 +159,8 @@ for (const indexSpec of wildcardIndexes) {
 
         // Check that the shapes are different since the query which matches on a string will not
         // be eligible to use the b.$** index (since the index has a different collation).
-        assert.neq(getPlanCacheKeyFromExplain(queryWithoutStringExplain, db),
-                   getPlanCacheKeyFromExplain(queryWithStringExplain, db));
+        assert.neq(getPlanCacheKeyFromExplain(queryWithoutStringExplain),
+                   getPlanCacheKeyFromExplain(queryWithStringExplain));
     }
 
     // Check that indexability discriminators work with partial wildcard indexes.
@@ -184,7 +182,7 @@ for (const indexSpec of wildcardIndexes) {
 
         // Check that the shapes are different since the query which searches for a value not
         // included by the partial filter expression won't be eligible to use the $** index.
-        assert.neq(getPlanCacheKeyFromExplain(queryIndexedExplain, db),
-                   getPlanCacheKeyFromExplain(queryUnindexedExplain, db));
+        assert.neq(getPlanCacheKeyFromExplain(queryIndexedExplain),
+                   getPlanCacheKeyFromExplain(queryUnindexedExplain));
     }
 }

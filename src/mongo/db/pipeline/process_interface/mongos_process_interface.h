@@ -92,7 +92,7 @@ class MongosProcessInterface : public CommonProcessInterface {
 public:
     using CommonProcessInterface::CommonProcessInterface;
 
-    virtual ~MongosProcessInterface() = default;
+    ~MongosProcessInterface() override = default;
 
     std::unique_ptr<WriteSizeEstimator> getWriteSizeEstimator(
         OperationContext* opCtx, const NamespaceString& ns) const final;
@@ -222,7 +222,8 @@ public:
 
     void createTempCollection(OperationContext* opCtx,
                               const NamespaceString& nss,
-                              const BSONObj& collectionOptions) final {
+                              const BSONObj& collectionOptions,
+                              boost::optional<ShardId> dataShard) final {
         MONGO_UNREACHABLE;
     }
 
@@ -313,10 +314,6 @@ public:
         const NamespaceString& nss,
         const boost::optional<DatabaseVersion>& dbVersion) override {
         MONGO_UNREACHABLE;
-    }
-
-    std::unique_ptr<ResourceYielder> getResourceYielder(StringData cmdName) const override {
-        return nullptr;
     }
 
     std::pair<std::set<FieldPath>, boost::optional<ChunkVersion>>

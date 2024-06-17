@@ -65,6 +65,7 @@
 #include "mongo/client/global_conn_pool.h"
 #include "mongo/client/replica_set_monitor.h"
 #include "mongo/config.h"  // IWYU pragma: keep
+#include "mongo/db/admission/execution_control_init.h"
 #include "mongo/db/audit.h"
 #include "mongo/db/audit_interface.h"
 #include "mongo/db/audit/audit_flusher.h"
@@ -124,6 +125,7 @@
 #include "mongo/db/logical_time_validator.h"
 #include "mongo/db/mirror_maestro.h"
 #include "mongo/db/mongod_options.h"
+#include "mongo/db/mongod_options_storage_gen.h"
 #include "mongo/db/multitenancy_gen.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/op_observer/change_stream_pre_images_op_observer.h"
@@ -178,7 +180,6 @@
 #include "mongo/db/request_execution_context.h"
 #include "mongo/db/s/collection_sharding_state.h"
 #include "mongo/db/s/collection_sharding_state_factory_shard.h"
-#include "mongo/db/s/collection_sharding_state_factory_standalone.h"
 #include "mongo/db/s/config/configsvr_coordinator_service.h"
 #include "mongo/db/s/config/sharding_catalog_manager.h"
 #include "mongo/db/s/config_server_op_observer.h"
@@ -200,12 +201,12 @@
 #include "mongo/db/s/sharding_ready.h"
 #include "mongo/db/s/transaction_coordinator_service.h"
 #include "mongo/db/server_options.h"
-#include "mongo/db/serverless/multitenancy_check.h"
 #include "mongo/db/serverless/shard_split_donor_op_observer.h"
 #include "mongo/db/serverless/shard_split_donor_service.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/service_entry_point_mongod.h"
 #include "mongo/db/session/kill_sessions_local.h"
+#include "mongo/db/session/kill_sessions_remote.h"
 #include "mongo/db/session/logical_session_cache.h"
 #include "mongo/db/session/session_catalog_mongod.h"
 #include "mongo/db/session/session_killer.h"
@@ -265,6 +266,8 @@
 #include "mongo/s/grid.h"
 #include "mongo/s/query_analysis_client.h"
 #include "mongo/s/query_analysis_sampler.h"
+#include "mongo/s/resource_yielders.h"
+#include "mongo/s/routing_information_cache.h"
 #include "mongo/s/service_entry_point_mongos.h"
 #include "mongo/s/sharding_state.h"
 #include "mongo/scripting/dbdirectclient_factory.h"
@@ -273,6 +276,7 @@
 #include "mongo/transport/session_manager_common.h"
 #include "mongo/transport/transport_layer.h"
 #include "mongo/transport/transport_layer_manager_impl.h"
+#include "mongo/util/allocator_thread.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/background.h"
 #include "mongo/util/clock_source.h"
@@ -590,6 +594,8 @@ ExitCode _initAndListen(ServiceContext* serviceContext, int listenPort) {
         repl::InitialSyncerFactory::get(serviceContext)->runCrashRecovery();
     }
 
+    admission::initializeExecutionControl(serviceContext);
+
     // Creating the operation context before initializing the storage engine allows the storage
     // engine initialization to make use of the lock manager. As the storage engine is not yet
     // initialized, a noop recovery unit is used until the initialization is complete.
@@ -674,6 +680,12 @@ ExitCode _initAndListen(ServiceContext* serviceContext, int listenPort) {
         exitCleanly(ExitCode::badOptions);
     }
 
+    if (gAllowDocumentsGreaterThanMaxUserSize && replSettings.isReplSet()) {
+        LOGV2_ERROR(8472200,
+                    "allowDocumentsGreaterThanMaxUserSize can only be used in standalone mode");
+        exitCleanly(ExitCode::badOptions);
+    }
+
     logMongodStartupWarnings(storageGlobalParams, serverGlobalParams, serviceContext);
 
     {
@@ -719,8 +731,6 @@ ExitCode _initAndListen(ServiceContext* serviceContext, int listenPort) {
     // error.
     FeatureCompatibilityVersion::fassertInitializedAfterStartup(startupOpCtx.get());
 
-    // TODO (SERVER-74847): Remove this function call once we remove testing around downgrading from
-    // latest to last continuous.
     if (!mongo::repl::disableTransitionFromLatestToLastContinuous) {
         FeatureCompatibilityVersion::addTransitionFromLatestToLastContinuous();
     }
@@ -732,20 +742,27 @@ ExitCode _initAndListen(ServiceContext* serviceContext, int listenPort) {
     {
         Lock::GlobalWrite globalLk(startupOpCtx.get());
         DurableHistoryRegistry::get(serviceContext)->reconcilePins(startupOpCtx.get());
+
+        // Initialize the cached pointer to the oplog collection. We want to do this even as
+        // standalone
+        // so accesses to the cached pointer in replica set nodes started as standalone still work
+        // (mainly AutoGetOplogFastPath). In case the oplog doesn't exist, it is just initialized to
+        // null. This initialization must happen within a GlobalWrite lock context.
+        repl::acquireOplogCollectionForLogging(startupOpCtx.get());
     }
 
     // Notify the storage engine that startup is completed before repair exits below, as repair sets
     // the upgrade flag to true.
     auto storageEngine = serviceContext->getStorageEngine();
     invariant(storageEngine);
-    storageEngine->notifyStartupComplete(startupOpCtx.get());
+    storageEngine->notifyStorageStartupRecoveryComplete();
 
     BackupCursorHooks::initialize(serviceContext);
 
     startMongoDFTDC(serviceContext);
 
     if (mongodGlobalParams.scriptingEnabled) {
-        ScriptEngine::setup();
+        ScriptEngine::setup(ExecutionEnvironment::Server);
     }
 
     const auto isStandalone =
@@ -776,12 +793,13 @@ ExitCode _initAndListen(ServiceContext* serviceContext, int listenPort) {
         globalLDAPManager->start_threads();
     }
 
-    auto const globalAuthzManager = AuthorizationManager::get(serviceContext);
+    auto const authzManagerShard =
+        AuthorizationManager::get(serviceContext->getService(ClusterRole::ShardServer));
     {
         TimeElapsedBuilderScopedTimer scopedTimer(serviceContext->getFastClockSource(),
                                                   "Build user and roles graph",
                                                   &startupTimeElapsedBuilder);
-        uassertStatusOK(globalAuthzManager->initialize(startupOpCtx.get()));
+        uassertStatusOK(authzManagerShard->initialize(startupOpCtx.get()));
     }
 
     if (audit::initializeManager) {
@@ -791,7 +809,7 @@ ExitCode _initAndListen(ServiceContext* serviceContext, int listenPort) {
     // This is for security on certain platforms (nonce generation)
     srand((unsigned)(curTimeMicros64()) ^ (unsigned(uintptr_t(&startupOpCtx))));  // NOLINT
 
-    if (globalAuthzManager->shouldValidateAuthSchemaOnStartup()) {
+    if (authzManagerShard->shouldValidateAuthSchemaOnStartup()) {
         Status status = verifySystemIndexes(startupOpCtx.get(), &startupTimeElapsedBuilder);
         if (!status.isOK()) {
             LOGV2_WARNING(20538, "Unable to verify system indexes", "error"_attr = redact(status));
@@ -808,7 +826,7 @@ ExitCode _initAndListen(ServiceContext* serviceContext, int listenPort) {
         // SERVER-14090: Verify that auth schema version is schemaVersion26Final.
         int foundSchemaVersion;
         status =
-            globalAuthzManager->getAuthorizationVersion(startupOpCtx.get(), &foundSchemaVersion);
+            authzManagerShard->getAuthorizationVersion(startupOpCtx.get(), &foundSchemaVersion);
         if (!status.isOK()) {
             LOGV2_ERROR(20539,
                         "Failed to verify auth schema version",
@@ -830,7 +848,7 @@ ExitCode _initAndListen(ServiceContext* serviceContext, int listenPort) {
                 "http://dochub.mongodb.org/core/3.0-upgrade-to-scram-sha-1");
             exitCleanly(ExitCode::needUpgrade);
         }
-    } else if (globalAuthzManager->isAuthEnabled()) {
+    } else if (authzManagerShard->isAuthEnabled()) {
         LOGV2_ERROR(20569, "Auth must be disabled when starting without auth schema validation");
         exitCleanly(ExitCode::badOptions);
     } else {
@@ -910,16 +928,16 @@ ExitCode _initAndListen(ServiceContext* serviceContext, int listenPort) {
             logStartup(startupOpCtx.get());
         }
 
-        if (serverGlobalParams.clusterRole.has(ClusterRole::ConfigServer) ||
-            serverGlobalParams.clusterRole.has(ClusterRole::RouterServer)) {
+        ResourceYielderFactory::initialize(serviceContext);
+
+        if (serverGlobalParams.clusterRole.has(ClusterRole::ConfigServer)) {
             {
                 TimeElapsedBuilderScopedTimer scopedTimer(
                     serviceContext->getFastClockSource(),
-                    "Initialize the sharding components for a config server and/or an embedded "
-                    "router",
+                    "Initialize the sharding components for a config server",
                     &startupTimeElapsedBuilder);
 
-                initializeGlobalShardingStateForMongoD(startupOpCtx.get());
+                initializeGlobalShardingStateForConfigServer(startupOpCtx.get());
             }
 
             // TODO: SERVER-82965 We shouldn't need to read the doc multiple times once we are in
@@ -1061,8 +1079,15 @@ ExitCode _initAndListen(ServiceContext* serviceContext, int listenPort) {
 
     PeriodicTask::startRunningPeriodicTasks();
 
-    SessionKiller::set(serviceContext,
-                       std::make_shared<SessionKiller>(serviceContext, killSessionsLocal));
+    auto shardService = serviceContext->getService(ClusterRole::ShardServer);
+    SessionKiller::set(shardService,
+                       std::make_shared<SessionKiller>(shardService, killSessionsLocal));
+
+    if (serverGlobalParams.clusterRole.has(ClusterRole::RouterServer)) {
+        auto routerService = serviceContext->getService(ClusterRole::RouterServer);
+        SessionKiller::set(routerService,
+                           std::make_shared<SessionKiller>(routerService, killSessionsRemote));
+    }
 
     // Start up a background task to periodically check for and kill expired transactions; and a
     // background task to periodically check for and decrease cache pressure by decreasing the
@@ -1149,7 +1174,8 @@ ExitCode _initAndListen(ServiceContext* serviceContext, int listenPort) {
         } else if (replSettings.isReplSet()) {
             kind = LogicalSessionCacheServer::kReplicaSet;
         }
-        return makeLogicalSessionCacheD(kind);
+        return makeLogicalSessionCacheD(
+            kind, serverGlobalParams.clusterRole.has(ClusterRole::RouterServer));
     }();
     LogicalSessionCache::set(serviceContext, std::move(logicalSessionCache));
 
@@ -1159,7 +1185,8 @@ ExitCode _initAndListen(ServiceContext* serviceContext, int listenPort) {
     }
 
     auto cacheLoader = std::make_unique<stats::StatsCacheLoaderImpl>();
-    auto catalog = std::make_unique<stats::StatsCatalog>(serviceContext, std::move(cacheLoader));
+    auto catalog = std::make_unique<stats::StatsCatalog>(
+        serviceContext->getService(ClusterRole::ShardServer), std::move(cacheLoader));
     stats::StatsCatalog::set(serviceContext, std::move(catalog));
 
     // Startup options are written to the audit log at the end of startup so that cluster server
@@ -1191,7 +1218,7 @@ ExitCode _initAndListen(ServiceContext* serviceContext, int listenPort) {
         quickExit(ExitCode::fail);
     }
 
-    serviceContext->notifyStartupComplete();
+    serviceContext->notifyStorageStartupRecoveryComplete();
 
 #ifndef _WIN32
     initialize_server_global_state::signalForkSuccess();
@@ -1555,14 +1582,8 @@ void setUpObservers(ServiceContext* serviceContext) {
 
 void setUpSharding(ServiceContext* service) {
     ShardingState::create(service);
-
-    if (serverGlobalParams.clusterRole.has(ClusterRole::ShardServer)) {
-        CollectionShardingStateFactory::set(
-            service, std::make_unique<CollectionShardingStateFactoryShard>(service));
-    } else {
-        CollectionShardingStateFactory::set(
-            service, std::make_unique<CollectionShardingStateFactoryStandalone>(service));
-    }
+    CollectionShardingStateFactory::set(
+        service, std::make_unique<CollectionShardingStateFactoryShard>(service));
 }
 
 namespace {
@@ -2012,6 +2033,12 @@ void shutdownTask(const ShutdownTaskArgs& shutdownArgs) {
         CatalogCacheLoader::get(serviceContext).shutDown();
     }
 
+    if (auto configServerRoutingInfoCache = RoutingInformationCache::get(serviceContext)) {
+        LOGV2_OPTIONS(
+            8778000, {LogComponent::kSharding}, "Shutting down the RoutingInformationCache");
+        configServerRoutingInfoCache->shutDownAndJoin();
+    }
+
     // Finish shutting down the TransportLayers
     if (auto tlm = serviceContext->getTransportLayerManager()) {
         TimeElapsedBuilderScopedTimer scopedTimer(serviceContext->getFastClockSource(),
@@ -2087,7 +2114,7 @@ void shutdownTask(const ShutdownTaskArgs& shutdownArgs) {
         TimeElapsedBuilderScopedTimer scopedTimer(serviceContext->getFastClockSource(),
                                                   "Shut down full-time data capture",
                                                   &shutdownTimeElapsedBuilder);
-        stopMongoDFTDC(serviceContext);
+        stopMongoDFTDC();
     }
 
     LOGV2(20565, "Now exiting");
@@ -2101,7 +2128,10 @@ void shutdownTask(const ShutdownTaskArgs& shutdownArgs) {
 #if __has_feature(address_sanitizer) || __has_feature(thread_sanitizer)
     // SessionKiller relies on the network stack being cleanly shutdown which only occurs under
     // sanitizers
-    SessionKiller::shutdown(serviceContext);
+    SessionKiller::shutdown(serviceContext->getService(ClusterRole::ShardServer));
+    if (serverGlobalParams.clusterRole.has(ClusterRole::RouterServer)) {
+        SessionKiller::shutdown(serviceContext->getService(ClusterRole::RouterServer));
+    }
 #endif
 
     FlowControl::shutdown(serviceContext);
@@ -2186,7 +2216,6 @@ int mongod_main(int argc, char* argv[]) {
     setUpCatalog(service);
     setUpReplication(service);
     setUpObservers(service);
-    setUpMultitenancyCheck(service, gMultitenancySupport);
     setUpSharding(service);
 
     ErrorExtraInfo::invariantHaveAllParsers();
@@ -2204,6 +2233,8 @@ int mongod_main(int argc, char* argv[]) {
     // Per SERVER-7434, startSignalProcessingThread must run after any forks (i.e.
     // initialize_server_global_state::forkServerOrDie) and before the creation of any other threads
     startSignalProcessingThread();
+
+    startAllocatorThread();
 
     ReadWriteConcernDefaults::create(service, readWriteConcernDefaultsCacheLookupMongoD);
     ChangeStreamOptionsManager::create(service);

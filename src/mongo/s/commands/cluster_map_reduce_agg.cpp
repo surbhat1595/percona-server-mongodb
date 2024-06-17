@@ -206,7 +206,8 @@ bool runAggregationMapReduce(OperationContext* opCtx,
         MapReduceCommandRequest::parse(IDLParserContext("mapReduce",
                                                         false /* apiStrict */,
                                                         auth::ValidatedTenancyScope::get(opCtx),
-                                                        dbName.tenantId()),
+                                                        dbName.tenantId(),
+                                                        SerializationContext::stateDefault()),
                                        cmd);
     stdx::unordered_set<NamespaceString> involvedNamespaces{parsedMr.getNamespace()};
     auto resolvedOutNss = parsedMr.getOutOptions().getDatabaseName()
@@ -261,7 +262,7 @@ bool runAggregationMapReduce(OperationContext* opCtx,
             case cluster_aggregation_planner::AggregationTargeter::TargetingPolicy::kAnyShard: {
                 if (verbosity) {
                     explain_common::generateServerInfo(&result);
-                    explain_common::generateServerParameters(opCtx, &result);
+                    explain_common::generateServerParameters(expCtx, &result);
                 }
                 auto serialized = serializeToCommand(cmd, parsedMr, targeter.pipeline.get());
                 // When running explain, we don't explicitly pass the specified verbosity here

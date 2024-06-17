@@ -5,7 +5,8 @@
  * bumps the collection version.
  *
  * @tags: [
- *   does_not_support_stepdowns,
+ *    does_not_support_stepdowns,
+ *    temp_disabled_embedded_router_uncategorized,
  * ]
  */
 import {configureFailPoint} from "jstests/libs/fail_point_util.js";
@@ -34,6 +35,8 @@ function setUpDatabaseAndEnableSharding(dbName) {
     const collName = "foo";
     const ns = dbName + "." + collName;
     assert.commandWorked(st.s.adminCommand({shardCollection: ns, key: {x: 1}}));
+    // Do a read via mongoS to force the filtering information to be known on the shard.
+    assert.eq(st.s.getDB(dbName).getCollection(collName).countDocuments({}), 0);
 
     ShardVersioningUtil.assertCollectionVersionEquals(st.shard0, ns, Timestamp(1, 0));
 

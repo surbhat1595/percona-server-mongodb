@@ -61,7 +61,8 @@
 
 namespace mongo {
 namespace {
-CounterMetric queryStatsHmacApplicationErrors("queryStats.numHmacApplicationErrors");
+auto& queryStatsHmacApplicationErrors =
+    *MetricBuilder<Counter64>{"queryStats.numHmacApplicationErrors"};
 }
 
 REGISTER_DOCUMENT_SOURCE_WITH_FEATURE_FLAG(queryStats,
@@ -107,7 +108,7 @@ auto parseSpec(const BSONElement& spec, const Ctor& ctor) {
 
 BSONObj DocumentSourceQueryStats::computeQueryStatsKey(
     std::shared_ptr<const Key> key, const SerializationContext& serializationContext) const {
-    static const auto sha256HmacStringDataHasher = [](std::string key, const StringData& sd) {
+    static const auto sha256HmacStringDataHasher = [](std::string key, StringData sd) {
         auto hashed = SHA256Block::computeHmac(
             (const uint8_t*)key.data(), key.size(), (const uint8_t*)sd.rawData(), sd.size());
         return hashed.toString();
@@ -228,8 +229,25 @@ boost::optional<Document> DocumentSourceQueryStats::toDocument(
     const auto& key = queryStatsEntry.key;
     try {
         auto queryStatsKey = computeQueryStatsKey(key, SerializationContext::stateDefault());
+        // We use the representative shape to generate the key hash. This avoids returning duplicate
+        // hashes if we have bugs that cause two different representative shapes to re-parse into
+        // the same debug shape.
+        auto representativeShapeKey =
+            key->toBson(pExpCtx->opCtx,
+                        SerializationOptions::kRepresentativeQueryShapeSerializeOptions,
+                        SerializationContext::stateDefault());
+
+        // This SHA256 version of the hash is output to aid in data analytics use cases. In these
+        // cases, we often care about comparing hashes from different hosts, potentially on
+        // different versions and platforms. The thinking here is that the SHA256 algorithm is more
+        // stable across these different environments than the quicker 'absl::HashOf'
+        // implementation.
+        auto hash = SHA256Block::computeHash((const uint8_t*)representativeShapeKey.objdata(),
+                                             representativeShapeKey.objsize())
+                        .toString();
         return Document{
             {"key", std::move(queryStatsKey)},
+            {"keyHash", hash},
             {"metrics",
              queryStatsEntry.toBSON(feature_flags::gFeatureFlagQueryStatsDataBearingNodes.isEnabled(
                  serverGlobalParams.featureCompatibility.acquireFCVSnapshot()))},

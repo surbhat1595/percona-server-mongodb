@@ -30,6 +30,7 @@
 #pragma once
 
 #include "mongo/bson/bsontypes.h"
+#include "mongo/bson/util/simple8b.h"
 #include "mongo/platform/int128.h"
 
 namespace mongo::bsoncolumn {
@@ -37,6 +38,7 @@ static constexpr char kInterleavedStartControlByteLegacy = (char)0xF0;
 static constexpr char kInterleavedStartControlByte = (char)0xF1;
 static constexpr char kInterleavedStartArrayRootControlByte = (char)0xF2;
 static constexpr uint8_t kInvalidScaleIndex = 0xFF;
+static constexpr uint8_t kInvalidControlByte = 0xFE;
 
 inline bool isUncompressedLiteralControlByte(uint8_t control) {
     return (control & 0xE0) == 0 || control == (uint8_t)MinKey || control == (uint8_t)MaxKey;
@@ -49,6 +51,24 @@ inline bool isInterleavedStartControlByte(char control) {
 
 inline uint8_t numSimple8bBlocksForControlByte(uint8_t control) {
     return (control & 0x0F) + 1;
+}
+
+inline uint32_t numElemsForControlByte(const char* control) {
+    if (bsoncolumn::isUncompressedLiteralControlByte(*control)) {
+        return 1;
+    }
+
+    Simple8b<uint128_t> reader(
+        control + 1, sizeof(uint64_t) * bsoncolumn::numSimple8bBlocksForControlByte(*control));
+
+    uint32_t num = 0;
+    auto it = reader.begin();
+    auto end = reader.end();
+    while (it != end) {
+        num += it.blockSize();
+        it.advanceBlock();
+    }
+    return num;
 }
 
 inline uint8_t scaleIndexForControlByte(uint8_t control) {
@@ -83,6 +103,12 @@ int128_t expandDelta(int128_t prev, int128_t delta);
 
 inline bool usesDeltaOfDelta(BSONType type) {
     return type == jstOID || type == Date || type == bsonTimestamp;
+}
+
+inline bool onlyZeroDelta(BSONType type) {
+    return type == RegEx || type == DBRef || type == CodeWScope || type == Symbol ||
+        type == Object || type == Array || type == jstNULL || type == Undefined || type == MinKey ||
+        type == MaxKey;
 }
 
 inline bool uses128bit(BSONType type) {

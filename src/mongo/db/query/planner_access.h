@@ -130,7 +130,6 @@ public:
      */
     static std::unique_ptr<QuerySolutionNode> scanWholeIndex(const IndexEntry& index,
                                                              const CanonicalQuery& query,
-                                                             const QueryPlannerParams& params,
                                                              int direction = 1);
 
     /**
@@ -209,7 +208,7 @@ public:
         const MatchExpression* conjunct,
         const CollatorInterface* queryCollator,
         const CollatorInterface* ccCollator,
-        const StringData& clusterKeyFieldName,
+        StringData clusterKeyFieldName,
         RecordIdRange& recordRange,
         const std::function<void(const MatchExpression*)>& redundant = [](auto) {});
 

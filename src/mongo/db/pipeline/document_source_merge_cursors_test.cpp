@@ -459,7 +459,7 @@ protected:
     }
 
 private:
-    virtual boost::intrusive_ptr<ExpressionContext> makeExpCtx() override {
+    boost::intrusive_ptr<ExpressionContext> makeExpCtx() override {
         return new ExpressionContext(operationContext(), nullptr, _nss);
     }
 
@@ -502,7 +502,8 @@ TEST_F(DocumentSourceMergeCursorsMultiTenancyTest, ShouldBeAbleToParseSerialized
         auth::ValidatedTenancyScope::TenantProtocol::kDefault,
         auth::ValidatedTenancyScopeFactory::TenantForTestingTag{});
     const auto newParams = AsyncResultsMergerParams::parse(
-        IDLParserContext("$mergeCursors test", false, vts, tenantId),
+        IDLParserContext(
+            "$mergeCursors test", false, vts, tenantId, SerializationContext::stateDefault()),
         newSpec["$mergeCursors"].Obj());
 
     // Check that the namespace contains the tenantid prefix.
@@ -561,7 +562,8 @@ TEST_F(DocumentSourceMergeCursorsMultiTenancyAndFeatureFlagTest,
         auth::ValidatedTenancyScope::TenantProtocol::kDefault,
         auth::ValidatedTenancyScopeFactory::TenantForTestingTag{});
     const auto newParams = AsyncResultsMergerParams::parse(
-        IDLParserContext("$mergeCursors test", false, vts, tenantId),
+        IDLParserContext(
+            "$mergeCursors test", false, vts, tenantId, SerializationContext::stateDefault()),
         newSpec["$mergeCursors"].Obj());
 
     // Check that the namespace doesn't contain the tenantid prefix.
@@ -605,7 +607,8 @@ TEST_F(DocumentSourceMergeCursorsShapeTest, QueryShape) {
                 ],
                 "nss": "HASH<test.mergeCursors>",
                 "allowPartialResults": false,
-                "recordRemoteOpWaitTime": false
+                "recordRemoteOpWaitTime": false,
+                "requestQueryStatsFromRemotes": false
             }
         })",
         redact(*stage));

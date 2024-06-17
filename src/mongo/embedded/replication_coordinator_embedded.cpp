@@ -234,7 +234,8 @@ void ReplicationCoordinatorEmbedded::resetMyLastOpTimes() {
     UASSERT_NOT_IMPLEMENTED;
 }
 
-OpTimeAndWallTime ReplicationCoordinatorEmbedded::getMyLastWrittenOpTimeAndWallTime() const {
+OpTimeAndWallTime ReplicationCoordinatorEmbedded::getMyLastWrittenOpTimeAndWallTime(
+    bool rollbackSafe) const {
     UASSERT_NOT_IMPLEMENTED;
 }
 
@@ -242,8 +243,7 @@ OpTime ReplicationCoordinatorEmbedded::getMyLastWrittenOpTime() const {
     UASSERT_NOT_IMPLEMENTED;
 }
 
-OpTimeAndWallTime ReplicationCoordinatorEmbedded::getMyLastAppliedOpTimeAndWallTime(
-    bool rollbackSafe) const {
+OpTimeAndWallTime ReplicationCoordinatorEmbedded::getMyLastAppliedOpTimeAndWallTime() const {
     UASSERT_NOT_IMPLEMENTED;
 }
 
@@ -281,6 +281,12 @@ Status ReplicationCoordinatorEmbedded::waitUntilOpTimeForRead(OperationContext*,
 
 Status ReplicationCoordinatorEmbedded::waitUntilOpTimeForReadUntil(OperationContext*,
                                                                    const ReadConcernArgs&,
+                                                                   boost::optional<Date_t>) {
+    UASSERT_NOT_IMPLEMENTED;
+}
+
+Status ReplicationCoordinatorEmbedded::waitUntilOpTimeWrittenUntil(OperationContext*,
+                                                                   LogicalTime,
                                                                    boost::optional<Date_t>) {
     UASSERT_NOT_IMPLEMENTED;
 }
@@ -537,7 +543,7 @@ Status ReplicationCoordinatorEmbedded::processReplSetRequestVotes(OperationConte
     UASSERT_NOT_IMPLEMENTED;
 }
 
-void ReplicationCoordinatorEmbedded::prepareReplMetadata(const BSONObj&,
+void ReplicationCoordinatorEmbedded::prepareReplMetadata(const CommonRequestArgs&,
                                                          const OpTime&,
                                                          BSONObjBuilder*) const {
     UASSERT_NOT_IMPLEMENTED;

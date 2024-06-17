@@ -1,7 +1,13 @@
 /**
  * Utility class for testing query settings.
  */
-import {getQueryPlanners} from "jstests/libs/analyze_plan.js";
+import {
+    getAggPlanStages,
+    getEngine,
+    getPlanStages,
+    getQueryPlanners,
+    getWinningPlanFromExplain
+} from "jstests/libs/analyze_plan.js";
 
 export class QuerySettingsUtils {
     /**
@@ -28,12 +34,13 @@ export class QuerySettingsUtils {
     }
 
     /**
-     * Makes an query instance of the aggregate command with an optional pipeline clause.
+     * Makes a query instance of the aggregate command with an optional pipeline clause.
      */
     makeAggregateQueryInstance(aggregateObj, collectionless = false) {
         return {
             aggregate: collectionless ? 1 : this.collName,
             $db: this.db.getName(),
+            cursor: {},
             ...aggregateObj
         };
     }
@@ -48,40 +55,32 @@ export class QuerySettingsUtils {
     /**
      * Return query settings for the current tenant without query hashes.
      */
-    getQuerySettings(opts = {}) {
-        return this.adminDB
-            .aggregate([
-                {$querySettings: opts},
-                {$project: {queryShapeHash: 0}},
-                {$sort: {representativeQuery: 1}},
-            ])
-            .toArray();
+    getQuerySettings({showDebugQueryShape = false,
+                      showQueryShapeHash = false,
+                      filter = undefined} = {}) {
+        const pipeline = [{$querySettings: showDebugQueryShape ? {showDebugQueryShape} : {}}];
+        if (filter) {
+            pipeline.push({$match: filter});
+        }
+        if (!showQueryShapeHash) {
+            pipeline.push({$project: {queryShapeHash: 0}});
+        }
+        pipeline.push({$sort: {representativeQuery: 1}});
+        return this.adminDB.aggregate(pipeline).toArray();
     }
 
     /**
      * Return queryShapeHash for a given query from querySettings.
      */
-    getQueryHashFromQuerySettings(shape) {
-        print("looking for hash for the shape: \n" + tojson(shape))
-        const settings = this.adminDB
-                             .aggregate([
-                                 {$querySettings: {showDebugQueryShape: true}},
-                                 {$project: {"debugQueryShape.cmdNs": 0}},
-                                 {$match: {debugQueryShape: shape}},
-                             ])
-                             .toArray();
-        if (settings.length == 0) {
-            const allSettings = this.adminDB
-                                    .aggregate([
-                                        {$querySettings: {showDebugQueryShape: true}},
-                                        {$project: {"debugQueryShape.cmdNs": 0}},
-                                    ])
-                                    .toArray();
-            print("Couldn't find any. All settings:\n" + tojson(allSettings));
-            return undefined;
-        }
-        assert.eq(settings.length, 1);
-        return settings[0].queryShapeHash;
+    getQueryHashFromQuerySettings(representativeQuery) {
+        const settings =
+            this.getQuerySettings({showQueryShapeHash: true, filter: {representativeQuery}});
+        assert.lte(
+            settings.length,
+            1,
+            `query ${tojson(representativeQuery)} is expected to have 0 or 1 settings, but got ${
+                tojson(settings)}`);
+        return settings.length === 0 ? undefined : settings[0].queryShapeHash;
     }
 
     /**
@@ -127,15 +126,16 @@ export class QuerySettingsUtils {
     assertExplainQuerySettings(query, expectedQuerySettings) {
         // Pass query without the $db field to explain command, because it injects the $db field
         // inside the query before processing.
-        const {$db: _, ...queryWithoutDollarDb} = query;
+        const queryWithoutDollarDb = this.withoutDollarDB(query);
         const explain = (() => {
-            if (query.find) {
+            if (query.find || query.distinct) {
                 return assert.commandWorked(this.db.runCommand({explain: queryWithoutDollarDb}));
             } else if (query.aggregate) {
                 return assert.commandWorked(
                     this.db.runCommand({explain: {...queryWithoutDollarDb, cursor: {}}}));
             } else {
-                return null;
+                assert(false,
+                       `Attempting to run explain for unknown query type. Query: ${tojson(query)}`);
             }
         })();
         if (explain) {
@@ -154,7 +154,75 @@ export class QuerySettingsUtils {
             const setting = settingsArray.pop();
             assert.commandWorked(
                 this.adminDB.runCommand({removeQuerySettings: setting.representativeQuery}));
+            // Check that the given setting has indeed been removed.
             this.assertQueryShapeConfiguration(settingsArray);
         }
+    }
+
+    /**
+     * Helper method for setting & removing query settings for testing purposes. Accepts a
+     * 'runTest' anonymous function which will be executed once the provided query settings have
+     * been propagated throughout the cluster.
+     */
+    withQuerySettings(representativeQuery, settings, runTest) {
+        const queryShapeHash = assert
+                                   .commandWorked(this.db.adminCommand(
+                                       {setQuerySettings: representativeQuery, settings: settings}))
+                                   .queryShapeHash;
+        assert.soon(() => (this.getQuerySettings({filter: {queryShapeHash}}).length === 1));
+        const result = runTest();
+        assert.commandWorked(db.adminCommand({removeQuerySettings: representativeQuery}));
+        assert.soon(() => (this.getQuerySettings({filter: {queryShapeHash}}).length === 0));
+        return result;
+    }
+
+    withoutDollarDB(cmd) {
+        const {$db: _, ...rest} = cmd;
+        return rest;
+    }
+
+    /**
+     * Asserts that the expected engine is run on the input query and settings.
+     */
+    assertQueryFramework({query, settings, expectedEngine}) {
+        // Ensure that query settings cluster parameter is empty.
+        this.assertQueryShapeConfiguration([]);
+
+        // Apply the provided settings for the query.
+        if (settings) {
+            assert.commandWorked(
+                this.db.adminCommand({setQuerySettings: query, settings: settings}));
+            // Wait until the settings have taken effect.
+            const expectedConfiguration = [this.makeQueryShapeConfiguration(settings, query)];
+            this.assertQueryShapeConfiguration(expectedConfiguration);
+        }
+
+        const withoutDollarDB = query.aggregate ? {...this.withoutDollarDB(query), cursor: {}}
+                                                : this.withoutDollarDB(query);
+        const explain = assert.commandWorked(this.db.runCommand({explain: withoutDollarDB}));
+        const engine = getEngine(explain);
+        assert.eq(
+            engine, expectedEngine, `Expected engine to be ${expectedEngine} but found ${engine}`);
+
+        // Ensure that no $cursor stage exists, which means the whole query got pushed down to find,
+        // if 'expectedEngine' is SBE.
+        if (query.aggregate) {
+            const cursorStages = getAggPlanStages(explain, "$cursor");
+
+            if (expectedEngine === "sbe") {
+                assert.eq(cursorStages.length, 0, cursorStages);
+            } else {
+                assert.gte(cursorStages.length, 0, cursorStages);
+            }
+        }
+
+        // If a hinted index exists, assert it was used.
+        if (query.hint) {
+            const winningPlan = getWinningPlanFromExplain(explain);
+            const ixscanStage = getPlanStages(winningPlan, "IXSCAN")[0];
+            assert.eq(query.hint, ixscanStage.keyPattern, winningPlan);
+        }
+
+        this.removeAllQuerySettings();
     }
 }

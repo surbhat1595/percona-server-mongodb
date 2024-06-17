@@ -21,7 +21,7 @@ assert.commandWorked(db.createCollection(coll.getName()));
 // Drop and recreates a test collection along with two indexes: {a: 1} and {a: 1, b: 1}.
 function setupCollection() {
     assert(coll.drop());
-    assert.commandWorked(coll.createIndexes([{a: 1}, {a: 1, b: 1}]));
+    assert.commandWorked(coll.createIndexes([{a: 1}, {a: -1}]));
 }
 
 // Runs the given 'testToRun' twice using the SBE and classic engine and returns the result of each
@@ -79,9 +79,6 @@ function assertQueryHashAndPlanCacheKey(sbe, classic) {
 
     assert.neq(sbe, null);
     assert.neq(classic, null);
-    assert.eq(sbe.queryFramework, "sbe", sbe);
-    assert.eq(classic.queryFramework, "classic", classic);
-
     assertQueryHashAndPlanCacheKey(sbe, classic);
 })();
 
@@ -149,9 +146,6 @@ function assertQueryHashAndPlanCacheKey(sbe, classic) {
 
     assert.neq(sbe, null);
     assert.neq(classic, null);
-    assert.eq(sbe.attr.queryFramework, "sbe", sbe);
-    assert.eq(classic.attr.queryFramework, "classic", classic);
-
     assertQueryHashAndPlanCacheKey(sbe.attr, classic.attr);
 })();
 

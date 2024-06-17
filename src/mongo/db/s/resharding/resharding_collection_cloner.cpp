@@ -146,8 +146,7 @@ ReshardingCollectionCloner::makeRawPipeline(
     resolvedNamespaces[_sourceNss.coll()] = {_sourceNss, std::vector<BSONObj>{}};
 
     // Assume that the config.cache.chunks collection isn't a view either.
-    auto tempNss =
-        resharding::constructTemporaryReshardingNss(_sourceNss.db_forSharding(), _sourceUUID);
+    auto tempNss = resharding::constructTemporaryReshardingNss(_sourceNss, _sourceUUID);
     auto tempCacheChunksNss = NamespaceString::makeGlobalConfigCollection(
         "cache.chunks." +
         NamespaceStringUtil::serialize(tempNss, SerializationContext::stateDefault()));
@@ -217,8 +216,7 @@ ReshardingCollectionCloner::makeRawNaturalOrderPipeline(
     resolvedNamespaces[_sourceNss.coll()] = {_sourceNss, std::vector<BSONObj>{}};
 
     // Assume that the config.cache.chunks collection isn't a view either.
-    auto tempNss =
-        resharding::constructTemporaryReshardingNss(_sourceNss.db_forSharding(), _sourceUUID);
+    auto tempNss = resharding::constructTemporaryReshardingNss(_sourceNss, _sourceUUID);
     auto tempCacheChunksNss = NamespaceString::makeGlobalConfigCollection(
         "cache.chunks." +
         NamespaceStringUtil::serialize(tempNss, SerializationContext::stateDefault()));
@@ -680,7 +678,9 @@ void ReshardingCollectionCloner::_runOnceWithNaturalOrder(
     LOGV2_DEBUG(7763600,
                 2,
                 "Resharding dispatch results",
-                "needsPrimaryShardMerge"_attr = dispatchResults.needsPrimaryShardMerge,
+                "needsSpecificShardMerger"_attr = dispatchResults.mergeShardId.has_value()
+                    ? dispatchResults.mergeShardId->toString()
+                    : "false",
                 "numRemoteCursors"_attr = dispatchResults.remoteCursors.size(),
                 "numExplainOutputs"_attr = dispatchResults.remoteExplainOutput.size(),
                 "hasSplitPipeline"_attr = hasSplitPipeline,

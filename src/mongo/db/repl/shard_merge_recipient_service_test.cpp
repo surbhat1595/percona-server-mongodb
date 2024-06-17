@@ -175,6 +175,7 @@ public:
                    const CollectionPtr& coll,
                    std::vector<InsertStatement>::const_iterator first,
                    std::vector<InsertStatement>::const_iterator last,
+                   const std::vector<RecordId>& recordIds,
                    std::vector<bool> fromMigrate,
                    bool defaultFromMigrate,
                    OpStateAccumulator* opAccumulator = nullptr) final {
@@ -638,7 +639,7 @@ private:
  */
 class ShardMergeRecipientServiceTestInsert : public ShardMergeRecipientServiceTest {
 private:
-    void addOpObserver(OpObserverRegistry* opObserverRegistry) {
+    void addOpObserver(OpObserverRegistry* opObserverRegistry) override {
         opObserverRegistry->addObserver(std::make_unique<ShardMergeRecipientOpObserver>());
     }
 

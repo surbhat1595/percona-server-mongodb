@@ -467,7 +467,7 @@ public:
 
     SSLConnectionOpenSSL(SSL_CTX* ctx, Socket* sock, const char* initialBytes, int len);
 
-    ~SSLConnectionOpenSSL();
+    ~SSLConnectionOpenSSL() override;
 };
 
 ////////////////////////////////////////////////////////////////
@@ -758,10 +758,6 @@ Future<UniqueOCSPResponse> retrieveOCSPResponse(const std::string& host,
     auto bufferData = buffer.data();
     if (i2d_OCSP_REQUEST(ocspReq.get(), &bufferData) < 0) {
         return getSSLFailure("Could not convert type OCSP Response to DER encoded object.");
-    }
-
-    if (!OCSPManager::get(getGlobalServiceContext())) {
-        return getSSLFailure("OCSP fetch could not complete, server is in shutdown mode.");
     }
 
     // Query the OCSP responder
@@ -1112,7 +1108,7 @@ StatusWith<OCSPValidationContext> extractOcspUris(SSL_CTX* context,
 class OCSPCache : public ReadThroughCache<OCSPCacheKey, OCSPFetchResponse> {
 public:
     OCSPCache(ServiceContext* service)
-        : ReadThroughCache(_mutex, service, _threadPool, _lookup, tlsOCSPCacheSize) {
+        : ReadThroughCache(_mutex, service->getService(), _threadPool, _lookup, tlsOCSPCacheSize) {
         _threadPool.startup();
     }
 
@@ -1272,7 +1268,7 @@ public:
     explicit SSLManagerOpenSSL(const SSLParams& params,
                                const boost::optional<TransientSSLParams>& transientSSLParams,
                                bool isServer);
-    ~SSLManagerOpenSSL() {
+    ~SSLManagerOpenSSL() override {
         stopJobs();
     }
 

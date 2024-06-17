@@ -346,7 +346,7 @@ Status rollback_internal::updateFixUpInfoFromLocalOplogEntry(OperationContext* o
             auto txnObj = txnBob.obj();
 
             DocID txnDoc(txnObj, txnObj.firstElement(), transactionTableUUID.value());
-            txnDoc.ns = NamespaceString::kSessionTransactionsTableNamespace.ns();
+            txnDoc.ns = redactTenant(NamespaceString::kSessionTransactionsTableNamespace);
 
             fixUpInfo.docsToRefetch.insert(txnDoc);
             fixUpInfo.refetchTransactionDocs = true;
@@ -416,6 +416,7 @@ Status rollback_internal::updateFixUpInfoFromLocalOplogEntry(OperationContext* o
 
                 return Status::OK();
             }
+            case OplogEntry::CommandType::kDeleteIndexes:
             case OplogEntry::CommandType::kDropIndexes: {
                 // Example drop indexes objects
                 //     o: {
@@ -1636,32 +1637,11 @@ void syncFixUp(OperationContext* opCtx,
                                 // Would be faster but requires index:
                                 // RecordId loc = Helpers::findById(nsd, pattern);
                                 if (!loc.isNull()) {
-                                    try {
-                                        writeConflictRetry(
-                                            opCtx, "cappedTruncateAfter", collection.nss(), [&] {
-                                                collection_internal::cappedTruncateAfter(
-                                                    opCtx,
-                                                    collection.getCollectionPtr(),
-                                                    loc,
-                                                    true);
-                                            });
-                                    } catch (const DBException& e) {
-                                        if (e.code() == 13415) {
-                                            // hack: need to just make cappedTruncate do this...
-                                            CollectionWriter collectionWriter(opCtx, &collection);
-                                            writeConflictRetry(
-                                                opCtx, "truncate", collection.nss(), [&] {
-                                                    WriteUnitOfWork wunit(opCtx);
-                                                    uassertStatusOK(
-                                                        collectionWriter
-                                                            .getWritableCollection(opCtx)
-                                                            ->truncate(opCtx));
-                                                    wunit.commit();
-                                                });
-                                        } else {
-                                            throw;
-                                        }
-                                    }
+                                    writeConflictRetry(
+                                        opCtx, "cappedTruncateAfter", collection.nss(), [&] {
+                                            collection_internal::cappedTruncateAfter(
+                                                opCtx, collection.getCollectionPtr(), loc, true);
+                                        });
                                 }
                             } catch (const DBException& e) {
                                 // Replicated capped collections have many ways to become
@@ -1755,7 +1735,7 @@ void syncFixUp(OperationContext* opCtx,
             nullptr /* aboutToDelete callback */);
     }
 
-    Status status = AuthorizationManager::get(opCtx->getServiceContext())->initialize(opCtx);
+    Status status = AuthorizationManager::get(opCtx->getService())->initialize(opCtx);
     if (!status.isOK()) {
         LOGV2_FATAL_NOTRACE(40496,
                             "Failed to reinitialize auth data after rollback",

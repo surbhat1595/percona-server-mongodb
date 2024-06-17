@@ -7,9 +7,10 @@ import {FeatureFlagUtil} from "jstests/libs/feature_flag_util.js";
 import {FixtureHelpers} from "jstests/libs/fixture_helpers.js";
 
 // Constants representing different states of SBE enablement.
-const kSbeFullyEnabled = "sbeFull";
-const kSbeRestricted = "sbeRestricted";
-const kSbeDisabled = "sbeDisabled";
+export const kSbeFullyEnabled = "sbeFull";
+export const kFeatureFlagSbeFullEnabled = "featureFlagSbeFull";
+export const kSbeRestricted = "sbeRestricted";
+export const kSbeDisabled = "sbeDisabled";
 
 /**
  * Discover nodes in the cluster and call 'checkFunction' on any one mongod node. Returns the value
@@ -61,7 +62,7 @@ function discoverNodesAndCheck(theDB, checkFunction) {
  * featureFlagSbeFull is off. This reflects the expected SBE behavior when we cannot use Bonsai and
  * instead fall back to SBE without Bonsai.
  */
-function checkSbeStatus(theDB) {
+export function checkSbeStatus(theDB) {
     return discoverNodesAndCheck(theDB, (conn) => {
         const getParam = conn.adminCommand({
             getParameter: 1,
@@ -73,7 +74,7 @@ function checkSbeStatus(theDB) {
         } else if (getParam.internalQueryFrameworkControl === "forceClassicEngine") {
             return kSbeDisabled;
         } else if (FeatureFlagUtil.isPresentAndEnabled(conn, "SbeFull")) {
-            return kSbeFullyEnabled;
+            return kFeatureFlagSbeFullEnabled;
         } else if (getParam.internalQueryFrameworkControl === "trySbeRestricted" ||
                    getParam.internalQueryFrameworkControl === "tryBonsai" ||
                    getParam.internalQueryFrameworkControl === "tryBonsaiExperimental") {
@@ -86,25 +87,34 @@ function checkSbeStatus(theDB) {
 }
 
 /**
- * Check if SBE is fully enabled in the cluster.
+ * Check if featureFlagSbeFull is enabled in the cluster.
+ */
+export function checkSbeFullFeatureFlagEnabled(theDB) {
+    return checkSbeStatus(theDB) === kFeatureFlagSbeFullEnabled;
+}
+
+/**
+ * Check if SBE is fully enabled in the cluster. This implies that either 'featureFlagSbeFull' is
+ * enabled, or the internalQueryFrameworkControl knob is set to 'trySbeEngine'.
  */
 export function checkSbeFullyEnabled(theDB) {
-    return checkSbeStatus(theDB) === kSbeFullyEnabled;
+    const status = checkSbeStatus(theDB);
+    return status === kSbeFullyEnabled || status === kFeatureFlagSbeFullEnabled;
 }
 
 /**
  * Check if SBE is either restricted (only select agg stages: $group, $lookup,
- * $_internalUnpackBucket, $search are allowed to be pushed down to sbe) or fully enabled in the
- * cluster.
+ * $_internalUnpackBucket are allowed to be pushed down to sbe) or fully enabled in the cluster.
  */
 export function checkSbeRestrictedOrFullyEnabled(theDB) {
     const status = checkSbeStatus(theDB);
-    return status === kSbeRestricted || status === kSbeFullyEnabled;
+    return status === kSbeRestricted || status === kSbeFullyEnabled ||
+        status == kFeatureFlagSbeFullEnabled;
 }
 
 /**
- * Check if SBE is restricted (only select agg stages: $group, $lookup, $_internalUnpackBucket,
- * $search are allowed to be pushed down to sbe).
+ * Check if SBE is restricted (only select agg stages: $group, $lookup, $_internalUnpackBucket are
+ * allowed to be pushed down to sbe).
  */
 export function checkSbeRestricted(theDB) {
     return checkSbeStatus(theDB) === kSbeRestricted;

@@ -34,6 +34,7 @@
 #include <cstddef>
 #include <memory>
 
+#include "mongo/base/compare_numbers.h"
 #include "mongo/db/exec/sbe/values/cell_interface.h"
 #include "mongo/db/exec/sbe/values/column_op.h"
 #include "mongo/db/exec/sbe/values/value.h"
@@ -45,28 +46,70 @@ namespace mongo::sbe::value {
  *
  * Note: Deblocked values are read-only and must not be modified.
  */
-struct DeblockedTagVals {
+class DeblockedTagVals {
+public:
+    DeblockedTagVals() {}
+
     // 'tags' and 'vals' point to an array of 'count' elements respectively.
-    DeblockedTagVals(size_t count, const TypeTags* tags, const Value* vals)
-        : count(count), tags(tags), vals(vals) {
-        tassert(7949501, "Values must exist", count > 0 && tags != nullptr && vals != nullptr);
+    DeblockedTagVals(size_t count,
+                     const TypeTags* tags,
+                     const Value* vals,
+                     TypeTags tag = TypeTags::Nothing,
+                     bool isDense = false)
+        : _count(count), _tags(tags), _vals(vals), _tag(tag), _isDense(isDense) {
+        tassert(7949501, "Values must exist", count > 0 || (tags == nullptr && vals == nullptr));
+    }
+    DeblockedTagVals& operator=(const DeblockedTagVals& other) {
+        _count = other._count;
+        _tags = other._tags;
+        _vals = other._vals;
+        _tag = other._tag;
+        _isDense = other._isDense;
+        return *this;
     }
 
     std::pair<TypeTags, Value> operator[](size_t idx) const {
-        return {tags[idx], vals[idx]};
+        return {_tags[idx], _vals[idx]};
     }
 
     std::span<const TypeTags> tagsSpan() const {
-        return std::span(tags, count);
+        return std::span(_tags, _count);
     }
 
     std::span<const Value> valsSpan() const {
-        return std::span(vals, count);
+        return std::span(_vals, _count);
     }
 
-    const size_t count;
-    const TypeTags* const tags;
-    const Value* const vals;
+    std::pair<std::span<const TypeTags>, std::span<const Value>> tagsValsView() const {
+        return std::pair{tagsSpan(), valsSpan()};
+    }
+
+    size_t count() const {
+        return _count;
+    }
+
+    const TypeTags* tags() const {
+        return _tags;
+    }
+
+    const Value* vals() const {
+        return _vals;
+    }
+
+    TypeTags tag() const {
+        return _tag;
+    }
+
+    bool isDense() const {
+        return _isDense;
+    }
+
+private:
+    size_t _count = 0;
+    const TypeTags* _tags = nullptr;
+    const Value* _vals = nullptr;
+    TypeTags _tag = TypeTags::Nothing;
+    bool _isDense = false;
 };
 
 // Bitset representation used to indicate present or missing values. DynamicBitset from
@@ -76,44 +119,9 @@ struct DeblockedTagVals {
 using HomogeneousBlockBitset = boost::dynamic_bitset<size_t>;
 
 /**
- * Homogeneous Deblocked values with a single tag. The missing bitset is used to determine which
- * values in the original block were Nothing.
- */
-struct DeblockedHomogeneousVals {
-    DeblockedHomogeneousVals(TypeTags tag,
-                             const HomogeneousBlockBitset& bitset,
-                             std::span<Value> vals)
-        : tag(tag), bitset(bitset), vals(vals) {
-        tassert(8407200,
-                "Can only create DeblockedHomogeneousVals with NumberInt32, NumberInt64, "
-                "NumberDouble, or Date",
-                tag == TypeTags::NumberInt32 || tag == TypeTags::NumberInt64 ||
-                    tag == TypeTags::Date || tag == TypeTags::NumberDouble);
-        tassert(8407201,
-                "Values must exist",
-                this->bitset.size() && (!vals.empty() || (bitset.none() && vals.empty())));
-    }
-
-    // TODO SERVER-83799 Remove TypeTags::Boolean
-    static inline constexpr bool validHomogeneousType(TypeTags tag) {
-        return tag == TypeTags::NumberInt32 || tag == TypeTags::NumberInt64 ||
-            tag == TypeTags::Date || tag == TypeTags::NumberDouble || tag == TypeTags::Boolean;
-    }
-
-    // Tag of non-Nothing values in the block.
-    TypeTags tag;
-
-    // Bitset where Nothing values in the original block are indicated with a 0 and non-Nothing
-    // values are indicated with a 1.
-    const HomogeneousBlockBitset& bitset;
-
-    // Unowned view on the backing values.
-    std::span<Value> vals;
-};
-
-/**
  * Tokens representing unique values in a block and indexes that represent the location of these
  * values in the original block.
+ * 'idxs' maps index in the original block to index in tokens.
  */
 struct TokenizedBlock {
     std::unique_ptr<ValueBlock> tokens;
@@ -131,9 +139,15 @@ struct DeblockedTagValStorage {
     }
 
     DeblockedTagValStorage(DeblockedTagValStorage&& other)
-        : tags(std::move(other.tags)), vals(std::move(other.vals)), owned(other.owned) {
+        : tags(std::move(other.tags)),
+          vals(std::move(other.vals)),
+          tag(other.tag),
+          isDense(other.isDense),
+          owned(other.owned) {
         other.tags = {};
         other.vals = {};
+        other.tag = TypeTags::Nothing;
+        other.isDense = false;
         other.owned = false;
     }
 
@@ -162,6 +176,8 @@ struct DeblockedTagValStorage {
 
             other.tags = {};
             other.vals = {};
+            other.tag = TypeTags::Nothing;
+            other.isDense = false;
             other.owned = false;
         }
         return *this;
@@ -173,6 +189,8 @@ struct DeblockedTagValStorage {
 
     std::vector<TypeTags> tags;
     std::vector<Value> vals;
+    TypeTags tag{TypeTags::Nothing};
+    bool isDense{false};
     bool owned{false};
 };
 
@@ -215,14 +233,6 @@ struct ValueBlock {
     }
 
     /**
-     * Returns unowned deblocked values if the input block was homogeneous, otherwise returns
-     * boost::none. 'DeblockedHomogeneousVals.count()' must always be equal to this block's count().
-     */
-    virtual boost::optional<DeblockedHomogeneousVals> extractHomogeneous() {
-        return boost::none;
-    }
-
-    /**
      * Returns a copy of this block.
      */
     virtual std::unique_ptr<ValueBlock> clone() const = 0;
@@ -231,6 +241,35 @@ struct ValueBlock {
      * Returns the number of values in this block in O(1) time, otherwise returns boost::none.
      */
     virtual boost::optional<size_t> tryCount() const = 0;
+
+    /**
+     * Returns an upper bound for the values in this block. This may be the maximum value, but
+     * it's not necessarily.
+     */
+    virtual std::pair<TypeTags, Value> tryLowerBound() const {
+        return tryMin();
+    }
+
+    /**
+     * Returns an upper bound for the values in this block. This may be the maximum value, but
+     * it's not necessarily.
+     */
+    virtual std::pair<TypeTags, Value> tryUpperBound() const {
+        return tryMax();
+    }
+
+    /**
+     * Returns the number of values in this block. If this cannot be done in O(1) then the values
+     * will be extracted and the count will be returned.
+     */
+    size_t count() {
+        auto elsNum = tryCount();
+        if (elsNum.has_value()) {
+            return elsNum.get();
+        }
+
+        return this->extract().count();
+    }
 
     /**
      * Returns the minimum value in the block in O(1) time, otherwise returns Nothing value.
@@ -265,6 +304,9 @@ struct ValueBlock {
 
     virtual std::unique_ptr<ValueBlock> map(const ColumnOp& op);
 
+    /**
+     * Returns a list of unique values in the block as well as their positions.
+     */
     virtual TokenizedBlock tokenize();
 
     /**
@@ -274,12 +316,56 @@ struct ValueBlock {
     virtual std::unique_ptr<ValueBlock> fillEmpty(TypeTags fillTag, Value fillVal);
 
     /**
+     * Returns a block where all values that match the BSON type mask are replaced with (fillTag,
+     * fillVal) or nullptr if no values would be modified. Nothings will always be unchanged
+     * (fillType with an input of Nothing always results in Nothing).
+     */
+    virtual std::unique_ptr<ValueBlock> fillType(uint32_t typeMask,
+                                                 TypeTags fillTag,
+                                                 Value fillVal);
+
+    /**
      * Returns a block of booleans, where non-Nothing values in the block are mapped to true, and
      * Nothings are mapped to false.
      */
     virtual std::unique_ptr<ValueBlock> exists();
 
     std::unique_ptr<ValueBlock> mapMonotonicFastPath(const ColumnOp& op);
+
+    /**
+     * If the block this is called on contains Nothings or other type tags that are not Boolean,
+     * return boost::none. If this is called on a block that is strictly all Booleans, return
+     * whether or not the values are all false/true. Any caller of this function that expects the
+     * presence of non-Booleans to be an error should check for this after getting a return value of
+     * boost::none.
+     */
+    virtual boost::optional<bool> allFalse() const {
+        return boost::none;
+    }
+
+    virtual boost::optional<bool> allTrue() const {
+        return boost::none;
+    }
+
+    virtual boost::optional<size_t> argMin() {
+        return boost::none;
+    }
+
+    virtual boost::optional<size_t> argMax() {
+        return boost::none;
+    }
+
+    // This function should never be used in loops or otherwise used repeatedly and should only be
+    // used when you *really* need to only access a single value.
+    virtual std::pair<value::TypeTags, value::Value> at(size_t idx);
+
+    /*
+     * Returns whether the block has any element of the given type, if it can be determined in
+     * O(1), otherwise returns boost::none.
+     */
+    virtual boost::optional<bool> tryHasArray() const {
+        return boost::none;
+    }
 
 protected:
     virtual DeblockedTagVals deblock(boost::optional<DeblockedTagValStorage>& storage) = 0;
@@ -289,9 +375,14 @@ protected:
     boost::optional<DeblockedTagValStorage> _deblockedStorage;
 };
 
+// Create the ValueBlock that best adapt to the provided data.
+std::unique_ptr<ValueBlock> buildBlockFromStorage(std::vector<value::TypeTags> tags,
+                                                  std::vector<value::Value> vals);
+
+// TODO SERVER-83799 Remove TypeTags::Boolean
 inline constexpr bool validHomogeneousType(TypeTags tag) {
     return tag == TypeTags::NumberInt32 || tag == TypeTags::NumberInt64 || tag == TypeTags::Date ||
-        tag == TypeTags::NumberDouble;
+        tag == TypeTags::NumberDouble || tag == TypeTags::Boolean;
 }
 
 /**
@@ -299,8 +390,9 @@ inline constexpr bool validHomogeneousType(TypeTags tag) {
  */
 class MonoBlock final : public ValueBlock {
 public:
+    static std::unique_ptr<MonoBlock> makeNothingBlock(size_t ct);
+
     MonoBlock(size_t count, TypeTags tag, Value val) : _count(count) {
-        tassert(7962102, "The number of values must be > 0", count > 0);
         std::tie(_tag, _val) = copyValue(tag, val);
     }
 
@@ -314,7 +406,7 @@ public:
         o._val = 0;
     }
 
-    ~MonoBlock() {
+    ~MonoBlock() override {
         releaseValue(_tag, _val);
     }
 
@@ -332,9 +424,11 @@ public:
             storage->vals.clear();
             storage->tags.resize(_count, _tag);
             storage->vals.resize(_count, _val);
+            storage->tag = _tag;
+            storage->isDense = _tag != TypeTags::Nothing;
         }
 
-        return {_count, storage->tags.data(), storage->vals.data()};
+        return {_count, storage->tags.data(), storage->vals.data(), storage->tag, storage->isDense};
     }
 
     boost::optional<size_t> tryCount() const override {
@@ -367,6 +461,10 @@ public:
         return std::make_unique<MonoBlock>(_count, fillTag, fillVal);
     }
 
+    std::unique_ptr<ValueBlock> fillType(uint32_t typeMask,
+                                         TypeTags fillTag,
+                                         Value fillVal) override;
+
     std::unique_ptr<ValueBlock> exists() override {
         return std::make_unique<MonoBlock>(
             _count, TypeTags::Boolean, value::bitcastFrom<bool>(*tryDense()));
@@ -378,6 +476,25 @@ public:
 
     Value getValue() const {
         return _val;
+    }
+
+    boost::optional<bool> allFalse() const override {
+        if (_tag != TypeTags::Boolean) {
+            return boost::none;
+        }
+        return !value::bitcastTo<bool>(_val);
+    }
+
+    boost::optional<bool> allTrue() const override {
+        if (_tag != TypeTags::Boolean) {
+            return boost::none;
+        }
+        return value::bitcastTo<bool>(_val);
+    }
+
+    std::pair<value::TypeTags, value::Value> at(size_t idx) override {
+        invariant(idx < _count);
+        return {_tag, _val};
     }
 
 private:
@@ -417,7 +534,7 @@ public:
     HeterogeneousBlock(std::vector<TypeTags> tags, std::vector<Value> vals, bool isDense = false)
         : _vals(std::move(vals)), _tags(std::move(tags)), _isDense(isDense) {}
 
-    ~HeterogeneousBlock() {
+    ~HeterogeneousBlock() override {
         release();
     }
 
@@ -446,20 +563,12 @@ public:
         return _vals.size();
     }
 
-    std::pair<TypeTags, Value> tryMin() const override {
-        return {TypeTags::Nothing, Value{0u}};
-    }
-
-    std::pair<TypeTags, Value> tryMax() const override {
-        return {TypeTags::Nothing, Value{0u}};
-    }
-
     boost::optional<bool> tryDense() const override {
         return _isDense;
     }
 
     DeblockedTagVals deblock(boost::optional<DeblockedTagValStorage>& storage) override {
-        return {_vals.size(), _tags.data(), _vals.data()};
+        return {_vals.size(), _tags.data(), _vals.data(), TypeTags::Nothing, _isDense};
     }
 
     std::unique_ptr<ValueBlock> clone() const override {
@@ -483,11 +592,6 @@ private:
     // True if all values are non-nothing.
     bool _isDense = false;
 };
-
-// For now we just use the out of the box boost dynamic_bitset. DynamicBitset from mongo/util does
-// not store the bit size, and does not have functionality like all() and push_back() which we need
-// here.
-using HomogeneousBlockBitset = boost::dynamic_bitset<size_t>;
 
 template <typename T, value::TypeTags TypeTag>
 class HomogeneousBlock : public ValueBlock {
@@ -532,12 +636,13 @@ public:
         } else {
             // The !std::is_same<T,T> is always false and will trigger a compile failure if this
             // branch is taken. If this branch is not taken, it will get discarded.
-            static_assert(!std::is_same<T, T>::value, "Not supported for deep types");
+            static_assert(!std::is_same<T, T>::value,
+                          "Constructor is only supported for BoolBlocks");
         }
     }
 
     HomogeneousBlock(std::vector<Value> input) : _vals(std::move(input)) {
-        if constexpr (DeblockedHomogeneousVals::validHomogeneousType(TypeTag)) {
+        if constexpr (validHomogeneousType(TypeTag)) {
             _presentBitset.resize(_vals.size(), true);
         } else {
             // The !std::is_same<T,T> is always false and will trigger a compile failure if this
@@ -546,26 +651,18 @@ public:
         }
     }
 
-    HomogeneousBlock(std::vector<Value> input, HomogeneousBlockBitset bitset) {
-        if constexpr (DeblockedHomogeneousVals::validHomogeneousType(TypeTag)) {
-            _vals.resize(input.size());
-            for (size_t i = 0; i < input.size(); ++i) {
-                _vals[i] = input[i];
-            }
-            _presentBitset = bitset;
-        } else {
+    HomogeneousBlock(std::vector<Value> input, HomogeneousBlockBitset bitset)
+        : _vals(std::move(input)), _presentBitset(std::move(bitset)) {
+        if constexpr (!validHomogeneousType(TypeTag)) {
             // The !std::is_same<T,T> is always false and will trigger a compile failure if this
             // branch is taken. If this branch is not taken, it will get discarded.
             static_assert(!std::is_same<T, T>::value, "Not supported for deep types");
         }
     }
 
-    boost::optional<DeblockedHomogeneousVals> extractHomogeneous() override {
-        return DeblockedHomogeneousVals{TypeTag, _presentBitset, std::span<Value>(_vals)};
-    }
-
     void clear() noexcept {
         _vals.clear();
+        _presentBitset.clear();
     }
 
     void reserve(size_t n) {
@@ -596,7 +693,7 @@ public:
     }
 
     boost::optional<bool> tryDense() const override {
-        return _presentBitset.all();
+        return _vals.size() == _presentBitset.size();
     }
 
     // getVector should be used in favor of this function if possible.
@@ -604,15 +701,13 @@ public:
         if (!storage) {
             storage = DeblockedTagValStorage{};
         }
+        storage->tag = TypeTag;
+        storage->isDense = *tryDense();
 
         // Fast path for dense case.
-        if (_presentBitset.all()) {
-            storage->vals.resize(_vals.size());
-            for (size_t i = 0; i < _presentBitset.size(); ++i) {
-                storage->vals[i] = _vals[i];
-            }
+        if (*tryDense()) {
             storage->tags.resize(_vals.size(), TypeTag);
-            return {storage->tags.size(), storage->tags.data(), storage->vals.data()};
+            return {_presentBitset.size(), storage->tags.data(), _vals.data()};
         }
 
         storage->vals.resize(_presentBitset.size());
@@ -629,20 +724,26 @@ public:
             }
         }
 
-        return {storage->tags.size(), storage->tags.data(), storage->vals.data()};
+        return {storage->tags.size(),
+                storage->tags.data(),
+                storage->vals.data(),
+                storage->tag,
+                storage->isDense};
     }
 
     std::unique_ptr<ValueBlock> clone() const override {
         return std::make_unique<HomogeneousBlock>(*this);
     }
 
-    std::unique_ptr<ValueBlock> map(const ColumnOp& op) override {
-        return defaultMapImpl(op);
-    }
+    std::unique_ptr<ValueBlock> map(const ColumnOp& op) override;
 
     TokenizedBlock tokenize() override;
 
     std::unique_ptr<ValueBlock> fillEmpty(TypeTags fillTag, Value fillVal) override;
+
+    std::unique_ptr<ValueBlock> fillType(uint32_t typeMask,
+                                         TypeTags fillTag,
+                                         Value fillVal) override;
 
     std::unique_ptr<ValueBlock> exists() override {
         if (_presentBitset.all()) {
@@ -661,6 +762,38 @@ public:
         // TODO SERVER-83799 Return a BitsetBlock.
         return std::make_unique<HomogeneousBlock<bool, TypeTags::Boolean>>(std::move(vals));
     }
+
+    boost::optional<bool> allFalse() const override {
+        if (TypeTag != TypeTags::Boolean || !_presentBitset.all()) {
+            return boost::none;
+        }
+        for (size_t i = 0; i < _vals.size(); ++i) {
+            if (value::bitcastTo<bool>(_vals[i])) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    boost::optional<bool> allTrue() const override {
+        if (TypeTag != TypeTags::Boolean || !_presentBitset.all()) {
+            return boost::none;
+        }
+        for (size_t i = 0; i < _vals.size(); ++i) {
+            if (!value::bitcastTo<bool>(_vals[i])) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    template <class Cmp>
+    boost::optional<size_t> argMinMaxImpl(Cmp cmp = {});
+
+    boost::optional<size_t> argMin() override;
+    boost::optional<size_t> argMax() override;
+
+    std::pair<value::TypeTags, value::Value> at(size_t idx) override;
 
     const std::vector<Value>& getVector() const {
         return _vals;

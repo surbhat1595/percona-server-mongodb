@@ -87,7 +87,7 @@ protected:
         return true;
     }
 
-    std::vector<PrfBlock> generateTags(BSONValue payload) const {
+    std::vector<PrfBlock> generateTags(BSONValue payload) const override {
         return visit(OverloadedVisitor{
                          [&](BSONElement p) {
                              ASSERT(p.isNumber());  // Only accept numbers as mock FFPs.
@@ -260,7 +260,7 @@ TEST_F(EqualityPredicateCollScanRewriteTest, Eq_Match) {
             }
         }
     })");
-    ASSERT_BSONOBJ_EQ(aggExpr->serialize(SerializationOptions{}).getDocument().toBson(), expected);
+    ASSERT_BSONOBJ_EQ(aggExpr->serialize().getDocument().toBson(), expected);
 }
 
 TEST_F(EqualityPredicateCollScanRewriteTest, Eq_Expr) {
@@ -282,7 +282,7 @@ TEST_F(EqualityPredicateCollScanRewriteTest, Eq_Expr) {
         }
     })");
     ASSERT(result);
-    ASSERT_BSONOBJ_EQ(result->serialize(SerializationOptions{}).getDocument().toBson(), expected);
+    ASSERT_BSONOBJ_EQ(result->serialize().getDocument().toBson(), expected);
 }
 
 TEST_F(EqualityPredicateCollScanRewriteTest, In_Match) {
@@ -371,7 +371,7 @@ TEST_F(EqualityPredicateCollScanRewriteTest, In_Expr) {
                     }
                 }}
             ]})");
-    ASSERT_BSONOBJ_EQ(result->serialize(SerializationOptions{}).getDocument().toBson(), expected);
+    ASSERT_BSONOBJ_EQ(result->serialize().getDocument().toBson(), expected);
 }
 
 }  // namespace

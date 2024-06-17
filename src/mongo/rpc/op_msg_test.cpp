@@ -828,9 +828,9 @@ protected:
     void setUp() final {
         auto authzManagerState = std::make_unique<AuthzManagerExternalStateMock>();
         auto authzManager = std::make_unique<AuthorizationManagerImpl>(
-            getServiceContext(), std::move(authzManagerState));
+            getServiceContext()->getService(), std::move(authzManagerState));
         authzManager->setAuthEnabled(true);
-        AuthorizationManager::set(getServiceContext(), std::move(authzManager));
+        AuthorizationManager::set(getService(), std::move(authzManager));
 
         client = getServiceContext()->getService()->makeClient("test");
     }
@@ -929,39 +929,28 @@ TEST_F(OpMsgWithAuth, ValidatedTenancyScopeShouldNotBeSerialized) {
 TEST(OpMsgRequest, GetDatabaseWorks) {
     OpMsgRequest msg;
     msg.body = fromjson("{$db: 'foo'}");
-    ASSERT_EQ(msg.getDatabase(), "foo");
+    ASSERT_EQ(msg.parseDbName().toString_forTest(), "foo");
 
     msg.body = fromjson("{before: 1, $db: 'foo'}");
-    ASSERT_EQ(msg.getDatabase(), "foo");
+    ASSERT_EQ(msg.parseDbName().toString_forTest(), "foo");
 
     msg.body = fromjson("{before: 1, $db: 'foo', after: 1}");
-    ASSERT_EQ(msg.getDatabase(), "foo");
+    ASSERT_EQ(msg.parseDbName().toString_forTest(), "foo");
 }
 
 TEST(OpMsgRequest, GetDatabaseThrowsWrongType) {
     OpMsgRequest msg;
     msg.body = fromjson("{$db: 1}");
-    ASSERT_THROWS(msg.getDatabase(), DBException);
+    ASSERT_THROWS(msg.parseDbName().toString_forTest(), DBException);
 }
 
 TEST(OpMsgRequest, GetDatabaseThrowsMissing) {
     OpMsgRequest msg;
     msg.body = fromjson("{}");
-    ASSERT_THROWS(msg.getDatabase(), AssertionException);
+    ASSERT_THROWS(msg.parseDbName().toString_forTest(), AssertionException);
 
     msg.body = fromjson("{$notdb: 'foo'}");
-    ASSERT_THROWS(msg.getDatabase(), AssertionException);
-}
-
-TEST(OpMsgRequestBuilder, WithTenantInDatabaseName) {
-    RAIIServerParameterControllerForTest multitenancyController("multitenancySupport", true);
-    RAIIServerParameterControllerForTest requireTenantIdController("featureFlagRequireTenantID",
-                                                                   true);
-    const TenantId tenantId(OID::gen());
-    auto const body = fromjson("{ping: 1}");
-    OpMsgRequest msg = OpMsgRequestBuilder::create(
-        DatabaseName::createDatabaseName_forTest(tenantId, "testDb"), body);
-    ASSERT_EQ(msg.getDatabase(), "testDb");
+    ASSERT_THROWS(msg.parseDbName().toString_forTest(), AssertionException);
 }
 
 TEST(OpMsgRequestBuilder, WithVTS) {
@@ -980,11 +969,11 @@ TEST(OpMsgRequestBuilder, WithVTS) {
     const StringData dbString = "testDb";
     auto const body = fromjson("{ping: 1}");
 
-    OpMsgRequest msg = OpMsgRequestBuilder::createWithValidatedTenancyScope(
-        DatabaseName::createDatabaseName_forTest(tenantId, dbString), vts, body);
+    OpMsgRequest msg = OpMsgRequestBuilder::create(
+        vts, DatabaseName::createDatabaseName_forTest(tenantId, dbString), body);
     ASSERT(msg.validatedTenancyScope);
     ASSERT_EQ(msg.validatedTenancyScope->tenantId(), tenantId);
-    ASSERT_EQ(msg.getDatabase(), dbString);
+    ASSERT_EQ(msg.parseDbName().toString_forTest(), dbString);
 }
 
 TEST(OpMsgRequestBuilder, WithVTSAndSerializationContextExpPrefixDefault) {
@@ -1006,14 +995,14 @@ TEST(OpMsgRequestBuilder, WithVTSAndSerializationContextExpPrefixDefault) {
         auth::ValidatedTenancyScope::TenantProtocol::kDefault,
         auth::ValidatedTenancyScopeFactory::TokenForTestingTag{});
 
-    OpMsgRequest msg = OpMsgRequestBuilder::createWithValidatedTenancyScope(
-        DatabaseName::createDatabaseName_forTest(tenantId, dbString), vts, body);
+    OpMsgRequest msg = OpMsgRequestBuilder::create(
+        vts, DatabaseName::createDatabaseName_forTest(tenantId, dbString), body);
     ASSERT(msg.validatedTenancyScope);
     ASSERT_EQ(msg.validatedTenancyScope->tenantId(), tenantId);
 
     // Missing expectPrefix in the request body.
     ASSERT_EQ(msg.body.getField("expectPrefix").eoo(), true);
-    ASSERT_EQ(msg.getDatabase(), dbString);
+    ASSERT_EQ(msg.parseDbName().toString_forTest(), dbString);
 }
 
 void CheckVtsSetsPrefix(Client* client, bool simulateAtlasProxyTenantProtocol) {
@@ -1094,7 +1083,7 @@ void CheckCommandMsgIdlParsingForOpMsgRequest(bool simulateAtlasProxyTenantProto
     auto op = InsertOp::parse(msg);
     ASSERT_EQ(op.getSerializationContext().getPrefix(),
               simulateAtlasProxyTenantProtocol ? SerializationContext::Prefix::IncludePrefix
-                                               : SerializationContext::Prefix::Default);
+                                               : SerializationContext::Prefix::ExcludePrefix);
 }
 
 TEST_F(OpMsgWithAuth, TestExpectPrefixTrueParsedInMsg) {
@@ -1134,11 +1123,11 @@ TEST(OpMsgRequestBuilder, WithVTSAndSerializationContextExpPrefixFalse) {
         auth::ValidatedTenancyScope::TenantProtocol::kDefault,
         auth::ValidatedTenancyScopeFactory::TokenForTestingTag{});
 
-    OpMsgRequest msg = OpMsgRequestBuilder::createWithValidatedTenancyScope(
-        DatabaseName::createDatabaseName_forTest(tenantId, dbString), vts, body);
+    OpMsgRequest msg = OpMsgRequestBuilder::create(
+        vts, DatabaseName::createDatabaseName_forTest(tenantId, dbString), body);
     ASSERT(msg.validatedTenancyScope);
     ASSERT_EQ(msg.validatedTenancyScope->tenantId(), tenantId);
-    ASSERT_EQ(msg.getDatabase(), dbString);
+    ASSERT_EQ(msg.parseDbName().toString_forTest(), dbString);
 }
 
 TEST(OpMsgRequestBuilder, WithVTSAndSerializationContextExpPrefixTrue) {
@@ -1160,16 +1149,11 @@ TEST(OpMsgRequestBuilder, WithVTSAndSerializationContextExpPrefixTrue) {
         auth::ValidatedTenancyScope::TenantProtocol::kAtlasProxy,
         auth::ValidatedTenancyScopeFactory::TokenForTestingTag{});
 
-    OpMsgRequest msg = OpMsgRequestBuilder::createWithValidatedTenancyScope(
-        DatabaseName::createDatabaseName_forTest(tenantId, dbString), vts, body);
+    OpMsgRequest msg = OpMsgRequestBuilder::create(
+        vts, DatabaseName::createDatabaseName_forTest(tenantId, dbString), body);
     ASSERT(msg.validatedTenancyScope);
     ASSERT_EQ(msg.validatedTenancyScope->tenantId(), tenantId);
-
-    // Received an expectPrefix=true in the request body.
-    ASSERT_EQ(msg.body.getField("expectPrefix").eoo(), false);
-    ASSERT_TRUE(msg.body.getField("expectPrefix").isBoolean());
-    ASSERT_EQ(msg.body.getField("expectPrefix").boolean(), true);
-    ASSERT_EQ(msg.getDatabase(), dbStringWithTid);
+    ASSERT_EQ(msg.parseDbName().toStringWithTenantId_forTest(), dbStringWithTid);
 }
 
 TEST(OpMsgRequestBuilder, CreateDoesNotCopy) {
@@ -1191,22 +1175,12 @@ TEST(OpMsgRequestBuilder, CreateDoesNotCopy) {
 
     auto body = fromjson("{ping: 1}");
     const void* const bodyPtr = body.objdata();
-    auto msg = OpMsgRequestBuilder::createWithValidatedTenancyScope(
-        DatabaseName::createDatabaseName_forTest(tenantId, "db"), vts, std::move(body));
+    auto msg = OpMsgRequestBuilder::create(
+        vts, DatabaseName::createDatabaseName_forTest(tenantId, "db"), std::move(body));
 
     auto const newBody = BSON("ping" << 1 << "$db"
                                      << "db");
     ASSERT_BSONOBJ_EQ(msg.body, newBody);
-    ASSERT_EQ(static_cast<const void*>(msg.body.objdata()), bodyPtr);
-}
-
-TEST(OpMsgRequest, FromDbAndBodyDoesNotCopy) {
-    auto body = fromjson("{ping: 1}");
-    const void* const bodyPtr = body.objdata();
-    auto msg = OpMsgRequest::fromDBAndBody(
-        DatabaseName::createDatabaseName_forTest(boost::none, "db"), std::move(body));
-
-    ASSERT_BSONOBJ_EQ(msg.body, fromjson("{ping: 1, $db: 'db'}"));
     ASSERT_EQ(static_cast<const void*>(msg.body.objdata()), bodyPtr);
 }
 
@@ -1237,47 +1211,91 @@ TEST_F(OpMsgWithAuth, GetDbNameWithVTS) {
     AuthorizationSessionImplTestHelper::grantUseTenant(*(client.get()));
 
     const auto kTenantId = TenantId(OID::gen());
-    auto createMsg = [&](bool prefixed) {
-        std::string db = prefixed ? kTenantId.toString() + "_myDb" : "myDb";
-        BSONObjBuilder builder;
-        builder.append("ping", 1).append("$db", db);
+    std::string db = "myDb";
+    BSONObjBuilder builder;
+    builder.append("ping", 1).append("$db", db);
 
-        const auto body = builder.obj();
-        OpMsg msg =
-            OpMsgBytes{
-                kNoFlags,  //
-                kBodySection,
-                body,
-                kDocSequenceSection,
-                Sized{
-                    "docs",  //
-                    fromjson("{a: 1}"),
-                    fromjson("{a: 2}"),
-                },
-            }
-                .parse(client.get());
-        return msg;
-    };
+    const auto token = auth::ValidatedTenancyScopeFactory::create(
+                           kTenantId,
+                           auth::ValidatedTenancyScope::TenantProtocol::kDefault,
+                           auth::ValidatedTenancyScopeFactory::TenantForTestingTag{})
+                           .getOriginalToken()
+                           .toString();
+
+    const auto body = builder.obj();
+    OpMsg msg =
+        OpMsgBytes{
+            kNoFlags,
+            kBodySection,
+            body,
+            kDocSequenceSection,
+            Sized{
+                "docs",
+                fromjson("{a: 1}"),
+                fromjson("{a: 2}"),
+            },
+            kSecurityTokenSection,
+            token,
+        }
+            .parse(client.get());
+
 
     const DatabaseName expectedTenantDbName =
         DatabaseName::createDatabaseName_forTest(kTenantId, "myDb");
     using SC = SerializationContext;
 
     // Test the request which has tenant prefix.
-    OpMsgRequest request = OpMsgRequest(createMsg(true));
+    OpMsgRequest request = OpMsgRequest(std::move(msg));
     ASSERT_EQ(request.getSerializationContext(),
               SerializationContext(
-                  SC::Source::Command, SC::CallerType::Request, SC::Prefix::Default, false));
-    ASSERT_EQ(request.getDbName(), expectedTenantDbName);
+                  SC::Source::Command, SC::CallerType::Request, SC::Prefix::ExcludePrefix));
+    ASSERT_EQ(request.parseDbName(), expectedTenantDbName);
+}
+
+TEST_F(OpMsgWithAuth, GetDbNameWithVTSIncludePrefix) {
+    RAIIServerParameterControllerForTest multitenancyController("multitenancySupport", true);
+    AuthorizationSessionImplTestHelper::grantUseTenant(*(client.get()));
+
+    const auto kTenantId = TenantId(OID::gen());
+    std::string db = kTenantId.toString() + "_myDb";
+    BSONObjBuilder builder;
+    builder.append("ping", 1).append("$db", db);
+
+    const auto token = auth::ValidatedTenancyScopeFactory::create(
+                           kTenantId,
+                           auth::ValidatedTenancyScope::TenantProtocol::kAtlasProxy,
+                           auth::ValidatedTenancyScopeFactory::TenantForTestingTag{})
+                           .getOriginalToken()
+                           .toString();
+
+    const auto body = builder.obj();
+    OpMsg msg =
+        OpMsgBytes{
+            kNoFlags,  //
+            kBodySection,
+            body,
+            kDocSequenceSection,
+            Sized{
+                "docs",  //
+                fromjson("{a: 1}"),
+                fromjson("{a: 2}"),
+            },
+            kSecurityTokenSection,
+            token,
+        }
+            .parse(client.get());
+
+    const DatabaseName expectedTenantDbName =
+        DatabaseName::createDatabaseName_forTest(kTenantId, "myDb");
+    using SC = SerializationContext;
 
     // Test the request which does not have tenant prefix.
-    const DatabaseName expectedDbName =
-        DatabaseName::createDatabaseName_forTest(boost::none, "myDb");
-    request = OpMsgRequest(createMsg(false));
+    const DatabaseName expectedDbName = DatabaseName::createDatabaseName_forTest(kTenantId, "myDb");
+    OpMsgRequest request{std::move(msg)};
     ASSERT_EQ(request.getSerializationContext(),
               SerializationContext(
-                  SC::Source::Command, SC::CallerType::Request, SC::Prefix::Default, false));
-    ASSERT_THROWS_CODE(request.getDbName(), AssertionException, 8423388 /*"TenantId must be set"*/);
+                  SC::Source::Command, SC::CallerType::Request, SC::Prefix::IncludePrefix));
+    ASSERT_EQ(request.parseDbName(), expectedDbName);
 }
 
 }  // namespace

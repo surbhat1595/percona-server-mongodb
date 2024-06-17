@@ -284,7 +284,7 @@ void DropDatabaseCoordinator::_dropShardedCollection(
         auto opts = std::make_shared<async_rpc::AsyncRPCOptions<ShardsvrParticipantBlock>>(
             **executor, token, unblockCRUDOperationsRequest, args);
         sharding_ddl_util::sendAuthenticatedCommandToShards(
-            opCtx, opts, Grid::get(opCtx)->shardRegistry()->getAllShardIds(opCtx));
+            opCtx, opts, getAllShardsAndConfigServerIds(opCtx));
     }
 }
 
@@ -417,7 +417,8 @@ ExecutorFuture<void> DropDatabaseCoordinator::_runImpl(
                     {
                         DBDirectClient dbDirectClient(opCtx);
                         const auto commandResponse =
-                            dbDirectClient.runCommand(OpMsgRequest::fromDBAndBody(_dbName, cmdObj));
+                            dbDirectClient.runCommand(OpMsgRequestBuilder::create(
+                                auth::ValidatedTenancyScope::get(opCtx), _dbName, cmdObj));
                         uassertStatusOK(
                             getStatusFromCommandResult(commandResponse->getCommandReply()));
 

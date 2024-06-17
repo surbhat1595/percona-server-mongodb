@@ -43,6 +43,7 @@
 
 #include "mongo/base/error_codes.h"
 #include "mongo/bson/bsonelement.h"
+#include "mongo/db/admission/execution_admission_context.h"
 #include "mongo/db/audit.h"
 #include "mongo/db/catalog/catalog_control.h"
 #include "mongo/db/catalog/clustered_collection_options_gen.h"
@@ -104,7 +105,7 @@ MONGO_FAIL_POINT_DEFINE(pauseTimestampMonitor);
 MONGO_FAIL_POINT_DEFINE(setMinVisibleForAllCollectionsToOldestOnStartup);
 
 namespace {
-const std::string kCatalogInfo = DatabaseName::kMdbCatalog.db().toString();
+const std::string kCatalogInfo = DatabaseName::kMdbCatalog.db(omitTenant).toString();
 const NamespaceString kCatalogInfoNamespace = NamespaceString(DatabaseName::kMdbCatalog);
 const auto kCatalogLogLevel = logv2::LogSeverity::Debug(2);
 }  // namespace
@@ -927,8 +928,12 @@ void StorageEngineImpl::startTimestampMonitor() {
     _timestampMonitor->addListener(&_collectionCatalogCleanupTimestampListener);
 }
 
-void StorageEngineImpl::notifyStartupComplete(OperationContext* opCtx) {
-    _engine->notifyStartupComplete(opCtx);
+void StorageEngineImpl::notifyStorageStartupRecoveryComplete() {
+    _engine->notifyStorageStartupRecoveryComplete();
+}
+
+void StorageEngineImpl::notifyReplStartupRecoveryComplete(OperationContext* opCtx) {
+    _engine->notifyReplStartupRecoveryComplete(opCtx);
 }
 
 RecoveryUnit* StorageEngineImpl::newRecoveryUnit() {
@@ -1134,8 +1139,7 @@ void StorageEngineImpl::setOldestTimestampFromStable() {
     _engine->setOldestTimestampFromStable();
 }
 
-void StorageEngineImpl::setOldestTimestamp(Timestamp newOldestTimestamp) {
-    const bool force = true;
+void StorageEngineImpl::setOldestTimestamp(Timestamp newOldestTimestamp, bool force) {
     _engine->setOldestTimestamp(newOldestTimestamp, force);
 }
 
@@ -1324,8 +1328,8 @@ void StorageEngineImpl::TimestampMonitor::_startup() {
 
                 // The TimestampMonitor is an important background cleanup task for the storage
                 // engine and needs to be able to make progress to free up resources.
-                ScopedAdmissionPriorityForLock immediatePriority(
-                    shard_role_details::getLocker(opCtx), AdmissionContext::Priority::kImmediate);
+                ScopedAdmissionPriority<ExecutionAdmissionContext> immediatePriority(
+                    opCtx, AdmissionContext::Priority::kExempt);
 
                 Timestamp checkpoint;
                 Timestamp oldest;

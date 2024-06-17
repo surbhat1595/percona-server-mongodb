@@ -266,7 +266,7 @@ TEST_F(StorageEngineTest, TemporaryRecordStoreDoesNotTrackSizeAdjustments) {
 
 class StorageEngineTimestampMonitorTest : public StorageEngineTest {
 public:
-    void setUp() {
+    void setUp() override {
         StorageEngineTest::setUp();
         _storageEngine->startTimestampMonitor();
     }
@@ -611,15 +611,15 @@ public:
     }
 
     // Increment the timestamps each time they are called for testing purposes.
-    virtual Timestamp getCheckpointTimestamp() const override {
+    Timestamp getCheckpointTimestamp() const override {
         checkpointTimestamp = std::make_unique<Timestamp>(checkpointTimestamp->getInc() + 1);
         return *checkpointTimestamp;
     }
-    virtual Timestamp getOldestTimestamp() const override {
+    Timestamp getOldestTimestamp() const override {
         oldestTimestamp = std::make_unique<Timestamp>(oldestTimestamp->getInc() + 1);
         return *oldestTimestamp;
     }
-    virtual Timestamp getStableTimestamp() const override {
+    Timestamp getStableTimestamp() const override {
         stableTimestamp = std::make_unique<Timestamp>(stableTimestamp->getInc() + 1);
         return *stableTimestamp;
     }
@@ -638,7 +638,7 @@ public:
     /**
      * Create an instance of the KV Storage Engine so that we have a timestamp monitor operating.
      */
-    void setUp() {
+    void setUp() override {
         ServiceContextTest::setUp();
 
         auto opCtx = makeOperationContext();
@@ -655,7 +655,7 @@ public:
         _storageEngine->startTimestampMonitor();
     }
 
-    void tearDown() {
+    void tearDown() override {
         _storageEngine->cleanShutdown(getServiceContext());
         _storageEngine.reset();
 
@@ -739,15 +739,17 @@ TEST_F(TimestampKVEngineTest, TimestampMonitorNotifiesListeners) {
     _storageEngine->getTimestampMonitor()->addListener(&fourth);
 
     // Wait until all 4 listeners get notified at least once.
-    stdx::unique_lock<Latch> lk(mutex);
-    cv.wait(lk, [&] {
-        for (auto const& change : changes) {
-            if (!change) {
-                return false;
+    {
+        stdx::unique_lock<Latch> lk(mutex);
+        cv.wait(lk, [&] {
+            for (auto const& change : changes) {
+                if (!change) {
+                    return false;
+                }
             }
-        }
-        return true;
-    });
+            return true;
+        });
+    };
 
     _storageEngine->getTimestampMonitor()->clearListeners();
 }
@@ -790,7 +792,7 @@ TEST_F(StorageEngineTestNotEphemeral, UseAlternateStorageLocation) {
         reinitializeStorageEngine(opCtx.get(), StorageEngineInitFlags{}, [&newPath] {
             storageGlobalParams.dbpath = newPath;
         });
-    getGlobalServiceContext()->getStorageEngine()->notifyStartupComplete(opCtx.get());
+    getGlobalServiceContext()->getStorageEngine()->notifyStorageStartupRecoveryComplete();
     LOGV2(5781103, "Started up storage engine in alternate location");
     ASSERT(StorageEngine::LastShutdownState::kClean == lastShutdownState);
     StorageEngineTest::_storageEngine = getServiceContext()->getStorageEngine();
@@ -808,7 +810,7 @@ TEST_F(StorageEngineTestNotEphemeral, UseAlternateStorageLocation) {
         reinitializeStorageEngine(opCtx.get(), StorageEngineInitFlags{}, [&oldPath] {
             storageGlobalParams.dbpath = oldPath;
         });
-    getGlobalServiceContext()->getStorageEngine()->notifyStartupComplete(opCtx.get());
+    getGlobalServiceContext()->getStorageEngine()->notifyStorageStartupRecoveryComplete();
     ASSERT(StorageEngine::LastShutdownState::kClean == lastShutdownState);
     StorageEngineTest::_storageEngine = getServiceContext()->getStorageEngine();
     ASSERT_TRUE(collectionExists(opCtx.get(), coll1Ns));

@@ -40,6 +40,8 @@ def compare_optime(optime1, optime2):
 class ReplicaSetFixture(interface.ReplFixture, interface._DockerComposeInterface):
     """Fixture which provides JSTests with a replica set to run against."""
 
+    AWAIT_SHARDING_INITIALIZATION_TIMEOUT_SECS = 60
+
     def __init__(self, logger, job_num, fixturelib, mongod_executable=None, mongod_options=None,
                  dbpath_prefix=None, preserve_dbpath=False, num_nodes=2,
                  start_initial_sync_node=False, electable_initial_sync_node=False,
@@ -47,9 +49,9 @@ class ReplicaSetFixture(interface.ReplFixture, interface._DockerComposeInterface
                  replset_config_options=None, voting_secondaries=True, all_nodes_electable=False,
                  use_replica_set_connection_string=None, linear_chain=False,
                  default_read_concern=None, default_write_concern=None, shard_logging_prefix=None,
-                 replicaset_logging_prefix=None, replset_name=None, config_shard=None,
+                 replicaset_logging_prefix=None, replset_name=None,
                  use_auto_bootstrap_procedure=None, initial_sync_uninitialized_fcv=False,
-                 hide_initial_sync_node_from_conn_string=False):
+                 hide_initial_sync_node_from_conn_string=False, launch_mongot=False):
         """Initialize ReplicaSetFixture."""
 
         interface.ReplFixture.__init__(self, logger, job_num, fixturelib,
@@ -79,7 +81,8 @@ class ReplicaSetFixture(interface.ReplFixture, interface._DockerComposeInterface
         # Used by the enhanced multiversion system to signify multiversion mode.
         # None implies no multiversion run.
         self.fcv = None
-
+        # Used by suites that run search integration tests.
+        self.launch_mongot = launch_mongot
         # Use the values given from the command line if they exist for linear_chain and num_nodes.
         linear_chain_option = self.fixturelib.default_if_none(self.config.LINEAR_CHAIN,
                                                               linear_chain)
@@ -116,8 +119,9 @@ class ReplicaSetFixture(interface.ReplFixture, interface._DockerComposeInterface
             self.replset_name = self.mongod_options.setdefault("replSet", self.replset_name)
         self.initial_sync_node = None
         self.initial_sync_node_idx = -1
-        self.config_shard = config_shard
         self.use_auto_bootstrap_procedure = use_auto_bootstrap_procedure
+        # This will be set in setup() after the MongoTFixture has been launched.
+        self.mongot_port = None
 
     def setup(self):
         """Set up the replica set."""
@@ -263,9 +267,27 @@ class ReplicaSetFixture(interface.ReplFixture, interface._DockerComposeInterface
         self._await_secondaries()
         self._await_newly_added_removals()
 
-    def _all_mongo_d_s(self):
-        """Return a list of all `mongo{d,s}` `Process` instances in this fixture."""
-        return sum([node._all_mongo_d_s() for node in self.nodes], [])
+        if self.launch_mongot:
+            # To model Atlas Search's coupled architecture, resmoke deploys a mongot for each
+            # mongod node in a replica set.
+            for node in self.nodes:
+                node.setup_mongot()
+            # Saving the mongot port to the ReplicaSetFixture allows the ShardedClusterFixture
+            # to spin up a mongos with a connection to the last launched mongot.
+            self.mongot_port = node.mongot_port
+
+    def _all_mongo_d_s_t(self):
+        """Return a list of all `mongo{d,s,t}` `Process` instances in this fixture."""
+        nodes = sum([node._all_mongo_d_s_t() for node in self.nodes], [])
+
+        if self.initial_sync_node:
+            nodes.extend(self.initial_sync_node._all_mongo_d_s_t())
+
+        return nodes
+
+    def _all_mongots(self):
+        """Return a list of all `mongot` `Process` instances in this fixture."""
+        return [node.mongot for node in self.nodes]
 
     def pids(self):
         """:return: all pids owned by this fixture if any."""
@@ -370,6 +392,9 @@ class ReplicaSetFixture(interface.ReplFixture, interface._DockerComposeInterface
         self._await_secondaries()
         self._await_stable_recovery_timestamp()
         self._setup_cwrwc_defaults()
+        if self.use_auto_bootstrap_procedure:
+            # TODO: Remove this in SERVER-80010.
+            self._await_auto_bootstrapped_config_shard()
 
     def _await_primary(self):
         # Wait for the primary to be elected.
@@ -514,6 +539,32 @@ class ReplicaSetFixture(interface.ReplFixture, interface._DockerComposeInterface
         primary = self.nodes[0]
         primary.mongo_client().admin.command(cmd)
 
+    # TODO: Remove this in SERVER-80010.
+    def _await_auto_bootstrapped_config_shard(self):
+        connection_string = self.get_driver_connection_url()
+        self.logger.info("Waiting for %s to auto-bootstrap as a config shard...", connection_string)
+
+        deadline = time.time() + ReplicaSetFixture.AWAIT_SHARDING_INITIALIZATION_TIMEOUT_SECS
+        timeout_occurred = lambda: deadline - time.time() <= 0.0
+
+        while True:
+            client = interface.build_client(self.get_primary(), self.auth_options)
+            config_shard_count = client.get_database("config").command(
+                {"count": "shards", "query": {"_id": "config"}})
+
+            if config_shard_count['n'] == 1:
+                break
+
+            if timeout_occurred():
+                port = self.get_primary().port
+                raise self.fixturelib.ServerFailure(
+                    "mongod on port: {} failed waiting for auto-bootstrapped config shard success after {} seconds"
+                    .format(port, interface.Fixture.AWAIT_READY_TIMEOUT_SECS))
+            time.sleep(0.1)
+
+        self.logger.info("%s successfully auto-bootstrapped as a config shard...",
+                         connection_string)
+
     def _check_initial_sync_node_has_uninitialized_fcv(self, initial_sync_node):
         sync_node_conn = initial_sync_node.mongo_client()
         self.logger.info("Checking that initial sync node has uninitialized fcv")
@@ -592,7 +643,7 @@ class ReplicaSetFixture(interface.ReplFixture, interface._DockerComposeInterface
         running = all(node.is_running() for node in self.nodes)
 
         if self.initial_sync_node:
-            running = self.initial_sync_node.is_running() or running
+            running = self.initial_sync_node.is_running() and running
 
         return running
 

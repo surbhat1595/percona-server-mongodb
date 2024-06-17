@@ -48,6 +48,7 @@
 #include "mongo/db/server_feature_flags_gen.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/base64.h"
+#include "mongo/util/net/socket_utils.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kAccessControl
 
@@ -165,13 +166,16 @@ ValidatedTenancyScope ValidatedTenancyScopeFactory::parseUnsignedToken(Client* c
             "Unexpected signature on unsigned security token",
             parsed.signature.empty());
 
-    auto* as = AuthorizationSession::get(client);
-    uassert(ErrorCodes::Unauthorized,
-            "Use of unsigned security token requires either useTenant privilege or a system "
-            "connection",
-            as->isAuthorizedForActionsOnResource(ResourcePattern::forClusterResource(boost::none),
-                                                 ActionType::useTenant) ||
-                client->isFromSystemConnection());
+    // This function is used in the shell for testing which lacks AuthorizationSession
+    if (AuthorizationSession::exists(client)) {
+        auto* as = AuthorizationSession::get(client);
+        uassert(ErrorCodes::Unauthorized,
+                "Use of unsigned security token requires either useTenant privilege or a system "
+                "connection",
+                as->isAuthorizedForActionsOnResource(
+                    ResourcePattern::forClusterResource(boost::none), ActionType::useTenant) ||
+                    client->isFromSystemConnection());
+    }
 
     auto jwt = crypto::JWT::parse(ctxt, decodeJSON(parsed.body));
     uassert(ErrorCodes::Unauthorized,
@@ -243,38 +247,18 @@ ValidatedTenancyScope ValidatedTenancyScopeFactory::parseToken(Client* client,
 }
 
 boost::optional<ValidatedTenancyScope> ValidatedTenancyScopeFactory::parse(
-    Client* client, BSONObj body, StringData securityToken) {
+    Client* client, StringData securityToken) {
 
     if (!gMultitenancySupport) {
         return boost::none;
     }
 
-    auto dollarTenantElem = body["$tenant"_sd];
-
-    uassert(6545800,
-            "Cannot pass $tenant id if also passing securityToken",
-            dollarTenantElem.eoo() || securityToken.empty());
-    uassert(ErrorCodes::OperationFailed,
-            "Cannot process $tenant id when no client is available",
-            dollarTenantElem.eoo() || client);
-
     // TODO SERVER-66822: Re-enable this uassert.
     // uassert(ErrorCodes::Unauthorized,
-    //         "Multitenancy is enabled, $tenant id or securityToken is required.",
-    //         dollarTenantElem || opMsg.securityToken.nFields() > 0);
+    //         "Multitenancy is enabled, securityToken is required.",
+    //         opMsg.securityToken.nFields() > 0);
 
-    if (dollarTenantElem) {
-        auto as = AuthorizationSession::get(client);
-        // The useTenant action type allows the action of impersonating any tenant, so we check
-        // against the cluster resource with the current authenticated user's tenant ID rather than
-        // the specific tenant ID being impersonated.
-        uassert(
-            ErrorCodes::Unauthorized,
-            "'$tenant' may only be specified with the useTenant action type",
-            as->isAuthorizedForActionsOnResource(
-                ResourcePattern::forClusterResource(as->getUserTenantId()), ActionType::useTenant));
-        return ValidatedTenancyScope(TenantId::parseFromBSON(dollarTenantElem));
-    } else if (!securityToken.empty()) {
+    if (!securityToken.empty()) {
         // Unsigned tenantId provided via highly privileged connection will respect tenantId field
         // only.
         if (securityToken.ends_with('.')) {
@@ -357,7 +341,53 @@ ValidatedTenancyScope ValidatedTenancyScopeFactory::create(std::string token, In
 
 ValidatedTenancyScope ValidatedTenancyScopeFactory::create(TenantId tenant,
                                                            TrustedForInnerOpMsgRequestTag) {
-    return ValidatedTenancyScope(std::move(tenant));
+    crypto::JWSHeader header;
+    header.setType("JWT"_sd);
+    header.setAlgorithm("none"_sd);
+    header.setKeyId("none"_sd);
+
+    crypto::JWT body;
+    body.setIssuer("mongodb://{}"_format(prettyHostNameAndPort(serverGlobalParams.port)));
+    body.setSubject(".");
+    body.setAudience(std::string{"interal-request"});
+    body.setTenantId(tenant);
+    body.setExpiration(Date_t::max());
+    body.setExpectPrefix(false);  // Always use default protocol, not expect prefix.
+
+    const std::string originalToken = "{}.{}."_format(base64url::encode(tojson(header.toBSON())),
+                                                      base64url::encode(tojson(body.toBSON())));
+    return ValidatedTenancyScope(
+        originalToken, std::move(tenant), ValidatedTenancyScope::TenantProtocol::kDefault);
 }
+
+ValidatedTenancyScopeGuard::ValidatedTenancyScopeGuard(OperationContext* opCtx) : _opCtx(opCtx) {
+    _validatedTenancyScope = ValidatedTenancyScope::get(opCtx);
+    ValidatedTenancyScope::set(opCtx, boost::none);
+
+    _tenantProtocol = tenantProtocolDecoration(_opCtx->getClient());
+    if (_tenantProtocol) {
+        tenantProtocolDecoration(_opCtx->getClient()) =
+            auth::ValidatedTenancyScope::TenantProtocol::kDefault;
+    }
+}
+
+ValidatedTenancyScopeGuard::~ValidatedTenancyScopeGuard() {
+    ValidatedTenancyScope::set(_opCtx, _validatedTenancyScope);
+    tenantProtocolDecoration(_opCtx->getClient()) = _tenantProtocol;
+};
+
+void ValidatedTenancyScopeGuard::runAsTenant(OperationContext* opCtx,
+                                             const boost::optional<TenantId>& tenantId,
+                                             std::function<void()> workFunc) {
+    auth::ValidatedTenancyScopeGuard tenancyStasher(opCtx);
+    const auto vts = tenantId
+        ? boost::make_optional(auth::ValidatedTenancyScopeFactory::create(
+              *tenantId, auth::ValidatedTenancyScopeFactory::TrustedForInnerOpMsgRequestTag{}))
+        : boost::none;
+    auth::ValidatedTenancyScope::set(opCtx, vts);
+
+    workFunc();
+}
+
 
 }  // namespace mongo::auth

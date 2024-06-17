@@ -48,23 +48,17 @@
 #include "mongo/db/encryption/encryption_options.h"
 #include "mongo/db/encryption/key_id.h"
 #include "mongo/db/exec/scoped_timer.h"
-#include "mongo/db/feature_flag.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/storage/control/storage_control.h"
-#include "mongo/db/storage/execution_control/concurrency_adjustment_parameters_gen.h"
-#include "mongo/db/storage/execution_control/throughput_probing.h"
 #include "mongo/db/storage/master_key_rotation_completed.h"
 #include "mongo/db/storage/recovery_unit.h"
 #include "mongo/db/storage/recovery_unit_noop.h"
 #include "mongo/db/storage/storage_engine_change_context.h"
-#include "mongo/db/storage/storage_engine_feature_flags_gen.h"
 #include "mongo/db/storage/storage_engine_lock_file.h"
 #include "mongo/db/storage/storage_engine_metadata.h"
-#include "mongo/db/storage/storage_engine_parameters_gen.h"
 #include "mongo/db/storage/storage_options.h"
 #include "mongo/db/storage/storage_parameters_gen.h"
 #include "mongo/db/storage/storage_repair_observer.h"
-#include "mongo/db/storage/ticketholder_manager.h"
 #include "mongo/db/storage/write_unit_of_work.h"
 #include "mongo/db/transaction_resources.h"
 #include "mongo/logv2/log.h"
@@ -72,8 +66,6 @@
 #include "mongo/logv2/log_component.h"
 #include "mongo/platform/atomic_word.h"
 #include "mongo/util/assert_util.h"
-#include "mongo/util/concurrency/priority_ticketholder.h"
-#include "mongo/util/concurrency/semaphore_ticketholder.h"  // IWYU pragma: keep
 #include "mongo/util/decorable.h"
 #include "mongo/util/quick_exit.h"
 #include "mongo/util/scopeguard.h"
@@ -222,79 +214,6 @@ StorageEngine::LastShutdownState initializeStorageEngine(
 
     // This should be set once during startup.
     if ((initFlags & StorageEngineInitFlags::kForRestart) == StorageEngineInitFlags{}) {
-        auto readTransactions = gConcurrentReadTransactions.load();
-        auto writeTransactions = gConcurrentWriteTransactions.load();
-        static constexpr auto DEFAULT_TICKETS_VALUE = 128;
-        bool userSetConcurrency = false;
-
-        userSetConcurrency = readTransactions != 0 || writeTransactions != 0;
-        readTransactions = readTransactions == 0 ? DEFAULT_TICKETS_VALUE : readTransactions;
-        writeTransactions = writeTransactions == 0 ? DEFAULT_TICKETS_VALUE : writeTransactions;
-
-        if (userSetConcurrency) {
-            // If the user manually set concurrency limits, then disable execution control
-            // implicitly.
-            gStorageEngineConcurrencyAdjustmentAlgorithm = "fixedConcurrentTransactions";
-        }
-
-        auto svcCtx = opCtx->getServiceContext();
-
-        auto usingThroughputProbing =
-            StorageEngineConcurrencyAdjustmentAlgorithm_parse(
-                IDLParserContext{"storageEngineConcurrencyAdjustmentAlgorithm"},
-                gStorageEngineConcurrencyAdjustmentAlgorithm) ==
-            StorageEngineConcurrencyAdjustmentAlgorithmEnum::kThroughputProbing;
-        auto makeTicketHolderManager =
-            [&](auto readTicketHolder,
-                auto writeTicketHolder) -> std::unique_ptr<TicketHolderManager> {
-            if (usingThroughputProbing) {
-                return std::make_unique<ThroughputProbingTicketHolderManager>(
-                    svcCtx,
-                    std::move(readTicketHolder),
-                    std::move(writeTicketHolder),
-                    Milliseconds{gStorageEngineConcurrencyAdjustmentIntervalMillis});
-            } else {
-                return std::make_unique<FixedTicketHolderManager>(std::move(readTicketHolder),
-                                                                  std::move(writeTicketHolder));
-            }
-        };
-
-        if (feature_flags::gFeatureFlagDeprioritizeLowPriorityOperations.isEnabled(
-                serverGlobalParams.featureCompatibility.acquireFCVSnapshot())) {
-            std::unique_ptr<TicketHolderManager> ticketHolderManager;
-#ifdef __linux__
-            LOGV2_DEBUG(6902900, 1, "Using Priority Queue-based ticketing scheduler");
-
-            auto lowPriorityBypassThreshold = gLowPriorityAdmissionBypassThreshold.load();
-            ticketHolderManager = makeTicketHolderManager(
-                std::make_unique<PriorityTicketHolder>(
-                    svcCtx, readTransactions, lowPriorityBypassThreshold, usingThroughputProbing),
-                std::make_unique<PriorityTicketHolder>(
-                    svcCtx, writeTransactions, lowPriorityBypassThreshold, usingThroughputProbing));
-#else
-            LOGV2_DEBUG(7207201, 1, "Using semaphore-based ticketing scheduler");
-            // PriorityTicketHolder is implemented using an equivalent mechanism to
-            // std::atomic::wait which isn't available until C++20. We've implemented it in Linux
-            // using futex calls. As this hasn't been implemented in non-Linux platforms we fallback
-            // to the existing semaphore implementation even if the feature flag is enabled.
-            //
-            // TODO SERVER-72616: Remove the ifdefs once TicketPool is implemented with atomic
-            // wait.
-            ticketHolderManager =
-                makeTicketHolderManager(std::make_unique<SemaphoreTicketHolder>(
-                                            svcCtx, readTransactions, usingThroughputProbing),
-                                        std::make_unique<SemaphoreTicketHolder>(
-                                            svcCtx, writeTransactions, usingThroughputProbing));
-#endif
-            TicketHolderManager::use(svcCtx, std::move(ticketHolderManager));
-        } else {
-            auto ticketHolderManager =
-                makeTicketHolderManager(std::make_unique<SemaphoreTicketHolder>(
-                                            svcCtx, readTransactions, usingThroughputProbing),
-                                        std::make_unique<SemaphoreTicketHolder>(
-                                            svcCtx, writeTransactions, usingThroughputProbing));
-            TicketHolderManager::use(svcCtx, std::move(ticketHolderManager));
-        }
     }
 
     // copy the identifier of the configured key (if any) from the metadata to
@@ -325,11 +244,11 @@ StorageEngine::LastShutdownState initializeStorageEngine(
             service->setStorageEngine(std::move(storageEngine));
         } else {
             auto storageEngineChangeContext = StorageEngineChangeContext::get(service);
-            auto token = storageEngineChangeContext->killOpsForStorageEngineChange(service);
+            auto lk = storageEngineChangeContext->killOpsForStorageEngineChange(service);
             auto storageEngine = std::unique_ptr<StorageEngine>(
                 factory->create(opCtx, storageGlobalParams, lockFile ? &*lockFile : nullptr));
             storageEngineChangeContext->changeStorageEngine(
-                service, std::move(token), std::move(storageEngine));
+                service, std::move(lk), std::move(storageEngine));
         }
     } catch (const MasterKeyRotationCompleted&) {
         const encryption::WtKeyIds& keyIds = encryption::WtKeyIds::instance();

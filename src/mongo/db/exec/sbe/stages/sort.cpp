@@ -45,9 +45,7 @@
 #include "mongo/db/exec/sbe/size_estimator.h"
 #include "mongo/db/exec/sbe/stages/sort.h"
 #include "mongo/db/exec/sbe/values/row.h"
-#include "mongo/db/exec/trial_run_tracker.h"
 #include "mongo/db/sorter/sorter.h"
-#include "mongo/db/stats/resource_consumption_metrics.h"
 #include "mongo/db/storage/storage_options.h"
 #include "mongo/platform/atomic_word.h"
 #include "mongo/util/assert_util.h"
@@ -71,9 +69,14 @@ SortStage::SortStage(std::unique_ptr<PlanStage> input,
                      std::unique_ptr<EExpression> limit,
                      size_t memoryLimit,
                      bool allowDiskUse,
+                     PlanYieldPolicy* yieldPolicy,
                      PlanNodeId planNodeId,
                      bool participateInTrialRunTracking)
-    : PlanStage("sort"_sd, planNodeId, participateInTrialRunTracking),
+    : PlanStage("sort"_sd,
+                yieldPolicy,
+                planNodeId,
+                participateInTrialRunTracking,
+                TrialRunTrackingType::TrackResults),
       _obs(std::move(obs)),
       _dirs(std::move(dirs)),
       _vals(std::move(vals)),
@@ -117,8 +120,9 @@ std::unique_ptr<PlanStage> SortStage::clone() const {
                                        _limitExpr ? _limitExpr->clone() : nullptr,
                                        _specificStats.maxMemoryUsageBytes,
                                        _allowDiskUse,
+                                       _yieldPolicy,
                                        _commonStats.nodeId,
-                                       _participateInTrialRunTracking);
+                                       participateInTrialRunTracking());
 }
 
 template <typename KeyType, typename ValueType>
@@ -152,23 +156,6 @@ std::unique_ptr<SortStage::SortIface> SortStage::makeStageImplInternal(size_t ke
 
 std::unique_ptr<SortStage::SortIface> SortStage::makeStageImpl() {
     return makeStageImplInternal(_obs.size(), _vals.size());
-}
-
-void SortStage::doDetachFromTrialRunTracker() {
-    _tracker = nullptr;
-}
-
-PlanStage::TrialRunTrackerAttachResultMask SortStage::doAttachToTrialRunTracker(
-    TrialRunTracker* tracker, TrialRunTrackerAttachResultMask childrenAttachResult) {
-    // The SortStage only tracks the "numResults" metric when it is the most deeply nested blocking
-    // stage.
-    if (!(childrenAttachResult & TrialRunTrackerAttachResultFlags::AttachedToBlockingStage)) {
-        _tracker = tracker;
-    }
-
-    // Return true to indicate that the tracker is attached to a blocking stage: either this stage
-    // or one of its descendent stages.
-    return childrenAttachResult | TrialRunTrackerAttachResultFlags::AttachedToBlockingStage;
 }
 
 std::unique_ptr<PlanStageStats> SortStage::getStats(bool includeDebugInfo) const {
@@ -386,19 +373,7 @@ void SortStage::SortImpl<KeyRow, ValueRow>::open(bool reOpen) {
             return vals;
         });
 
-        if (_stage._tracker && _stage._tracker->trackProgress<TrialRunTracker::kNumResults>(1)) {
-            // If we either hit the maximum number of document to return during the trial run, or
-            // if we've performed enough physical reads, stop populating the sort heap and bail out
-            // from the trial run by raising a special exception to signal a runtime planner that
-            // this candidate plan has completed its trial run early. Note that the sort stage is a
-            // blocking operation and until all documents are loaded from the child stage and
-            // sorted, the control is not returned to the runtime planner, so an raising this
-            // special is mechanism to stop the trial run without affecting the plan stats of the
-            // higher level stages.
-            _stage._tracker = nullptr;
-            _stage._children[0]->close();
-            uasserted(ErrorCodes::QueryTrialRunCompleted, "Trial run early exit in sort");
-        }
+        _stage.trackResult();
     }
 
     _stage._specificStats.totalDataSizeBytes += _sorter->stats().bytesSorted();
@@ -408,9 +383,6 @@ void SortStage::SortImpl<KeyRow, ValueRow>::open(bool reOpen) {
     if (_stage._sorterFileStats) {
         _stage._specificStats.spilledDataStorageSize += _stage._sorterFileStats->bytesSpilled();
     }
-    auto& metricsCollector = ResourceConsumption::MetricsCollector::get(_stage._opCtx);
-    metricsCollector.incrementKeysSorted(_sorter->stats().numSorted());
-    metricsCollector.incrementSorterSpills(_sorter->stats().spilledRanges());
 
     _stage._children[0]->close();
 }
@@ -418,6 +390,7 @@ void SortStage::SortImpl<KeyRow, ValueRow>::open(bool reOpen) {
 template <typename KeyRow, typename ValueRow>
 PlanState SortStage::SortImpl<KeyRow, ValueRow>::getNext() {
     auto optTimer(_stage.getOptTimer(_stage._opCtx));
+    _stage.checkForInterruptAndYield(_stage._opCtx);
 
     // When the sort spilled data to disk then read back the sorted runs.
     if (_mergeIt && _mergeIt->more()) {

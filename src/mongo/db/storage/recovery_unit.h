@@ -197,6 +197,13 @@ public:
     void endReadOnlyUnitOfWork();
 
     /**
+     * Sets whether cursors in this operation should engage in pre-fetching data from disk to
+     * the storage engine cache. This feature can be useful for operations that are typically
+     * I/O bound.
+     */
+    virtual void setPrefetching(bool enable) {}
+
+    /**
      * Transitions the active unit of work to the "prepared" state. Must be called after
      * beginUnitOfWork and before calling either abortUnitOfWork or commitUnitOfWork. Must be
      * overridden by storage engines that support prepared transactions.
@@ -235,6 +242,14 @@ public:
      *
      */
     virtual void setRoundUpPreparedTimestamps(bool value) {}
+
+    /**
+     * Returns whether we have enabled the setting to round up prepare and commit timestamps for
+     * prepared transactions. See `setRoundUpPreparedTimestamps` for details.
+     */
+    virtual bool getRoundUpPreparedTimestamps() {
+        return false;
+    }
 
     /**
      * Waits until all commits that happened before this call are durable in the journal. Returns

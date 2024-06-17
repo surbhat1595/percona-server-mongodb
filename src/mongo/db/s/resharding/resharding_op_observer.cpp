@@ -107,10 +107,10 @@ void assertCanExtractShardKeyFromDocs(OperationContext* opCtx,
                         ->getCollectionDescription(opCtx);
 
     // A user can manually create a 'db.system.resharding.' collection that isn't guaranteed to be
-    // sharded outside of running reshardCollection.
-    uassert(ErrorCodes::NamespaceNotSharded,
-            str::stream() << "Temporary resharding collection " << nss.toStringForErrorMsg()
-                          << " is not sharded",
+    // tracked outside of running reshardCollection.
+    uassert(ErrorCodes::NamespaceNotFound,
+            str::stream() << "Temporary resharding collection metadata for "
+                          << nss.toStringForErrorMsg() << " not found",
             collDesc.hasRoutingTable());
 
     const ShardKeyPattern shardKeyPattern(collDesc.getKeyPattern());
@@ -218,6 +218,7 @@ void ReshardingOpObserver::onInserts(OperationContext* opCtx,
                                      const CollectionPtr& coll,
                                      std::vector<InsertStatement>::const_iterator begin,
                                      std::vector<InsertStatement>::const_iterator end,
+                                     const std::vector<RecordId>& recordIds,
                                      std::vector<bool> fromMigrate,
                                      bool defaultFromMigrate,
                                      OpStateAccumulator* opAccumulator) {

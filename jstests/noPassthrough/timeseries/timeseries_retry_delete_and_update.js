@@ -6,7 +6,10 @@
  *   requires_replication,
  *   requires_timeseries,
  *   featureFlagTimeseriesUpdatesSupport,
- *   featureFlagTrackUnshardedCollectionsOnShardingCatalog,
+ *   # Needed to run createUnsplittableCollection
+ *   # TODO (SERVER-87625) Remove feature flag dependency.
+ *   featureFlagAuthoritativeShardCollection,
+ *   requires_fcv_80
  * ]
  */
 const rst = new ReplSetTest({

@@ -50,6 +50,7 @@
 #include "mongo/db/query/plan_explainer.h"
 #include "mongo/db/query/plan_summary_stats.h"
 #include "mongo/db/query/plan_yield_policy.h"
+#include "mongo/db/query/query_stats/data_bearing_node_metrics.h"
 #include "mongo/db/query/restore_context.h"
 #include "mongo/db/record_id.h"
 #include "mongo/db/repl/oplog.h"
@@ -290,6 +291,12 @@ public:
      * "saved" state, so callers must still call restoreState to use this object.
      */
     virtual void reattachToOperationContext(OperationContext* opCtx) = 0;
+
+    /**
+     * Releases all storage engine resources that the plan executor has acquired. The plan will be
+     * left in the "saved" state so a call to restoreState() will be necessary afterwards.
+     */
+    void releaseAllAcquiredResources();
 
     /**
      * Produces the next document from the query execution plan. The caller can request that the

@@ -23,9 +23,11 @@ env.Library(
         'server_status.cpp',
         'server_status_metric.cpp',
     ],
+    LIBDEPS=[
+        '$BUILD_DIR/mongo/db/server_base',
+    ],
     LIBDEPS_PRIVATE=[
         '$BUILD_DIR/mongo/base',
-        '$BUILD_DIR/mongo/db/server_base',
     ],
 )
 
@@ -159,6 +161,14 @@ env.Library(
     ])
 
 # Commands available in all mongodb server processes (mongod, mongos, etc.)
+xray_files = []
+
+if get_option("xray") == "on":
+    xray_files = [
+        'xray_commands.cpp',
+        'xray_commands.idl',
+    ]
+
 env.Library(
     target='servers',
     source=[
@@ -183,7 +193,7 @@ env.Library(
         'traffic_recording_cmds.cpp',
         'user_management_commands_common.cpp',
         'user_management_commands.idl',
-    ],
+    ] + xray_files,
     LIBDEPS_PRIVATE=[
         '$BUILD_DIR/mongo/client/clientdriver_minimal',
         '$BUILD_DIR/mongo/db/auth/address_restriction',
@@ -417,6 +427,7 @@ env.Library(
         '$BUILD_DIR/mongo/db/session/logical_session_id_helpers',
         '$BUILD_DIR/mongo/db/stats/server_read_concern_write_concern_metrics',
         '$BUILD_DIR/mongo/db/stats/top',
+        '$BUILD_DIR/mongo/db/storage/storage_options',
         '$BUILD_DIR/mongo/db/transaction/transaction',
         '$BUILD_DIR/mongo/logv2/logv2_options',
         '$BUILD_DIR/mongo/s/grid',
@@ -556,6 +567,7 @@ env.Library(
         '$BUILD_DIR/mongo/executor/async_request_executor',
         '$BUILD_DIR/mongo/rpc/rewrite_state_change_errors',
         '$BUILD_DIR/mongo/s/query_analysis_sampler',
+        '$BUILD_DIR/mongo/s/resource_yielders',
         '$BUILD_DIR/mongo/s/sharding_router_api',
         '$BUILD_DIR/mongo/util/log_and_backoff',
         '$BUILD_DIR/mongo/util/net/http_client',
@@ -579,6 +591,7 @@ env.Library(
 env.Library(
     target='test_commands',
     source=[
+        'sysprofile.idl',
         'test_commands.cpp',
         'whats_my_uri_cmd.cpp',
     ],
@@ -592,6 +605,7 @@ env.Library(
         '$BUILD_DIR/mongo/db/ops/write_ops_exec',
         '$BUILD_DIR/mongo/db/query_exec',
         '$BUILD_DIR/mongo/db/shard_role',
+        '$BUILD_DIR/mongo/util/system_perf',
         'test_commands_enabled',
     ],
 )
@@ -891,8 +905,8 @@ env.Library(
 env.Library(
     target='txn_cmd_request',
     source=[
-        "txn_cmds.idl",
-        "txn_two_phase_commit_cmds.idl",
+        'txn_cmds.idl',
+        'txn_two_phase_commit_cmds.idl',
     ],
     LIBDEPS_PRIVATE=[
         '$BUILD_DIR/mongo/db/auth/authprivilege',
@@ -907,9 +921,8 @@ env.Library(
         'map_reduce_out_options.cpp',
         'map_reduce.idl',
     ],
-    LIBDEPS=[
+    LIBDEPS_PRIVATE=[
         '$BUILD_DIR/mongo/db/server_base',
-        '$BUILD_DIR/mongo/db/write_concern_options',
         '$BUILD_DIR/mongo/util/namespace_string_database_name_util',
     ],
 )
@@ -926,10 +939,12 @@ env.Library(
         '$BUILD_DIR/mongo/db/pipeline/process_interface/mongod_process_interface_factory',
         '$BUILD_DIR/mongo/db/query/map_reduce_output_format',
         '$BUILD_DIR/mongo/db/query_exec',
-        '$BUILD_DIR/mongo/db/server_base',
         '$BUILD_DIR/mongo/db/shard_role',
         '$BUILD_DIR/mongo/db/storage/storage_options',
         'map_reduce_parser',
+    ],
+    LIBDEPS_PRIVATE=[
+        '$BUILD_DIR/mongo/db/server_base',
     ],
 )
 

@@ -90,6 +90,7 @@
 #include "mongo/db/pipeline/document_source_geo_near.h"
 #include "mongo/db/pipeline/document_source_project.h"
 #include "mongo/db/pipeline/expression_context.h"
+#include "mongo/db/pipeline/initialize_auto_get_helper.h"
 #include "mongo/db/pipeline/pipeline.h"
 #include "mongo/db/pipeline/pipeline_d.h"
 #include "mongo/db/pipeline/plan_executor_pipeline.h"
@@ -112,7 +113,7 @@
 #include "mongo/db/query/plan_executor_factory.h"
 #include "mongo/db/query/plan_explainer.h"
 #include "mongo/db/query/plan_summary_stats.h"
-#include "mongo/db/query/query_decorations.h"
+#include "mongo/db/query/query_knob_configuration.h"
 #include "mongo/db/query/query_knobs_gen.h"
 #include "mongo/db/query/query_request_helper.h"
 #include "mongo/db/query/query_settings/query_settings_utils.h"
@@ -147,6 +148,7 @@
 #include "mongo/platform/atomic_word.h"
 #include "mongo/s/analyze_shard_key_common_gen.h"
 #include "mongo/s/query_analysis_sampler_util.h"
+#include "mongo/s/resource_yielders.h"
 #include "mongo/s/router_role.h"
 #include "mongo/s/shard_version.h"
 #include "mongo/s/sharding_state.h"
@@ -176,7 +178,7 @@ using std::stringstream;
 using std::unique_ptr;
 using NamespaceStringSet = stdx::unordered_set<NamespaceString>;
 
-CounterMetric allowDiskUseFalseCounter("query.allowDiskUseFalse");
+Counter64& allowDiskUseFalseCounter = *MetricBuilder<Counter64>{"query.allowDiskUseFalse"};
 
 namespace {
 
@@ -227,7 +229,9 @@ ClientCursorPin registerCursor(OperationContext* opCtx,
     auto pin = CursorManager::get(opCtx)->registerCursor(opCtx, std::move(cursorParams));
 
     pin->incNBatches();
-    ExternalDataSourceScopeGuard::get(pin.getCursor()) = extDataSrcGuard;
+    if (extDataSrcGuard) {
+        ExternalDataSourceScopeGuard::get(pin.getCursor()) = extDataSrcGuard;
+    }
     return pin;
 }
 
@@ -236,6 +240,7 @@ ClientCursorPin registerCursor(OperationContext* opCtx,
  * or the given executor (otherwise) and collects them in the query stats store.
  */
 void collectQueryStats(OperationContext* opCtx,
+                       const boost::intrusive_ptr<ExpressionContext>& expCtx,
                        mongo::PlanExecutor* maybeExec,
                        ClientCursorPin* maybePinnedCursor) {
     invariant(maybeExec || maybePinnedCursor);
@@ -252,7 +257,7 @@ void collectQueryStats(OperationContext* opCtx,
     if (maybePinnedCursor) {
         collectQueryStatsMongod(opCtx, *maybePinnedCursor);
     } else {
-        collectQueryStatsMongod(opCtx, std::move(curOp->debug().queryStatsInfo.key));
+        collectQueryStatsMongod(opCtx, expCtx, std::move(curOp->debug().queryStatsInfo.key));
     }
 }
 
@@ -260,12 +265,13 @@ void collectQueryStats(OperationContext* opCtx,
  * Builds the reply for a pipeline over a sharded collection that contains an exchange stage.
  */
 void handleMultipleCursorsForExchange(OperationContext* opCtx,
+                                      const boost::intrusive_ptr<ExpressionContext>& expCtx,
                                       const NamespaceString& nsForCursor,
                                       std::vector<ClientCursorPin>& pinnedCursors,
                                       const AggregateCommandRequest& request,
                                       rpc::ReplyBuilderInterface* result) {
     invariant(pinnedCursors.size() > 1);
-    collectQueryStats(opCtx, nullptr, &pinnedCursors[0]);
+    collectQueryStats(opCtx, expCtx, nullptr, &pinnedCursors[0]);
     long long batchSize =
         request.getCursor().getBatchSize().value_or(aggregation_request_helper::kDefaultBatchSize);
 
@@ -310,7 +316,7 @@ void handleMultipleCursorsForExchange(OperationContext* opCtx,
  * batch). In some cases, serializing the command object can consume a significant amount of time
  * that we can optimize away if the results fit in a single batch.
  */
-using DeferredCmd = Deferred<BSONObj>;
+using DeferredCmd = DeferredFn<BSONObj>;
 
 /**
  * Gets the first batch of documents produced by this pipeline by calling 'getNext()' on the
@@ -462,7 +468,7 @@ boost::optional<ClientCursorPin> executeSingleExecUntilFirstBatch(
         cursor->setLeftoverMaxTimeMicros(opCtx->getRemainingMaxTimeMicros());
     }
 
-    collectQueryStats(opCtx, execs[0].get(), maybePinnedCursor.get_ptr());
+    collectQueryStats(opCtx, expCtx, execs[0].get(), maybePinnedCursor.get_ptr());
 
     boost::optional<CursorMetrics> metrics = request.getIncludeQueryStatsMetrics()
         ? boost::make_optional(CurOp::get(opCtx)->debug().getCursorMetrics())
@@ -496,16 +502,23 @@ boost::optional<ClientCursorPin> executeUntilFirstBatch(
             opCtx, expCtx, request, cmdObj, privileges, origNss, extDataSrcGuard, execs, result);
     }
 
+    // We disallowed external data sources in queries with multiple plan executors due to a data
+    // race (see SERVER-85453 for more details).
+    tassert(8545301,
+            "External data sources are not currently compatible with queries that use multiple "
+            "plan executors.",
+            extDataSrcGuard == nullptr);
+
     // If there is more than one executor, that means this query will be running on multiple
     // shards via exchange and merge. Such queries always require a cursor to be registered for
     // each PlanExecutor.
     std::vector<ClientCursorPin> pinnedCursors;
     for (auto&& exec : execs) {
-        auto pinnedCursor = registerCursor(
-            opCtx, expCtx, origNss, *cmdObj, privileges, std::move(exec), extDataSrcGuard);
+        auto pinnedCursor =
+            registerCursor(opCtx, expCtx, origNss, *cmdObj, privileges, std::move(exec), nullptr);
         pinnedCursors.emplace_back(std::move(pinnedCursor));
     }
-    handleMultipleCursorsForExchange(opCtx, origNss, pinnedCursors, request, result);
+    handleMultipleCursorsForExchange(opCtx, expCtx, origNss, pinnedCursors, request, result);
 
     if (pinnedCursors.size() > 0) {
         return std::move(pinnedCursors[0]);
@@ -747,49 +760,14 @@ std::vector<std::unique_ptr<Pipeline, PipelineDeleter>> createExchangePipelinesI
                 // Assumes this is only called from the 'aggregate' or 'getMore' commands.  The code
                 // which relies on this parameter does not distinguish/care about the difference so
                 // we simply always pass 'aggregate'.
-                expCtx->mongoProcessInterface->getResourceYielder("aggregate"_sd));
+                ResourceYielderFactory::get(*expCtx->opCtx->getService())
+                    .make(expCtx->opCtx, "aggregate"_sd));
             pipelines.emplace_back(Pipeline::create({consumer}, expCtx));
         }
     } else {
         pipelines.emplace_back(std::move(pipeline));
     }
 
-    return pipelines;
-}
-
-/**
- * Creates additional pipelines if needed to serve the aggregation. This includes additional
- * pipelines for exchange optimization and search commands that generate metadata. Returns
- * a vector of all pipelines needed for the query, including the original one.
- *
- * Takes ownership of the original, passed in, pipeline.
- */
-std::vector<std::unique_ptr<Pipeline, PipelineDeleter>> createAdditionalPipelinesIfNeeded(
-    const AggregateCommandRequest& request,
-    const LiteParsedPipeline& liteParsedPipeline,
-    std::unique_ptr<Pipeline, PipelineDeleter> pipeline,
-    const std::function<void(void)>& resetContextFn) {
-
-    std::vector<std::unique_ptr<Pipeline, PipelineDeleter>> pipelines;
-    auto expCtx = pipeline->getContext();
-
-    // Exchange is not allowed to be specified if there is a $search stage.
-    if (search_helpers::isSearchPipeline(pipeline.get())) {
-        // Release locks early, before we generate the search pipeline, so that we don't hold them
-        // during network calls to mongot. This is fine for search pipelines since they are not
-        // reading any local (lock-protected) data in the main pipeline.
-        resetContextFn();
-        pipelines.push_back(std::move(pipeline));
-
-        if (auto metadataPipe = search_helpers::generateMetadataPipelineForSearch(
-                expCtx->opCtx, expCtx, request, pipelines.back().get(), expCtx->uuid)) {
-            pipelines.push_back(std::move(metadataPipe));
-        }
-    } else {
-        // Takes ownership of 'pipeline'.
-        pipelines = createExchangePipelinesIfNeeded(
-            request, liteParsedPipeline.getInvolvedNamespaces(), std::move(pipeline));
-    }
     return pipelines;
 }
 
@@ -844,13 +822,29 @@ std::vector<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> createLegacyEx
         // have gotten from find command.
         execs.emplace_back(std::move(executor));
     } else {
-        search_helpers::prepareSearchForTopLevelPipeline(pipeline.get());
         // Complete creation of the initial $cursor stage, if needed.
         PipelineD::attachInnerQueryExecutorToPipeline(
             collections, attachCallback, std::move(executor), pipeline.get());
 
-        auto pipelines = createAdditionalPipelinesIfNeeded(
-            request, liteParsedPipeline, std::move(pipeline), resetContextFn);
+        std::vector<std::unique_ptr<Pipeline, PipelineDeleter>> pipelines;
+        // Any pipeline that relies on calls to mongot requires additional setup.
+        if (search_helpers::isMongotPipeline(pipeline.get())) {
+            // Release locks early, before we generate the search pipeline, so that we don't hold
+            // them during network calls to mongot. This is fine for search pipelines since they are
+            // not reading any local (lock-protected) data in the main pipeline.
+            resetContextFn();
+            pipelines.push_back(std::move(pipeline));
+
+            if (auto metadataPipe = search_helpers::prepareSearchForTopLevelPipelineLegacyExecutor(
+                    expCtx->opCtx, expCtx, request, pipelines.back().get(), expCtx->uuid)) {
+                pipelines.push_back(std::move(metadataPipe));
+            }
+        } else {
+            // Takes ownership of 'pipeline'.
+            pipelines = createExchangePipelinesIfNeeded(
+                request, liteParsedPipeline.getInvolvedNamespaces(), std::move(pipeline));
+        }
+
         for (auto&& pipelineIt : pipelines) {
             // There are separate ExpressionContexts for each exchange pipeline, so make sure to
             // pass the pipeline's ExpressionContext to the plan executor factory.
@@ -952,7 +946,7 @@ Status _runAggregate(OperationContext* opCtx,
                      const DeferredCmd& cmdObj,
                      const PrivilegeVector& privileges,
                      rpc::ReplyBuilderInterface* result,
-                     ExternalDataSourceScopeGuard externalDataSourceGuard,
+                     std::shared_ptr<ExternalDataSourceScopeGuard> externalDataSourceGuard,
                      boost::optional<const ResolvedView&> resolvedView,
                      boost::optional<const AggregateCommandRequest&> origRequest);
 
@@ -1008,7 +1002,7 @@ Status runAggregateOnView(OperationContext* opCtx,
     }};
 
     auto status{Status::OK()};
-    if (!OperationShardingState::get(opCtx).isComingFromRouter(opCtx)) {
+    if (!OperationShardingState::get(opCtx).shouldBeTreatedAsFromRouter(opCtx)) {
         // Non sharding-aware operation.
         // Run the translated query on the view on this node.
         status = _runAggregate(opCtx,
@@ -1017,27 +1011,22 @@ Status runAggregateOnView(OperationContext* opCtx,
                                std::move(deferredCmd),
                                privileges,
                                result,
-                               {},
+                               nullptr,
                                resolvedView,
                                request);
     } else {
         // Sharding-aware operation.
+
+        // Stash the shard role for the resolved view nss, in case it was set, as we are about to
+        // transition into the router role for it.
+        const ScopedStashShardRole scopedUnsetShardRole{opCtx, resolvedView.getNamespace()};
+
         sharding::router::CollectionRouter router(opCtx->getServiceContext(),
                                                   resolvedView.getNamespace());
         status = router.route(
             opCtx,
             "runAggregateOnView",
             [&](OperationContext* opCtx, const CollectionRoutingInfo& cri) {
-                const auto readUnderlyingCollectionLocally =
-                    canReadUnderlyingCollectionLocally(opCtx, cri);
-
-                boost::optional<ScopedUnsetImplicitTimeSeriesBucketsShardRole>
-                    scopedUnsetImplicitTimeSeriesBucketsShardRole;
-                if (resolvedView.timeseries()) {
-                    scopedUnsetImplicitTimeSeriesBucketsShardRole.emplace(
-                        opCtx, resolvedView.getNamespace());
-                }
-
                 // Setup the opCtx's OperationShardingState with the expected placement versions for
                 // the underlying collection. Use the same 'placementConflictTime' from the original
                 // request, if present.
@@ -1047,18 +1036,7 @@ Status runAggregateOnView(OperationContext* opCtx,
                 // If the underlying collection is unsharded and is located on this shard, then we
                 // can execute the view aggregation locally. Otherwise, we need to kick-back to the
                 // router.
-                if (readUnderlyingCollectionLocally) {
-                    // Run the resolved aggregation locally.
-                    return _runAggregate(opCtx,
-                                         newRequest,
-                                         {newRequest},
-                                         std::move(deferredCmd),
-                                         privileges,
-                                         result,
-                                         {},
-                                         resolvedView,
-                                         request);
-                } else {
+                if (!canReadUnderlyingCollectionLocally(opCtx, cri)) {
                     // Cannot execute the resolved aggregation locally. The router must do it.
                     //
                     // Before throwing the kick-back exception, validate the routing table
@@ -1076,6 +1054,17 @@ Status runAggregateOnView(OperationContext* opCtx,
                               "Resolved views on collections that do not exclusively live on the "
                               "db-primary shard must be executed by mongos");
                 }
+
+                // Run the resolved aggregation locally.
+                return _runAggregate(opCtx,
+                                     newRequest,
+                                     {newRequest},
+                                     std::move(deferredCmd),
+                                     privileges,
+                                     result,
+                                     nullptr,
+                                     resolvedView,
+                                     request);
             });
     }
 
@@ -1112,27 +1101,6 @@ query_shape::CollectionType determineCollectionType(
         return query_shape::CollectionType::kChangeStream;
     }
     return ctx ? ctx->getCollectionType() : query_shape::CollectionType::kUnknown;
-}
-
-// TODO: SERVER-73632 Remove feature flag for PM-635.
-// Remove query settings lookup as it is only done on mongos.
-query_settings::QuerySettings lookupQuerySettingsForAgg(
-    boost::intrusive_ptr<ExpressionContext> expCtx,
-    const AggregateCommandRequest& aggregateCommandRequest,
-    const Pipeline& pipeline,
-    const stdx::unordered_set<NamespaceString>& involvedNamespaces,
-    const NamespaceString& nss) {
-    auto opCtx = expCtx->opCtx;
-    const bool isInternalClient =
-        opCtx->getClient()->session() && opCtx->getClient()->isInternalClient();
-    auto serializationContext = aggregateCommandRequest.getSerializationContext();
-    return isInternalClient
-        ? aggregateCommandRequest.getQuerySettings().get_value_or({})
-        : query_settings::lookupQuerySettings(expCtx, nss, serializationContext, [&]() {
-              query_shape::AggCmdShape shape(
-                  aggregateCommandRequest, nss, involvedNamespaces, pipeline, expCtx);
-              return shape.sha256Hash(opCtx, serializationContext);
-          });
 }
 
 std::unique_ptr<Pipeline, PipelineDeleter> parsePipelineAndRegisterQueryStats(
@@ -1188,7 +1156,22 @@ std::unique_ptr<Pipeline, PipelineDeleter> parsePipelineAndRegisterQueryStats(
                                                          origNss,
                                                          collectionType);
         });
+
+        if (request.getIncludeQueryStatsMetrics()) {
+            CurOp::get(opCtx)->debug().queryStatsInfo.metricsRequested = true;
+        }
     }
+
+    // Lookup the query settings and attach it to the 'expCtx'.
+    // TODO: SERVER-73632 Remove feature flag for PM-635.
+    // Query settings will only be looked up on mongos and therefore should be part of command
+    // body on mongod if present.
+    expCtx->setQuerySettings(
+        query_settings::lookupQuerySettingsForAgg(expCtx,
+                                                  requestForQueryStats,
+                                                  *pipeline,
+                                                  liteParsedPipeline.getInvolvedNamespaces(),
+                                                  origNss));
 
     if (resolvedView.has_value()) {
         expCtx->startExpressionCounters();
@@ -1211,16 +1194,7 @@ std::unique_ptr<Pipeline, PipelineDeleter> parsePipelineAndRegisterQueryStats(
         expCtx->stopExpressionCounters();
     }
 
-    // After parsing to detect if $$USER_ROLES is referenced in the query, set the value of
-    // $$USER_ROLES for the aggregation.
-    expCtx->setUserRoles();
-
-    // Lookup the query settings and attach it to the 'expCtx'.
-    expCtx->setQuerySettings(lookupQuerySettingsForAgg(expCtx,
-                                                       request,
-                                                       *pipeline,
-                                                       liteParsedPipeline.getInvolvedNamespaces(),
-                                                       request.getNamespace()));
+    expCtx->initializeReferencedSystemVariables();
 
     return pipeline;
 }
@@ -1232,7 +1206,7 @@ Status _runAggregate(OperationContext* opCtx,
                      const DeferredCmd& cmdObj,
                      const PrivilegeVector& privileges,
                      rpc::ReplyBuilderInterface* result,
-                     ExternalDataSourceScopeGuard externalDataSourceGuard,
+                     std::shared_ptr<ExternalDataSourceScopeGuard> externalDataSourceGuard,
                      boost::optional<const ResolvedView&> resolvedView,
                      boost::optional<const AggregateCommandRequest&> origRequest) {
     auto origNss = origRequest.has_value() ? origRequest->getNamespace() : request.getNamespace();
@@ -1283,14 +1257,6 @@ Status _runAggregate(OperationContext* opCtx,
     // The UUID of the collection for the execution namespace of this aggregation.
     boost::optional<UUID> uuid;
 
-    // All cursors should share the ownership to 'extDataSrcGuard' if cursor(s) are created. Once
-    // all cursors are destroyed later, 'extDataSrcGuard' will also be destroyed and any virtual
-    // collections will be dropped by the destructor of ExternalDataSourceScopeGuard. We obtain a
-    // reference before taking locks so that the virtual collections will be dropped after releasing
-    // our read locks, avoiding a lock upgrade.
-    std::shared_ptr<ExternalDataSourceScopeGuard> extDataSrcGuard =
-        std::make_shared<ExternalDataSourceScopeGuard>(std::move(externalDataSourceGuard));
-
     // If emplaced, AutoGetCollectionForReadCommand will throw if the sharding version for this
     // connection is out of date. If the namespace is a view, the lock will be released before
     // re-running the expanded aggregation.
@@ -1312,19 +1278,29 @@ Status _runAggregate(OperationContext* opCtx,
         [&](const BSONObj& data) { return nss.coll() == data["collection"].valueStringData(); });
 
     auto initContext = [&](auto_get_collection::ViewMode m) {
-        ctx.emplace(opCtx,
-                    nss,
-                    AutoGetCollection::Options{}.viewMode(m).secondaryNssOrUUIDs(
-                        secondaryExecNssList.cbegin(), secondaryExecNssList.cend()),
-                    AutoStatsTracker::LogMode::kUpdateTopAndCurOp);
+        auto initAutoGetCallback = [&]() {
+            ctx.emplace(opCtx,
+                        nss,
+                        AutoGetCollection::Options{}.viewMode(m).secondaryNssOrUUIDs(
+                            secondaryExecNssList.cbegin(), secondaryExecNssList.cend()),
+                        AutoStatsTracker::LogMode::kUpdateTopAndCurOp);
+        };
+        bool anySecondaryCollectionNotLocal =
+            intializeAutoGet(opCtx, nss, secondaryExecNssList, initAutoGetCallback);
+        tassert(8322000,
+                "Should have initialized AutoGet* after calling 'initializeAutoGet'",
+                ctx.has_value());
         collections = MultipleCollectionAccessor(opCtx,
                                                  &ctx->getCollection(),
                                                  ctx->getNss(),
-                                                 ctx->isAnySecondaryNamespaceAViewOrSharded(),
+                                                 ctx->isAnySecondaryNamespaceAView() ||
+                                                     anySecondaryCollectionNotLocal,
                                                  secondaryExecNssList);
-        // Return the catalog that gets implicitly stashed during the collection acquisition above,
-        // which also implicitly opened a storage snapshot. This catalog object can be potentially
-        // different than the one obtained before and will be in sync with the opened snapshot.
+
+        // Return the catalog that gets implicitly stashed during the collection acquisition
+        // above, which also implicitly opened a storage snapshot. This catalog object can
+        // be potentially different than the one obtained before and will be in sync with
+        // the opened snapshot.
         return CollectionCatalog::get(opCtx);
     };
 
@@ -1483,20 +1459,26 @@ Status _runAggregate(OperationContext* opCtx,
 
         invariant(collatorToUse);
 
-
-        auto pipeline = parsePipelineAndRegisterQueryStats(opCtx,
-                                                           origNss,
-                                                           request,
-                                                           ctx,
-                                                           std::move(*collatorToUse),
-                                                           uuid,
-                                                           collatorToUseMatchesDefault,
-                                                           collections,
-                                                           liteParsedPipeline,
-                                                           nss.isCollectionlessAggregateNS(),
-                                                           resolvedView,
-                                                           origRequest);
+        std::unique_ptr<Pipeline, PipelineDeleter> pipeline =
+            parsePipelineAndRegisterQueryStats(opCtx,
+                                               origNss,
+                                               request,
+                                               ctx,
+                                               std::move(*collatorToUse),
+                                               uuid,
+                                               collatorToUseMatchesDefault,
+                                               collections,
+                                               liteParsedPipeline,
+                                               nss.isCollectionlessAggregateNS(),
+                                               resolvedView,
+                                               origRequest);
         expCtx = pipeline->getContext();
+
+        // Only allow the use of runtime constants when from Mongos is true.
+        uassert(463840,
+                "Manually setting 'runtimeConstants' is not supported. Use 'let' for user-defined "
+                "constants.",
+                expCtx->fromMongos || !request.getLegacyRuntimeConstants());
 
         CurOp::get(opCtx)->beginQueryPlanningTimer();
 
@@ -1563,7 +1545,7 @@ Status _runAggregate(OperationContext* opCtx,
         auto bonsaiEligibility =
             determineBonsaiEligibility(opCtx, collections.getMainCollection(), request, *pipeline);
         const bool bonsaiEligible = isEligibleForBonsaiUnderFrameworkControl(
-            opCtx, request.getExplain().has_value(), bonsaiEligibility);
+            expCtx, request.getExplain().has_value(), bonsaiEligibility);
 
         bool bonsaiExecSuccess = true;
         if (bonsaiEligible) {
@@ -1643,8 +1625,8 @@ Status _runAggregate(OperationContext* opCtx,
             } else {
                 // If we had an optimization failure, only error if we're not in tryBonsai.
                 bonsaiExecSuccess = false;
-                auto queryControl = QueryKnobConfiguration::decoration(opCtx)
-                                        .getInternalQueryFrameworkControlForOp();
+                auto queryControl =
+                    expCtx->getQueryKnobConfiguration().getInternalQueryFrameworkControlForOp();
                 tassert(7319401,
                         "Optimization failed either without tryBonsai set, or without a hint.",
                         queryControl == QueryFrameworkControlEnum::kTryBonsai &&
@@ -1716,20 +1698,33 @@ Status _runAggregate(OperationContext* opCtx,
                 *cmdObj,
                 &bodyBuilder);
         }
-        collectQueryStatsMongod(opCtx, std::move(curOp->debug().queryStatsInfo.key));
+        collectQueryStatsMongod(opCtx, expCtx, std::move(curOp->debug().queryStatsInfo.key));
     } else {
-        auto maybePinnedCursor = executeUntilFirstBatch(
-            opCtx, expCtx, request, cmdObj, privileges, origNss, extDataSrcGuard, execs, result);
+        auto maybePinnedCursor = executeUntilFirstBatch(opCtx,
+                                                        expCtx,
+                                                        request,
+                                                        cmdObj,
+                                                        privileges,
+                                                        origNss,
+                                                        externalDataSourceGuard,
+                                                        execs,
+                                                        result);
 
         // For an optimized away pipeline, signal the cache that a query operation has completed.
         // For normal pipelines this is done in DocumentSourceCursor.
         if (ctx) {
             // Due to yielding, the collection pointers saved in MultipleCollectionAccessor might
             // have become invalid. We will need to refresh them here.
+
+            // Stash the old value of 'isAnySecondaryNamespaceAViewOrNotFullyLocal' before
+            // refreshing. This is ok because we expect that our view of the collection should not
+            // have changed while holding 'ctx'.
+            auto isAnySecondaryNamespaceAViewOrNotFullyLocal =
+                collections.isAnySecondaryNamespaceAViewOrNotFullyLocal();
             collections = MultipleCollectionAccessor(opCtx,
                                                      &ctx->getCollection(),
                                                      ctx->getNss(),
-                                                     ctx->isAnySecondaryNamespaceAViewOrSharded(),
+                                                     isAnySecondaryNamespaceAViewOrNotFullyLocal,
                                                      secondaryExecNssList);
 
             auto exec =
@@ -1764,36 +1759,33 @@ Status _runAggregate(OperationContext* opCtx,
 
 }  // namespace
 
-Status runAggregate(OperationContext* opCtx,
-                    AggregateCommandRequest& request,
-                    const BSONObj& cmdObj,
-                    const PrivilegeVector& privileges,
-                    rpc::ReplyBuilderInterface* result) {
-    return _runAggregate(opCtx,
-                         request,
-                         {request},
-                         DeferredCmd(cmdObj),
-                         privileges,
-                         result,
-                         {},
-                         boost::none,
-                         boost::none);
-}
+Status runAggregate(
+    OperationContext* opCtx,
+    AggregateCommandRequest& request,
+    const LiteParsedPipeline& liteParsedPipeline,
+    const BSONObj& cmdObj,
+    const PrivilegeVector& privileges,
+    rpc::ReplyBuilderInterface* result,
+    const std::vector<std::pair<NamespaceString, std::vector<ExternalDataSourceInfo>>>&
+        usedExternalDataSources) {
+    // Create virtual collections and drop them when aggregate command is done.
+    // If a cursor is registered, the ExternalDataSourceScopeGuard will be stored in the cursor;
+    // when the cursor is later destroyed, the scope guard will also be destroyed, and any virtual
+    // collections will be dropped by the destructor of ExternalDataSourceScopeGuard.
+    // We create this scope guard prior to taking locks in _runAggregate so that, if no cursor is
+    // registered, the virtual collections will be dropped after releasing our read locks, avoiding
+    // a lock upgrade.
+    auto extDataSrcGuard = usedExternalDataSources.size() > 0
+        ? std::make_shared<ExternalDataSourceScopeGuard>(opCtx, usedExternalDataSources)
+        : nullptr;
 
-Status runAggregate(OperationContext* opCtx,
-                    AggregateCommandRequest& request,
-                    const LiteParsedPipeline& liteParsedPipeline,
-                    const BSONObj& cmdObj,
-                    const PrivilegeVector& privileges,
-                    rpc::ReplyBuilderInterface* result,
-                    ExternalDataSourceScopeGuard externalDataSourceGuard) {
     return _runAggregate(opCtx,
                          request,
                          liteParsedPipeline,
                          DeferredCmd(cmdObj),
                          privileges,
                          result,
-                         std::move(externalDataSourceGuard),
+                         extDataSrcGuard,
                          boost::none,
                          boost::none);
 }

@@ -78,7 +78,7 @@ class ReplicationCoordinatorEmbedded final : public repl::ReplicationCoordinator
 
 public:
     ReplicationCoordinatorEmbedded(ServiceContext* serviceContext);
-    ~ReplicationCoordinatorEmbedded();
+    ~ReplicationCoordinatorEmbedded() override;
 
     ReplicationCoordinatorEmbedded(ReplicationCoordinatorEmbedded&) = delete;
     ReplicationCoordinatorEmbedded& operator=(ReplicationCoordinatorEmbedded&) = delete;
@@ -180,11 +180,11 @@ public:
     void setMyHeartbeatMessage(const std::string&) override;
 
     repl::OpTime getMyLastWrittenOpTime() const override;
-    repl::OpTimeAndWallTime getMyLastWrittenOpTimeAndWallTime() const override;
+    repl::OpTimeAndWallTime getMyLastWrittenOpTimeAndWallTime(
+        bool rollbackSafe = false) const override;
 
     repl::OpTime getMyLastAppliedOpTime() const override;
-    repl::OpTimeAndWallTime getMyLastAppliedOpTimeAndWallTime(
-        bool rollbackSafe = false) const override;
+    repl::OpTimeAndWallTime getMyLastAppliedOpTimeAndWallTime() const override;
 
     repl::OpTime getMyLastDurableOpTime() const override;
     repl::OpTimeAndWallTime getMyLastDurableOpTimeAndWallTime() const override;
@@ -194,6 +194,9 @@ public:
                                    boost::optional<Date_t> deadline) override;
     Status waitUntilOpTimeForReadUntil(OperationContext*,
                                        const repl::ReadConcernArgs&,
+                                       boost::optional<Date_t>) override;
+    Status waitUntilOpTimeWrittenUntil(OperationContext*,
+                                       LogicalTime,
                                        boost::optional<Date_t>) override;
 
     Status waitUntilOpTimeForRead(OperationContext*, const repl::ReadConcernArgs&) override;
@@ -318,7 +321,9 @@ public:
                                       const repl::ReplSetRequestVotesArgs&,
                                       repl::ReplSetRequestVotesResponse*) override;
 
-    void prepareReplMetadata(const BSONObj&, const repl::OpTime&, BSONObjBuilder*) const override;
+    void prepareReplMetadata(const CommonRequestArgs&,
+                             const repl::OpTime&,
+                             BSONObjBuilder*) const override;
 
     Status processHeartbeatV1(const repl::ReplSetHeartbeatArgsV1&,
                               repl::ReplSetHeartbeatResponse*) override;
@@ -339,7 +344,7 @@ public:
 
     void appendConnectionStats(executor::ConnectionPoolStats* stats) const override;
 
-    virtual void createWMajorityWriteAvailabilityDateWaiter(repl::OpTime opTime) override;
+    void createWMajorityWriteAvailabilityDateWaiter(repl::OpTime opTime) override;
 
     Status stepUpIfEligible(bool skipDryRun) override;
 
@@ -370,9 +375,9 @@ public:
         boost::optional<TopologyVersion> previous,
         boost::optional<Date_t> deadline) override;
 
-    virtual SharedSemiFuture<std::shared_ptr<const repl::HelloResponse>> getHelloResponseFuture(
+    SharedSemiFuture<std::shared_ptr<const repl::HelloResponse>> getHelloResponseFuture(
         const repl::SplitHorizon::Parameters& horizonParams,
-        boost::optional<TopologyVersion> clientTopologyVersion);
+        boost::optional<TopologyVersion> clientTopologyVersion) override;
 
     StatusWith<repl::OpTime> getLatestWriteOpTime(OperationContext* opCtx) const noexcept override;
 
@@ -386,30 +391,30 @@ public:
                                             OnRemoteCmdScheduledFn onRemoteCmdScheduled,
                                             OnRemoteCmdCompleteFn onRemoteCmdComplete) final;
 
-    virtual void restartScheduledHeartbeats_forTest() override;
+    void restartScheduledHeartbeats_forTest() override;
 
-    virtual void recordIfCWWCIsSetOnConfigServerOnStartup(OperationContext* opCtx) final;
+    void recordIfCWWCIsSetOnConfigServerOnStartup(OperationContext* opCtx) final;
 
     class WriteConcernTagChangesEmbedded : public WriteConcernTagChanges {
-        virtual ~WriteConcernTagChangesEmbedded() = default;
-        virtual bool reserveDefaultWriteConcernChange() {
+        ~WriteConcernTagChangesEmbedded() override = default;
+        bool reserveDefaultWriteConcernChange() override {
             return false;
         };
-        virtual void releaseDefaultWriteConcernChange() {}
+        void releaseDefaultWriteConcernChange() override {}
 
-        virtual bool reserveConfigWriteConcernTagChange() {
+        bool reserveConfigWriteConcernTagChange() override {
             return false;
         };
-        virtual void releaseConfigWriteConcernTagChange() {}
+        void releaseConfigWriteConcernTagChange() override {}
     };
 
-    virtual WriteConcernTagChanges* getWriteConcernTagChanges() override;
+    WriteConcernTagChanges* getWriteConcernTagChanges() override;
 
-    virtual repl::SplitPrepareSessionManager* getSplitPrepareSessionManager() override;
+    repl::SplitPrepareSessionManager* getSplitPrepareSessionManager() override;
 
-    virtual bool isRetryableWrite(OperationContext* opCtx) const override;
+    bool isRetryableWrite(OperationContext* opCtx) const override;
 
-    virtual boost::optional<UUID> getInitialSyncId(OperationContext* opCtx) override;
+    boost::optional<UUID> getInitialSyncId(OperationContext* opCtx) override;
 
 private:
     // Back pointer to the ServiceContext that has started the instance.

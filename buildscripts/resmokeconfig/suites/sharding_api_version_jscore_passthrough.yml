@@ -5,6 +5,7 @@ test_kind: js_test
 selector:
   roots:
   - jstests/core/**/*.js
+  - jstests/core_sharding/**/*.js
   - jstests/fle2/**/*.js
   - src/mongo/db/modules/*/jstests/fle2/**/*.js
 
@@ -36,7 +37,6 @@ selector:
   - jstests/core/**/top.js  # top.
   # The following tests fail because mongos behaves differently from mongod when testing certain
   # functionality. The differences are in a comment next to the failing test.
-  - jstests/core/**/explain_missing_database.js  # Behavior with no db different on mongos.
   - jstests/core/**/geo_2d_explain.js  # executionSuccess in different spot in explain().
   - jstests/core/**/geo_s2explain.js  # inputStage in different spot in explain().
   - jstests/core/**/geo_s2sparse.js  # keysPerIndex in different spot in validate().
@@ -59,7 +59,7 @@ selector:
   - jstests/core/txns/transactions_profiling_with_drops.js
 
   # Implicitly creates a database through a collection rename, which does not work in a sharded
-  # cluster.
+  # cluster. TODO SERVER-84330
   - jstests/core/txns/transactions_block_ddl.js
 
   exclude_with_any_tags:

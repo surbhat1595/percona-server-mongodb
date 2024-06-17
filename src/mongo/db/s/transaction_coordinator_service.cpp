@@ -40,6 +40,7 @@
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
 #include "mongo/bson/bsonobjbuilder.h"
+#include "mongo/db/admission/execution_admission_context.h"
 #include "mongo/db/repl/repl_client_info.h"
 #include "mongo/db/s/transaction_coordinator.h"
 #include "mongo/db/s/transaction_coordinator_document_gen.h"
@@ -155,11 +156,12 @@ void TransactionCoordinatorService::reportCoordinators(OperationContext* opCtx,
             return false;
         };
 
-    auto reporter = [ops](const LogicalSessionId lsid,
+    auto reporter = [opCtx,
+                     ops](const LogicalSessionId lsid,
                           const TxnNumberAndRetryCounter txnNumberAndRetryCounter,
                           const std::shared_ptr<TransactionCoordinator> transactionCoordinator) {
         BSONObjBuilder doc;
-        transactionCoordinator->reportState(doc);
+        transactionCoordinator->reportState(opCtx, doc);
         ops->push_back(doc.obj());
     };
 
@@ -239,9 +241,8 @@ void TransactionCoordinatorService::onStepUp(OperationContext* opCtx,
 
                     // Skip ticket acquisition in order to prevent possible deadlock when
                     // participants are in the prepared state. See SERVER-82883 and SERVER-60682.
-                    ScopedAdmissionPriorityForLock skipTicketAcquisition(
-                        shard_role_details::getLocker(opCtx),
-                        AdmissionContext::Priority::kImmediate);
+                    ScopedAdmissionPriority<ExecutionAdmissionContext> skipTicketAcquisition(
+                        opCtx, AdmissionContext::Priority::kExempt);
 
                     auto& replClientInfo = repl::ReplClientInfo::forClient(opCtx->getClient());
                     replClientInfo.setLastOpToSystemLastOpTime(opCtx);

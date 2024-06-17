@@ -28,6 +28,7 @@ executor:
         TestData:
           enableMajorityReadConcern: ''
           hashTestNamesForMultitenancy: true
+          multitenancyExpectPrefix: true
           tenantId: 636d957b2646ddfaf9b5e13f
           useResponsePrefixChecking: true
           useSecurityToken: true
@@ -69,8 +70,19 @@ executor:
 matrix_suite: true
 selector:
   exclude_files:
+  - jstests/core/**/geo_update_btree.js
   - jstests/core/**/max_doc_size.js
+  - jstests/core/**/mr_bigobject.js
+  - jstests/core/**/capped_large_docs.js
+  - jstests/core/**/capped_resize.js
   - jstests/core/**/exhaust.js
+  - jstests/core/**/explain_execution_error.js
+  - jstests/core/**/sortb.js
+  - jstests/core/**/sortg.js
+  - jstests/core/**/sortj.js
+  - jstests/core/**/column_store_index_compression.js
+  - jstests/core/query/explain/explain_agg_write_concern.js
+  - jstests/core/administrative/builtin_roles_external.js
   exclude_with_any_tags:
   - simulate_atlas_proxy_incompatible
   - not_allowed_with_signed_security_token
@@ -83,6 +95,5 @@ selector:
   - uses_transactions
   - requires_emptycapped
   roots:
-  - jstests/core/*.js
-  - jstests/core/txns/**/*.js
+  - jstests/core/**/*.js
 test_kind: js_test

@@ -32,7 +32,6 @@
 #include <algorithm>
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
-
 #include <boost/optional/optional.hpp>
 
 #include "mongo/db/service_context.h"
@@ -88,7 +87,7 @@ boost::optional<Ticket> PriorityTicketHolder::_tryAcquireImpl(AdmissionContext* 
     return boost::none;
 }
 
-boost::optional<Ticket> PriorityTicketHolder::_waitForTicketUntilImpl(OperationContext* opCtx,
+boost::optional<Ticket> PriorityTicketHolder::_waitForTicketUntilImpl(Interruptible& interruptible,
                                                                       AdmissionContext* admCtx,
                                                                       Date_t until) {
     invariant(admCtx);
@@ -106,9 +105,7 @@ boost::optional<Ticket> PriorityTicketHolder::_waitForTicketUntilImpl(OperationC
             }
         });
 
-        if (opCtx) {
-            opCtx->checkForInterrupt();
-        }
+        interruptible.checkForInterrupt();
 
         if (acquired) {
             rereleaseIfTimedOutOrInterrupted.dismiss();
@@ -124,14 +121,12 @@ boost::optional<Ticket> PriorityTicketHolder::_waitForTicketUntilImpl(OperationC
 }
 
 void PriorityTicketHolder::_releaseToTicketPoolImpl(AdmissionContext* admCtx) noexcept {
-    // 'Immediate' priority operations should bypass the ticketing system completely.
-    invariant(admCtx && admCtx->getPriority() != AdmissionContext::Priority::kImmediate);
     _pool.release();
 }
 
 TicketHolder::QueueStats& PriorityTicketHolder::_getQueueStatsToUse(
-    const AdmissionContext* admCtx) noexcept {
-    auto queueType = _getQueueType(admCtx);
+    AdmissionContext::Priority priority) noexcept {
+    auto queueType = _getQueueType(priority);
     return _stats[_enumToInt(queueType)];
 }
 

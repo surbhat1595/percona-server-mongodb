@@ -33,6 +33,7 @@ selector:
   - jstests/core/sparse_index_supports_ne_null.js
   # Text indexes.
   - jstests/core/query/internal_strip_invalid_assignment.js
+  - jstests/core/query/plan_cache/plan_cache_eof.js
   # Hashed indexes.
   - jstests/core/hashed_partial_and_sparse_index.js
   - jstests/core/query/distinct/distinct_with_hashed_index.js
@@ -41,12 +42,15 @@ selector:
   # Column store indexes.
   - jstests/core/query/project/projection_semantics.js
   # findAndModify sort.
+  - jstests/core/query/natural_validation.js
   - jstests/core/write/crud_api.js
   - jstests/core/write/find_and_modify/find_and_modify.js
   - jstests/core/write/find_and_modify/find_and_modify3.js
   - jstests/core/write/find_and_modify/find_and_modify_empty_update.js
   - jstests/core/write/find_and_modify/find_and_modify_invalid_query_params.js
   - jstests/core/write/find_and_modify/find_and_modify_server7660.js
+  # updateOne sort.
+  - jstests/core/write/update/updateOne_sort.js
   # Incompatible find command option.
   - jstests/core/min_max_hashed_index.js # min
   - jstests/core/query/expr/expr.js # divide
@@ -68,6 +72,7 @@ selector:
   - jstests/core/query/explain/**/*.js
   - jstests/core/query/expr/expr_index_use.js
   - jstests/core/query/idhack.js
+  - jstests/core/query/index_deduplication.js
   - jstests/core/query/introspect_hidden_index_plan_cache_entries.js
   - jstests/core/query/or/or3.js
   - jstests/core/query/or/or_to_in.js
@@ -83,8 +88,10 @@ selector:
   - jstests/core/query/sort/sort_array.js
   - jstests/core/query/sort/sort_merge_collation.js
   - jstests/core/record_store_count.js
-  - jstests/core/write/batched_multi_deletes.js
+  - jstests/core/write/delete/batched_multi_deletes_a.js
+  - jstests/core/write/delete/batched_multi_deletes_id.js
   - jstests/core/write/bulk/bulk_write_profile.js
+  - jstests/core/query/regex/regex_collations.js
   - jstests/core/write/delete/delete_hint.js
   - jstests/core/write/find_and_modify/find_and_modify_hint.js
   - jstests/core/write/find_and_modify/find_and_modify_pipeline_update.js
@@ -180,11 +187,13 @@ selector:
   - jstests/core/testminmax.js # min
   # Different field ordering.
   - jstests/core/query/basica.js
+  - jstests/core/query/group_lookup_with_canonical_query_prefix.js
   - jstests/core/query/objid/objid3.js
   - jstests/core/query/or/or1.js
   - jstests/core/query/or/or2.js
   # Runs for too long for time-series collections.
   - jstests/core/write/update/batch_write_command_update.js
+  - jstests/core/write/delete/batch_write_command_delete.js
   # Multikey indexes and array measurement field.
   - jstests/core/match_numeric_components.js
   - jstests/core/query/array/array1.js
@@ -199,6 +208,7 @@ selector:
   - jstests/core/query/not/not2.js
   - jstests/core/query/or/or8.js
   - jstests/core/query/sort/sorta.js
+  - jstests/core/query/type/null_undefined.js
   - jstests/core/query/type/type_array.js
   - jstests/core/write/update/update_numeric_field_name.js
   # Time-series collections have different indexes from regular collections.
@@ -229,12 +239,7 @@ selector:
   - jstests/core/system_js_access.js
   - jstests/core/system_js_drop.js
   - jstests/core/write/find_and_modify/find_and_modify_where.js
-  # TODO(SERVER-85404): Try to include this test.
-  - jstests/core/query/array/array_comparison_correctness.js
-  - jstests/core/query/array/array_index_and_nonIndex_consistent.js
-  - jstests/core/query/min_max_key.js
-  - jstests/core/query/type/type8.js
-  - jstests/core/return_bson_scalar_from_js_function.js
+  # TODO (SERVER-88078): Remove this exclusion.
   - jstests/core/type_bracket.js
   # TODO(SERVER-85322): Try to include this test(s).
   - jstests/core/resume_query.js
@@ -253,8 +258,9 @@ selector:
   - jstests/core/fsync.js
   # Time-series buckets processing may have different cursor behavior.
   - jstests/core/query/cursor/getmore_invalidated_cursors.js
-  # TODO (SERVER-85205): Try to enable the test(s).
-  - jstests/core/write/update/upsert_and.js
+  # TODO SERVER-87065: Add this back in once we prevent it from erroring
+  # when validation hook is run.
+  - jstests/core/write/update/update_blank1.js
 
   exclude_with_any_tags:
   - requires_sharding

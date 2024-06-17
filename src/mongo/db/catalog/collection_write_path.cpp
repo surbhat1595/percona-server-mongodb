@@ -114,6 +114,13 @@ MONGO_FAIL_POINT_DEFINE(hangAfterCollectionInserts);
 // This fail point introduces corruption to documents during insert.
 MONGO_FAIL_POINT_DEFINE(corruptDocumentOnInsert);
 
+// This fail point manually forces the RecordId to be of a given value during insert.
+MONGO_FAIL_POINT_DEFINE(explicitlySetRecordIdOnInsert);
+
+// This fail point skips deletion of the record, so that the deletion call would only delete the
+// index keys.
+MONGO_FAIL_POINT_DEFINE(skipDeleteRecord);
+
 bool compareSafeContentElem(const BSONObj& oldDoc, const BSONObj& newDoc) {
     if (newDoc.hasField(kSafeContent) != oldDoc.hasField(kSafeContent)) {
         return false;
@@ -259,6 +266,10 @@ Status insertDocumentsImpl(OperationContext* opCtx,
                 record_id_helpers::keyForDoc(doc,
                                              collection->getClusteredInfo()->getIndexSpec(),
                                              collection->getDefaultCollator()));
+        } else if (!it->replicatedRecordId.isNull()) {
+            // The 'replicatedRecordId' being set indicates that this insert belongs to a replicated
+            // recordId collection, and we need to use the given recordId while inserting.
+            recordId = it->replicatedRecordId;
         } else if (!it->recordId.isNull()) {
             // This case would only normally be called in a testing circumstance to avoid
             // automatically generating record ids for capped collections.
@@ -275,11 +286,22 @@ Status insertDocumentsImpl(OperationContext* opCtx,
             continue;
         }
 
+        explicitlySetRecordIdOnInsert.execute([&](const BSONObj& data) {
+            const auto docToMatch = data["doc"].Obj();
+            if (doc.woCompare(docToMatch) == 0) {
+                {
+                    auto ridValue = data["rid"].safeNumberInt();
+                    recordId = RecordId(ridValue);
+                }
+            }
+        });
+
         records.emplace_back(Record{std::move(recordId), RecordData(doc.objdata(), doc.objsize())});
         timestamps.emplace_back(it->oplogSlot.getTimestamp());
     }
 
     Status status = collection->getRecordStore()->insertRecords(opCtx, &records, timestamps);
+
     if (!status.isOK()) {
         if (auto extraInfo = status.extraInfo<DuplicateKeyErrorInfo>();
             extraInfo && collection->isClustered()) {
@@ -302,6 +324,7 @@ Status insertDocumentsImpl(OperationContext* opCtx,
         }
         return status;
     }
+
     std::vector<BsonRecord> bsonRecords;
     bsonRecords.reserve(count);
     int recordIndex = 0;
@@ -315,6 +338,16 @@ Status insertDocumentsImpl(OperationContext* opCtx,
         BsonRecord bsonRecord = {
             std::move(loc), Timestamp(it->oplogSlot.getTimestamp()), &(it->doc)};
         bsonRecords.emplace_back(std::move(bsonRecord));
+    }
+
+    // An empty vector of recordIds is ignored by the OpObserver. When non-empty,
+    // the OpObserver will add recordIds to the generated oplog entries.
+    std::vector<RecordId> recordIds;
+    if (collection->areRecordIdsReplicated()) {
+        recordIds.reserve(count);
+        for (const auto& r : records) {
+            recordIds.push_back(r.id);
+        }
     }
 
     int64_t keysInserted = 0;
@@ -341,6 +374,7 @@ Status insertDocumentsImpl(OperationContext* opCtx,
             collection,
             begin,
             end,
+            recordIds,
             /*fromMigrate=*/makeFromMigrateForInserts(opCtx, nss, begin, end, fromMigrate),
             /*defaultFromMigrate=*/fromMigrate);
     }
@@ -355,6 +389,7 @@ Status insertDocumentsImpl(OperationContext* opCtx,
 Status insertDocumentForBulkLoader(OperationContext* opCtx,
                                    const CollectionPtr& collection,
                                    const BSONObj& doc,
+                                   RecordId replicatedRecordId,
                                    const OnRecordInsertedFn& onRecordInserted) {
     const auto& nss = collection->ns();
 
@@ -371,7 +406,14 @@ Status insertDocumentForBulkLoader(OperationContext* opCtx,
     dassert(shard_role_details::getLocker(opCtx)->isCollectionLockedForMode(nss, MODE_IX) ||
             (nss.isOplog() && shard_role_details::getLocker(opCtx)->isWriteLocked()));
 
-    RecordId recordId;
+    // The replicatedRecordId must be provided if the collection has recordIdsReplicated:true and it
+    // must not be provided if the collection has recordIdsReplicated:false
+    invariant(collection->areRecordIdsReplicated() != replicatedRecordId.isNull(),
+              str::stream() << "Unexpected recordId value for collection with ns: '"
+                            << collection->ns().toStringForErrorMsg() << "', uuid: '"
+                            << collection->uuid());
+
+    RecordId recordId = replicatedRecordId;
     if (collection->isClustered()) {
         invariant(collection->getRecordStore()->keyFormat() == KeyFormat::String);
         recordId = uassertStatusOK(record_id_helpers::keyForDoc(
@@ -407,11 +449,14 @@ Status insertDocumentForBulkLoader(OperationContext* opCtx,
     }
     inserts.emplace_back(kUninitializedStmtId, doc, slot);
 
+    // During initial sync, there are no recordIds to be passed to the OpObserver to
+    // include in oplog entries, as we don't generate oplog entries.
     opCtx->getServiceContext()->getOpObserver()->onInserts(
         opCtx,
         collection,
         inserts.begin(),
         inserts.end(),
+        /*recordIds=*/{},
         /*fromMigrate=*/std::vector<bool>(inserts.size(), false),
         /*defaultFromMigrate=*/false);
 
@@ -609,6 +654,10 @@ void updateDocument(OperationContext* opCtx,
     args->changeStreamPreAndPostImagesEnabledForCollection =
         collection->isChangeStreamPreAndPostImagesEnabled();
 
+    if (collection->areRecordIdsReplicated()) {
+        args->replicatedRecordId = oldLocation;
+    }
+
     OplogUpdateEntryArgs onUpdateArgs(args, collection);
     const bool setNeedsRetryImageOplogField =
         args->storeDocOption != CollectionUpdateArgs::StoreDocOption::None;
@@ -684,6 +733,10 @@ StatusWith<BSONObj> updateDocumentWithDamages(OperationContext* opCtx,
         shard_role_details::getLocker(opCtx)->isCollectionLockedForMode(collection->ns(), MODE_IX));
     invariant(oldDoc.snapshotId() == shard_role_details::getRecoveryUnit(opCtx)->getSnapshotId());
     invariant(collection->updateWithDamagesSupported());
+
+    if (collection->areRecordIdsReplicated()) {
+        args->replicatedRecordId = loc;
+    }
 
     OplogUpdateEntryArgs onUpdateArgs(args, collection);
     const bool setNeedsRetryImageOplogField =
@@ -798,6 +851,9 @@ void deleteDocument(OperationContext* opCtx,
     }
 
     OplogDeleteEntryArgs deleteArgs;
+    if (collection->areRecordIdsReplicated()) {
+        deleteArgs.replicatedRecordId = loc;
+    }
 
     // TODO(SERVER-80956): remove this call.
     opCtx->getServiceContext()->getOpObserver()->aboutToDelete(
@@ -822,7 +878,16 @@ void deleteDocument(OperationContext* opCtx,
     int64_t keysDeleted = 0;
     collection->getIndexCatalog()->unindexRecord(
         opCtx, collection, doc.value(), loc, noWarn, &keysDeleted, checkRecordId);
-    collection->getRecordStore()->deleteRecord(opCtx, loc);
+
+    if (MONGO_unlikely(skipDeleteRecord.shouldFail())) {
+        LOGV2_DEBUG(8096000,
+                    3,
+                    "Skipping deleting record in deleteDocument",
+                    "recordId"_attr = loc,
+                    "doc"_attr = doc.value().toString());
+    } else {
+        collection->getRecordStore()->deleteRecord(opCtx, loc);
+    }
 
     opCtx->getServiceContext()->getOpObserver()->onDelete(
         opCtx, collection, stmtId, doc.value(), deleteArgs);

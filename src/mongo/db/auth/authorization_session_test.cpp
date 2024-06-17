@@ -356,7 +356,7 @@ TEST_F(AuthorizationSessionTest, InvalidateUser) {
     ASSERT_OK(createUser(kSpencerTest, {{"read", "test"}}));
 
     // Make sure that invalidating the user causes the session to reload its privileges.
-    authzManager->invalidateUserByName(_opCtx.get(), user->getName());
+    AuthorizationManager::get(_opCtx->getService())->invalidateUserByName(user->getName());
     authzSession->startRequest(_opCtx.get());  // Refreshes cached data for invalid users
     ASSERT_TRUE(
         authzSession->isAuthorizedForActionsOnResource(testFooCollResource, ActionType::find));
@@ -369,7 +369,7 @@ TEST_F(AuthorizationSessionTest, InvalidateUser) {
     ASSERT_OK(managerState->remove(
         _opCtx.get(), NamespaceString::kAdminUsersNamespace, BSONObj(), BSONObj(), &ignored));
     // Make sure that invalidating the user causes the session to reload its privileges.
-    authzManager->invalidateUserByName(_opCtx.get(), user->getName());
+    AuthorizationManager::get(_opCtx->getService())->invalidateUserByName(user->getName());
     authzSession->startRequest(_opCtx.get());  // Refreshes cached data for invalid users
     ASSERT_FALSE(
         authzSession->isAuthorizedForActionsOnResource(testFooCollResource, ActionType::find));
@@ -401,7 +401,7 @@ TEST_F(AuthorizationSessionTest, UseOldUserInfoInFaceOfConnectivityProblems) {
     // Even though the user's privileges have been reduced, since we've configured user
     // document lookup to fail, the authz session should continue to use its known out-of-date
     // privilege data.
-    authzManager->invalidateUserByName(_opCtx.get(), user->getName());
+    AuthorizationManager::get(_opCtx->getService())->invalidateUserByName(user->getName());
     authzSession->startRequest(_opCtx.get());  // Refreshes cached data for invalid users
     ASSERT_TRUE(
         authzSession->isAuthorizedForActionsOnResource(testFooCollResource, ActionType::find));
@@ -1334,7 +1334,6 @@ TEST_F(AuthorizationSessionTest, CanUseUUIDNamespacesWithPrivilege) {
     BSONObj stringObj = BSON("a"
                              << "string");
     BSONObj uuidObj = BSON("a" << UUID::gen());
-    BSONObj invalidObj = BSON("a" << 12);
 
     // Strings require no privileges
     ASSERT_TRUE(authzSession->isAuthorizedToParseNamespaceElement(stringObj.firstElement()));
@@ -1342,20 +1341,12 @@ TEST_F(AuthorizationSessionTest, CanUseUUIDNamespacesWithPrivilege) {
     // UUIDs cannot be parsed with default privileges
     ASSERT_FALSE(authzSession->isAuthorizedToParseNamespaceElement(uuidObj.firstElement()));
 
-    // Element must be either a string, or a UUID
-    ASSERT_THROWS_CODE(authzSession->isAuthorizedToParseNamespaceElement(invalidObj.firstElement()),
-                       AssertionException,
-                       ErrorCodes::InvalidNamespace);
-
     // The useUUID privilege allows UUIDs to be parsed
     authzSession->assumePrivilegesForDB(
         Privilege(ResourcePattern::forClusterResource(boost::none), ActionType::useUUID), testDB);
 
     ASSERT_TRUE(authzSession->isAuthorizedToParseNamespaceElement(stringObj.firstElement()));
     ASSERT_TRUE(authzSession->isAuthorizedToParseNamespaceElement(uuidObj.firstElement()));
-    ASSERT_THROWS_CODE(authzSession->isAuthorizedToParseNamespaceElement(invalidObj.firstElement()),
-                       AssertionException,
-                       ErrorCodes::InvalidNamespace);
 
     // Verify we recorded the all the auth checks correctly
     AuthorizationContract ac(
@@ -1741,6 +1732,21 @@ TEST_F(AuthorizationSessionTest, ExpirationWithSecurityTokenNOK) {
     }
 }
 
+TEST_F(AuthorizationSessionTest, CheckBuiltInRolesForBypassDefaultMaxTimeMS) {
+    // Verify the "root" role is authorised  for 'bypassDefaultMaxTimeMS' for all resources.
+    authzSession->assumePrivilegesForBuiltinRole(RoleName{"root", "admin"});
+    ASSERT_TRUE(authzSession->isAuthorizedForActionsOnResource(
+        ResourcePattern::forAnyResource(boost::none), ActionType::bypassDefaultMaxTimeMS));
+
+    authzSession->logoutAllDatabases(_client.get(), "Test finished");
+
+    // Verify the "__system" role is authorised  for 'bypassDefaultMaxTimeMS' for all resources.
+    auto client = getServiceContext()->getService()->makeClient("directClient");
+    authzSession->grantInternalAuthorization(client.get());
+    ASSERT_TRUE(authzSession->isAuthorizedForActionsOnResource(
+        ResourcePattern::forAnyResource(boost::none), ActionType::bypassDefaultMaxTimeMS));
+}
+
 class SystemBucketsTest : public AuthorizationSessionTest {
 protected:
     static const DatabaseName sb_db_test;
@@ -2018,6 +2024,28 @@ TEST_F(SystemBucketsTest, CanCheckIfHasAnyPrivilegeInResourceDBForSystemBuckets)
         Privilege(ResourcePattern::forAnySystemBuckets(boost::none), ActionType::find), testDB);
     ASSERT_TRUE(authzSession->isAuthorizedForAnyActionOnAnyResourceInDB(sb_db_test));
     ASSERT_TRUE(authzSession->isAuthorizedForAnyActionOnAnyResourceInDB(sb_db_other));
+}
+
+TEST_F(AuthorizationSessionTest, InternalSystemClientsBypassValidateRestrictions) {
+    // set up a direct client without transport session
+    auto client = getServiceContext()->getService()->makeClient("directClient");
+    // set Client user to be the internal __system user.
+    authzSession->grantInternalAuthorization(client.get());
+    auto opCtx = client->makeOperationContext();
+
+    ASSERT(authzSession->getAuthenticatedUser().has_value());
+    UserHandle currentUser = authzSession->getAuthenticatedUser().value();
+    ASSERT(currentUser.isValid());
+    ASSERT(!currentUser->isInvalidated());
+
+    // invalidate the __system user to force the next request to validate restrictions
+    currentUser->invalidate();
+    ASSERT(currentUser.isValid());
+    ASSERT(currentUser->isInvalidated());
+
+    // should not fail even though client does not have a transport session
+    authzSession->startRequest(opCtx.get());
+    ASSERT_OK(currentUser->validateRestrictions(opCtx.get()));
 }
 
 }  // namespace

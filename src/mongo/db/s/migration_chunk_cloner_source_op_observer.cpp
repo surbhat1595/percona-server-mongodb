@@ -48,7 +48,6 @@
 #include "mongo/db/s/collection_sharding_state.h"
 #include "mongo/db/s/database_sharding_state.h"
 #include "mongo/db/s/migration_chunk_cloner_source.h"
-#include "mongo/db/s/migration_source_manager.h"
 #include "mongo/db/s/sharding_write_router.h"
 #include "mongo/db/storage/recovery_unit.h"
 #include "mongo/db/transaction/transaction_participant.h"
@@ -141,6 +140,7 @@ void MigrationChunkClonerSourceOpObserver::onInserts(
     const CollectionPtr& coll,
     std::vector<InsertStatement>::const_iterator first,
     std::vector<InsertStatement>::const_iterator last,
+    const std::vector<RecordId>& recordIds,
     std::vector<bool> fromMigrate,
     bool defaultFromMigrate,
     OpStateAccumulator* opAccumulator) {
@@ -178,7 +178,7 @@ void MigrationChunkClonerSourceOpObserver::onInserts(
     auto txnParticipant = TransactionParticipant::get(opCtx);
     const bool inMultiDocumentTransaction =
         txnParticipant && opCtx->writesAreReplicated() && txnParticipant.transactionIsOpen();
-    if (inMultiDocumentTransaction && !opCtx->getWriteUnitOfWork()) {
+    if (inMultiDocumentTransaction && !shard_role_details::getWriteUnitOfWork(opCtx)) {
         return;
     }
 
@@ -348,6 +348,33 @@ void MigrationChunkClonerSourceOpObserver::onTransactionPrepareNonPrimary(
     shard_role_details::getRecoveryUnit(opCtx)->registerChange(
         std::make_unique<LogTransactionOperationsForShardingHandler>(
             lsid, statements, prepareOpTime));
+}
+
+void MigrationChunkClonerSourceOpObserver::onBatchedWriteCommit(
+    OperationContext* opCtx,
+    WriteUnitOfWork::OplogEntryGroupType oplogGroupingFormat,
+    OpStateAccumulator* opAccumulator) {
+    // Return early if we are secondary or in some replication state in which we are not
+    // appending entries to the oplog.
+    if (!opCtx->writesAreReplicated()) {
+        return;
+    }
+
+    // Return early if this isn't a retryable batched write.
+    if (!opAccumulator || opAccumulator->insertOpTimes.empty() ||
+        oplogGroupingFormat != WriteUnitOfWork::kGroupForPossiblyRetryableOperations ||
+        !opCtx->getTxnNumber() || !opCtx->getLogicalSessionId()) {
+        return;
+    }
+
+    auto txnParticipant = TransactionParticipant::get(opCtx);
+    invariant(txnParticipant);
+    const auto affectedNamespaces = txnParticipant.affectedNamespaces();
+    std::vector<NamespaceString> namespaces(affectedNamespaces.begin(), affectedNamespaces.end());
+
+    shard_role_details::getRecoveryUnit(opCtx)->registerChange(
+        std::make_unique<LogRetryableApplyOpsForShardingHandler>(std::move(namespaces),
+                                                                 opAccumulator->insertOpTimes));
 }
 
 }  // namespace mongo

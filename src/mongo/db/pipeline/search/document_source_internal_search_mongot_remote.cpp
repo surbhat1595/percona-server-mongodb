@@ -27,8 +27,6 @@
  *    it in the license file.
  */
 
-#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kQuery
-
 #include "mongo/db/pipeline/search/document_source_internal_search_mongot_remote.h"
 
 #include "mongo/db/curop.h"
@@ -50,6 +48,8 @@
 #include "mongo/logv2/log.h"
 #include "mongo/rpc/get_status_from_command_result.h"
 #include "mongo/transport/transport_layer.h"
+
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kQuery
 
 namespace mongo {
 MONGO_FAIL_POINT_DEFINE(failClassicSearch);
@@ -92,6 +92,8 @@ Value DocumentSourceInternalSearchMongotRemote::serializeWithoutMergePipeline(
                 spec.addField(InternalSearchMongotRemoteSpec::kSortSpecFieldName,
                               opts.serializeLiteral(*_sortSpec));
             }
+            spec.addField(InternalSearchMongotRemoteSpec::kRequiresSearchMetaCursorFieldName,
+                          opts.serializeLiteral(_queryReferencesSearchMeta));
             return spec.freezeToValue();
         } else {
             // mongod/mongos don't know how to read a search query, so we can't redact the correct
@@ -123,6 +125,8 @@ Value DocumentSourceInternalSearchMongotRemote::serializeWithoutMergePipeline(
         mDoc.addField(InternalSearchMongotRemoteSpec::kMongotDocsRequestedFieldName,
                       opts.serializeLiteral(*_mongotDocsRequested));
     }
+    mDoc.addField(InternalSearchMongotRemoteSpec::kRequiresSearchMetaCursorFieldName,
+                  opts.serializeLiteral(_queryReferencesSearchMeta));
     return mDoc.freezeToValue();
 }
 
@@ -183,6 +187,7 @@ bool DocumentSourceInternalSearchMongotRemote::shouldReturnEOF() {
     // Return EOF if pExpCtx->uuid is unset here; the collection we are searching over has not been
     // created yet.
     if (!pExpCtx->uuid) {
+        LOGV2_DEBUG(8569402, 4, "Returning EOF due to lack of UUID");
         return true;
     }
 
@@ -202,6 +207,7 @@ void DocumentSourceInternalSearchMongotRemote::tryToSetSearchMetaVar() {
         _cursor->getCursorVars()) {
         // Variables on the cursor must be an object.
         auto varsObj = Value(_cursor->getCursorVars().value());
+        LOGV2_DEBUG(8569400, 4, "Setting meta vars", "varsObj"_attr = varsObj);
         auto metaVal = varsObj.getDocument().getField(
             Variables::getBuiltinVariableName(Variables::kSearchMetaId));
         if (!metaVal.missing()) {
@@ -212,6 +218,12 @@ void DocumentSourceInternalSearchMongotRemote::tryToSetSearchMetaVar() {
                     auto& opDebug = CurOp::get(pExpCtx->opCtx)->debug();
                     opDebug.mongotCountVal = metaValDoc.getField("count").wrap("count");
                 }
+
+                if (!metaValDoc.getField(kSlowQueryLogFieldName).missing()) {
+                    auto& opDebug = CurOp::get(pExpCtx->opCtx)->debug();
+                    opDebug.mongotSlowQueryLog =
+                        metaValDoc.getField(kSlowQueryLogFieldName).wrap(kSlowQueryLogFieldName);
+                }
             }
         }
     }
@@ -219,6 +231,7 @@ void DocumentSourceInternalSearchMongotRemote::tryToSetSearchMetaVar() {
 
 DocumentSource::GetNextResult DocumentSourceInternalSearchMongotRemote::getNextAfterSetup() {
     auto response = _getNext();
+    LOGV2_DEBUG(8569401, 5, "getting next after setup", "response"_attr = response);
     auto& opDebug = CurOp::get(pExpCtx->opCtx)->debug();
 
     if (opDebug.msWaitingForMongot) {
@@ -266,8 +279,13 @@ DocumentSource::GetNextResult DocumentSourceInternalSearchMongotRemote::getNextA
 }
 
 executor::TaskExecutorCursor DocumentSourceInternalSearchMongotRemote::establishCursor() {
-    auto cursors = mongot_cursor::establishSearchCursors(
-        pExpCtx, _searchQuery, _taskExecutor, _mongotDocsRequested);
+    auto cursors = mongot_cursor::establishCursorsForSearchStage(pExpCtx,
+                                                                 _searchQuery,
+                                                                 _taskExecutor,
+                                                                 _mongotDocsRequested,
+                                                                 nullptr,
+                                                                 _metadataMergeProtocolVersion,
+                                                                 _requiresSearchSequenceToken);
     // Should be called only in unsharded scenario, therefore only expect a results cursor and no
     // metadata cursor.
     tassert(5253301, "Expected exactly one cursor from mongot", cursors.size() == 1);
@@ -276,11 +294,13 @@ executor::TaskExecutorCursor DocumentSourceInternalSearchMongotRemote::establish
 
 DocumentSource::GetNextResult DocumentSourceInternalSearchMongotRemote::doGetNext() {
     if (shouldReturnEOF()) {
+        LOGV2_DEBUG(8569404, 4, "Returning EOF from $internalSearchMongotRemote");
         return DocumentSource::GetNextResult::makeEOF();
     }
 
     // If the collection is sharded we should have a cursor already. Otherwise establish it now.
     if (!_cursor && !_dispatchedQuery) {
+        LOGV2_DEBUG(8569403, 4, "Establishing Cursor");
         _cursor.emplace(establishCursor());
         _dispatchedQuery = true;
     }

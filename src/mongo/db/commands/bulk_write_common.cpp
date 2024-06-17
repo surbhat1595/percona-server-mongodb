@@ -175,8 +175,6 @@ write_ops::InsertCommandRequest makeInsertCommandRequestForFLE(
     const BulkWriteCommandRequest& req,
     const mongo::NamespaceInfoEntry& nsInfoEntry) {
     write_ops::InsertCommandRequest request(nsInfoEntry.getNs(), documents);
-    request.setDollarTenant(req.getDollarTenant());
-    request.setExpectPrefix(req.getExpectPrefix());
     auto& requestBase = request.getWriteCommandRequestBase();
     requestBase.setEncryptionInformation(nsInfoEntry.getEncryptionInformation());
     requestBase.setOrdered(req.getOrdered());
@@ -187,11 +185,16 @@ write_ops::InsertCommandRequest makeInsertCommandRequestForFLE(
 }
 
 write_ops::UpdateOpEntry makeUpdateOpEntryFromUpdateOp(const BulkWriteUpdateOp* op) {
+    uassert(ErrorCodes::FailedToParse,
+            "Cannot specify sort with multi=true",
+            !op->getSort() || !op->getMulti());
+
     write_ops::UpdateOpEntry update;
     update.setQ(op->getFilter());
     update.setMulti(op->getMulti());
     update.setC(op->getConstants());
     update.setU(op->getUpdateMods());
+    update.setSort(op->getSort());
     update.setHint(op->getHint());
     update.setCollation(op->getCollation());
     update.setArrayFilters(op->getArrayFilters());
@@ -252,8 +255,6 @@ write_ops::UpdateCommandRequest makeUpdateCommandRequestFromUpdateOp(
     std::vector<write_ops::UpdateOpEntry> updates{makeUpdateOpEntryFromUpdateOp(op)};
     write_ops::UpdateCommandRequest updateCommand(nsEntry.getNs(), updates);
 
-    updateCommand.setDollarTenant(req.getDollarTenant());
-    updateCommand.setExpectPrefix(req.getExpectPrefix());
     updateCommand.setLet(req.getLet());
 
     auto& requestBase = updateCommand.getWriteCommandRequestBase();
@@ -284,8 +285,6 @@ write_ops::DeleteCommandRequest makeDeleteCommandRequestForFLE(
 
     std::vector<write_ops::DeleteOpEntry> deletes{deleteEntry};
     write_ops::DeleteCommandRequest deleteRequest(nsEntry.getNs(), deletes);
-    deleteRequest.setDollarTenant(req.getDollarTenant());
-    deleteRequest.setExpectPrefix(req.getExpectPrefix());
     deleteRequest.setLet(req.getLet());
     deleteRequest.setLegacyRuntimeConstants(Variables::generateRuntimeConstants(opCtx));
 
@@ -325,14 +324,26 @@ BulkWriteCommandRequest makeSingleOpBulkWriteCommandRequest(
     return singleOpRequest;
 }
 
+namespace {
+template <ClusterRole::Value role>
+UpdateMetrics updateMetricsInstance{"bulkWrite", role};
+
 // Update related command execution metrics.
-static UpdateMetrics bulkWriteUpdateMetric{"bulkWrite"};
+UpdateMetrics& bulkWriteUpdateMetric(ClusterRole role) {
+    if (role.hasExclusively(ClusterRole::ShardServer))
+        return updateMetricsInstance<ClusterRole::ShardServer>;
+    if (role.hasExclusively(ClusterRole::RouterServer))
+        return updateMetricsInstance<ClusterRole::RouterServer>;
+    MONGO_UNREACHABLE;
+}
+}  // namespace
 
 void incrementBulkWriteUpdateMetrics(
+    ClusterRole role,
     const write_ops::UpdateModification& updateMod,
     const mongo::NamespaceString& ns,
     const boost::optional<std::vector<mongo::BSONObj>>& arrayFilters) {
-    incrementUpdateMetrics(updateMod, ns, bulkWriteUpdateMetric, arrayFilters);
+    incrementUpdateMetrics(updateMod, ns, bulkWriteUpdateMetric(role), arrayFilters);
 }
 
 }  // namespace bulk_write_common

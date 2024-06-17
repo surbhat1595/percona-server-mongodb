@@ -88,7 +88,6 @@
 #include "mongo/platform/atomic_word.h"
 #include "mongo/s/sharding_feature_flags_gen.h"
 #include "mongo/util/assert_util.h"
-#include "mongo/util/net/socket_utils.h"
 #include "mongo/util/options_parser/startup_options.h"
 #include "mongo/util/str.h"
 #include "mongo/util/version.h"
@@ -293,11 +292,6 @@ Status validateMongodOptions(const moe::Environment& params) {
     if (setRouterPort && !setConfigRole && !setShardRole) {
         return Status(ErrorCodes::BadValue,
                       "The embedded router requires the node to act as a shard or config server");
-    }
-
-    bool setConfigDBs = params.count("sharding.configDB");
-    if (setConfigDBs && !setRouterPort) {
-        return Status(ErrorCodes::BadValue, "--configdb is only supported in embedded router mode");
     }
 
     if (params.count("maintenanceMode")) {
@@ -719,6 +713,11 @@ Status storeMongodOptions(const moe::Environment& params) {
     }
     if (params.count("magicRestore") && params["magicRestore"].as<bool>() == true) {
         storageGlobalParams.magicRestore = 1;
+
+        // Use an ephemeral port so that users don't connect to a node that is being restored.
+        if (!params.count("net.port")) {
+            serverGlobalParams.port = ServerGlobalParams::DefaultMagicRestorePort;
+        }
     }
 
     if (params.count("maintenanceMode") &&
@@ -833,25 +832,24 @@ Status storeMongodOptions(const moe::Environment& params) {
                                       clusterRoleParam));
         }
 
+        // Every node in a sharded cluster will have by default the RouterServer role. As a
+        // consequence, the only possible combinations are:
+        // - { ShardServer, RouterServer }
+        // - { ShardServer, ConfigServer, RouterServer }
+        // - { RouterServer }
+        serverGlobalParams.clusterRole += ClusterRole::RouterServer;
+
         if (params.count("net.routerPort")) {
-            if (feature_flags::gEmbeddedRouter.isEnabledUseLatestFCVWhenUninitialized(
-                    fcvSnapshot)) {
+            if (feature_flags::gRouterPort.isEnabledUseLatestFCVWhenUninitialized(fcvSnapshot)) {
                 serverGlobalParams.routerPort = params["net.routerPort"].as<int>();
-                serverGlobalParams.clusterRole += ClusterRole::RouterServer;
             }
         }
     } else if (gFeatureFlagAllMongodsAreSharded.isEnabledUseLatestFCVWhenUninitialized(
                    fcvSnapshot) &&
                serverGlobalParams.maintenanceMode == ServerGlobalParams::MaintenanceMode::None) {
         serverGlobalParams.doAutoBootstrapSharding = true;
-        serverGlobalParams.clusterRole = {ClusterRole::ShardServer, ClusterRole::ConfigServer};
-        if (feature_flags::gEmbeddedRouter.isEnabledUseLatestFCVWhenUninitialized(fcvSnapshot)) {
-            serverGlobalParams.clusterRole += ClusterRole::RouterServer;
-        }
-    }
-
-    if (!feature_flags::gEmbeddedRouter.isEnabledUseLatestFCVWhenUninitialized(fcvSnapshot)) {
-        serverGlobalParams.configdbs = ConnectionString{};
+        serverGlobalParams.clusterRole = {
+            ClusterRole::ShardServer, ClusterRole::ConfigServer, ClusterRole::RouterServer};
     }
 
     if (!params.count("net.port")) {

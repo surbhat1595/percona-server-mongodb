@@ -73,6 +73,7 @@
 #include "mongo/db/pipeline/variables.h"
 #include "mongo/db/query/collation/collator_interface.h"
 #include "mongo/db/query/query_shape/serialization_options.h"
+#include "mongo/db/server_feature_flags_gen.h"
 #include "mongo/stdx/unordered_set.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/intrusive_counter.h"
@@ -117,9 +118,11 @@ public:
         /**
          * Lookup from a sharded collection may not be allowed.
          */
-        Status checkShardedForeignCollAllowed(
-            const NamespaceString& nss, bool inMultiDocumentTransaction) const override final {
-            if (!inMultiDocumentTransaction) {
+        Status checkShardedForeignCollAllowed(const NamespaceString& nss,
+                                              bool inMultiDocumentTransaction) const final {
+            const auto fcvSnapshot = serverGlobalParams.mutableFCV.acquireFCVSnapshot();
+            if (!inMultiDocumentTransaction ||
+                gFeatureFlagAllowAdditionalParticipants.isEnabled(fcvSnapshot)) {
                 return Status::OK();
             }
             auto involvedNss = getInvolvedNamespaces();
@@ -152,7 +155,7 @@ public:
         }
 
         PrivilegeVector requiredPrivileges(bool isMongos,
-                                           bool bypassDocumentValidation) const override final;
+                                           bool bypassDocumentValidation) const final;
 
     private:
         bool _hasInternalCollation = false;
@@ -165,9 +168,8 @@ public:
                          const boost::intrusive_ptr<ExpressionContext>&);
 
     const char* getSourceName() const final;
-    void serializeToArray(
-        std::vector<Value>& array,
-        const SerializationOptions& opts = SerializationOptions{}) const final override;
+    void serializeToArray(std::vector<Value>& array,
+                          const SerializationOptions& opts = SerializationOptions{}) const final;
 
     /**
      * Returns the 'as' path, and possibly fields modified by an absorbed $unwind.
@@ -308,6 +310,14 @@ public:
         return _additionalFilter;
     }
 
+    /*
+     * Indicates whether this $lookup stage has absorbed an immediately following $unwind stage that
+     * unwinds the lookup result array.
+     */
+    bool hasUnwindSrc() const {
+        return _unwindSrc ? true : false;
+    }
+
     /**
      * Builds the $lookup pipeline and resolves any variables using the passed 'inputDoc', adding a
      * cursor and/or cache source as appropriate.
@@ -321,10 +331,13 @@ public:
 protected:
     GetNextResult doGetNext() final;
     void doDispose() final;
+    boost::optional<ShardId> computeMergeShardId() const final;
 
     /**
-     * Attempts to combine with a subsequent $unwind stage, setting the internal '_unwindSrc'
-     * field.
+     * Attempts to combine with an immediately following $unwind stage that unwinds the $lookup's
+     * "as" field, setting the '_unwindSrc' member to the absorbed $unwind stage. If this is done
+     * it may also absorb one or more $match stages that immediately followed the $unwind, setting
+     * the resulting combined $match in the '_matchSrc' member.
      */
     Pipeline::SourceContainer::iterator doOptimizeAt(Pipeline::SourceContainer::iterator itr,
                                                      Pipeline::SourceContainer* container) final;
@@ -365,11 +378,14 @@ private:
     /**
      * Should not be called; use serializeToArray instead.
      */
-    Value serialize(
-        const SerializationOptions& opts = SerializationOptions{}) const final override {
+    Value serialize(const SerializationOptions& opts = SerializationOptions{}) const final {
         MONGO_UNREACHABLE_TASSERT(7484304);
     }
 
+    /**
+     * Delegate of doGetNext() in the case where an $unwind stage has been absorbed into _unwindSrc.
+     * This returns the next record resulting from unwinding the lookup's "as" field.
+     */
     GetNextResult unwindResult();
 
     /**
@@ -421,16 +437,34 @@ private:
     bool foreignShardedLookupAllowed() const;
 
     /**
-     * Checks conditions necessary for SBE compatibility and sets '_sbeCompatibility' flag. Note:
+     * Checks conditions necessary for SBE compatibility and sets '_sbeCompatibility' enum. Note:
      * when optimizing the pipeline the flag might be modified.
      */
     void determineSbeCompatibility();
+
+    /**
+     * Sets '_sbeCompatibility' enum to 'maxCompatibility' iff that *reduces* the compatibility.
+     */
+    inline void downgradeSbeCompatibility(SbeCompatibility maxCompatibility) {
+        if (maxCompatibility < _sbeCompatibility) {
+            _sbeCompatibility = maxCompatibility;
+        }
+    }
+
+    /**
+     * Sets 'querySettings' to 'expCtx' if they were not previously set.
+     */
+    void setQuerySettingsIfNeeded(const boost::intrusive_ptr<ExpressionContext>& expCtx,
+                                  const query_settings::QuerySettings& querySettings);
 
     DocumentSourceLookupStats _stats;
 
     NamespaceString _fromNs;
     NamespaceString _resolvedNs;
+
+    // Path to the "as" field of the $lookup where the matches output array will be created.
     FieldPath _as;
+
     boost::optional<BSONObj> _additionalFilter;
 
     // For use when $lookup is specified with localField/foreignField syntax.
@@ -461,6 +495,11 @@ private:
     // collation when not set explicitly.
     bool _hasExplicitCollation = false;
 
+    // Flag, indicating if query settings were set to the '_fromExpCtx'. This is needed to avoid
+    // setting query settings multiple time, which results in assertion failure in cases when query
+    // knobs have already been initialized with the previous query settings.
+    bool _didSetQuerySettingsToPipeline = false;
+
     // Can this $lookup be pushed down into SBE?
     SbeCompatibility _sbeCompatibility = SbeCompatibility::notCompatible;
 
@@ -485,6 +524,6 @@ private:
     PipelinePtr _pipeline;
     boost::optional<Document> _input;
     boost::optional<Document> _nextValue;
-};
+};  // class DocumentSourceLookUp
 
 }  // namespace mongo

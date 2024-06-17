@@ -51,6 +51,7 @@
 #include "mongo/client/read_preference.h"
 #include "mongo/db/api_parameters.h"
 #include "mongo/db/auth/action_type.h"
+#include "mongo/db/auth/authorization_checks.h"
 #include "mongo/db/auth/authorization_session.h"
 #include "mongo/db/auth/privilege.h"
 #include "mongo/db/commands.h"
@@ -104,20 +105,6 @@
 namespace mongo {
 namespace {
 
-query_settings::QuerySettings lookupQuerySettingsForDistinct(
-    const boost::intrusive_ptr<ExpressionContext>& expCtx,
-    const ParsedDistinctCommand& parsedRequest,
-    const NamespaceString& nss) {
-    auto serializationContext = parsedRequest.distinctCommandRequest->getSerializationContext();
-
-    auto queryShapeHashFn = [&]() {
-        query_shape::DistinctCmdShape shape(parsedRequest, expCtx);
-        return shape.sha256Hash(expCtx->opCtx, serializationContext);
-    };
-
-    return query_settings::lookupQuerySettings(expCtx, nss, serializationContext, queryShapeHashFn);
-}
-
 CanonicalDistinct parseDistinctCmd(OperationContext* opCtx,
                                    const NamespaceString& nss,
                                    const BSONObj& cmdObj,
@@ -152,7 +139,8 @@ CanonicalDistinct parseDistinctCmd(OperationContext* opCtx,
                                        extensionsCallback,
                                        MatchExpressionParser::kAllowAllSpecialFeatures);
 
-    expCtx->setQuerySettings(lookupQuerySettingsForDistinct(expCtx, *parsedDistinct, nss));
+    expCtx->setQuerySettings(
+        query_settings::lookupQuerySettingsForDistinct(expCtx, *parsedDistinct, nss));
 
     return CanonicalDistinct::parse(std::move(expCtx), std::move(parsedDistinct));
 }
@@ -228,7 +216,7 @@ public:
                    ExplainOptions::Verbosity verbosity,
                    rpc::ReplyBuilderInterface* result) const override {
         const BSONObj& cmdObj = opMsgRequest.body;
-        const NamespaceString nss(parseNs(opMsgRequest.getDbName(), cmdObj));
+        const NamespaceString nss(parseNs(opMsgRequest.parseDbName(), cmdObj));
         auto canonicalDistinct = parseDistinctCmd(
             opCtx, nss, cmdObj, ExtensionsCallbackNoop(), nullptr /* defaultCollator */, verbosity);
         auto canonicalQuery = canonicalDistinct.getQuery();
@@ -239,6 +227,7 @@ public:
         Timer timer;
 
         std::vector<AsyncRequestsSender::Response> shardResponses;
+        auto bodyBuilder = result->getBodyBuilder();
         try {
             const auto cri = uassertStatusOK(
                 Grid::get(opCtx)->catalogCache()->getCollectionRoutingInfo(opCtx, nss));
@@ -256,31 +245,9 @@ public:
                 boost::none /*letParameters*/,
                 boost::none /*runtimeConstants*/);
         } catch (const ExceptionFor<ErrorCodes::CommandOnShardedViewNotSupportedOnMongod>& ex) {
-
-            auto aggCmdOnView = canonicalDistinct.asAggregationCommand();
-            if (!aggCmdOnView.isOK()) {
-                return aggCmdOnView.getStatus();
-            }
-
-            auto viewAggCmd =
-                OpMsgRequest::fromDBAndBody(nss.dbName(), aggCmdOnView.getValue()).body;
-            auto aggRequestOnView = aggregation_request_helper::parseFromBSON(
-                opCtx,
-                nss,
-                viewAggCmd,
-                verbosity,
-                APIParameters::get(opCtx).getAPIStrict().value_or(false));
-
-
-            auto bodyBuilder = result->getBodyBuilder();
-            // An empty PrivilegeVector is acceptable because these privileges are only checked on
-            // getMore and explain will not open a cursor.
-            return ClusterAggregate::retryOnViewError(opCtx,
-                                                      aggRequestOnView,
-                                                      *ex.extraInfo<ResolvedView>(),
-                                                      nss,
-                                                      PrivilegeVector(),
-                                                      &bodyBuilder);
+            runDistinctOnView(
+                opCtx, canonicalDistinct, *ex.extraInfo<ResolvedView>(), verbosity, bodyBuilder);
+            return Status::OK();
         }
 
         long long millisElapsed = timer.millis();
@@ -288,9 +255,13 @@ public:
         const char* mongosStageName =
             ClusterExplain::getStageNameForReadOp(shardResponses.size(), cmdObj);
 
-        auto bodyBuilder = result->getBodyBuilder();
         return ClusterExplain::buildExplainResult(
-            opCtx, shardResponses, mongosStageName, millisElapsed, cmdObj, &bodyBuilder);
+            ExpressionContext::makeBlankExpressionContext(opCtx, nss),
+            shardResponses,
+            mongosStageName,
+            millisElapsed,
+            cmdObj,
+            &bodyBuilder);
     }
 
     bool run(OperationContext* opCtx,
@@ -338,33 +309,11 @@ public:
                 boost::none /*runtimeConstants*/,
                 true /* eligibleForSampling */);
         } catch (const ExceptionFor<ErrorCodes::CommandOnShardedViewNotSupportedOnMongod>& ex) {
-            auto aggCmdOnView = canonicalDistinct.asAggregationCommand();
-            uassertStatusOK(aggCmdOnView.getStatus());
-
-            auto viewAggCmd =
-                OpMsgRequest::fromDBAndBody(nss.dbName(), aggCmdOnView.getValue()).body;
-            auto aggRequestOnView = aggregation_request_helper::parseFromBSON(
-                opCtx,
-                nss,
-                viewAggCmd,
-                boost::none,
-                APIParameters::get(opCtx).getAPIStrict().value_or(false));
-
-            auto resolvedAggRequest = ex->asExpandedViewAggregation(aggRequestOnView);
-            auto resolvedAggCmd =
-                aggregation_request_helper::serializeToCommandObj(resolvedAggRequest);
-
-            if (auto txnRouter = TransactionRouter::get(opCtx)) {
-                txnRouter.onViewResolutionError(opCtx, nss);
-            }
-
-            BSONObj aggResult = CommandHelpers::runCommandDirectly(
-                opCtx, OpMsgRequestBuilder::create(dbName, std::move(resolvedAggCmd)));
-
-            ViewResponseFormatter formatter(aggResult);
-            auto formatStatus = formatter.appendAsDistinctResponse(&result, boost::none);
-            uassertStatusOK(formatStatus);
-
+            runDistinctOnView(opCtx,
+                              canonicalDistinct,
+                              *ex.extraInfo<ResolvedView>(),
+                              boost::none /* verbosity */,
+                              result);
             return true;
         }
 
@@ -415,6 +364,57 @@ public:
                           repl::ReadConcernArgs::get(opCtx).getArgsAtClusterTime()->asTimestamp());
         }
         return true;
+    }
+
+    void runDistinctOnView(OperationContext* opCtx,
+                           const CanonicalDistinct& canonicalDistinct,
+                           const ResolvedView& resolvedView,
+                           boost::optional<ExplainOptions::Verbosity> verbosity,
+                           BSONObjBuilder& bob) const {
+        const auto& nss = canonicalDistinct.getQuery()->nss();
+        const auto& dbName = nss.dbName();
+        const auto& vts = auth::ValidatedTenancyScope::get(opCtx);
+        const auto viewAggCmd =
+            OpMsgRequestBuilder::create(
+                vts, dbName, uassertStatusOK(canonicalDistinct.asAggregationCommand()))
+                .body;
+        auto viewAggRequest = aggregation_request_helper::parseFromBSON(
+            opCtx,
+            nss,
+            viewAggCmd,
+            verbosity,
+            APIParameters::get(opCtx).getAPIStrict().value_or(false),
+            canonicalDistinct.getQuery()->getFindCommandRequest().getSerializationContext());
+
+        // Propagate the query settings with the request to the shards if present.
+        const auto& querySettings = canonicalDistinct.getQuery()->getExpCtx()->getQuerySettings();
+        if (!query_settings::utils::isDefault(querySettings)) {
+            viewAggRequest.setQuerySettings(querySettings);
+        }
+
+        // If running explain distinct on view, then aggregate is executed without plivilege checks
+        // and without response formatting.
+        if (verbosity) {
+            uassertStatusOK(ClusterAggregate::retryOnViewError(
+                opCtx, viewAggRequest, resolvedView, nss, PrivilegeVector(), &bob));
+            return;
+        }
+
+        const auto privileges = uassertStatusOK(
+            auth::getPrivilegesForAggregate(AuthorizationSession::get(opCtx->getClient()),
+                                            viewAggRequest.getNamespace(),
+                                            viewAggRequest,
+                                            true /* isMongos */));
+        uassertStatusOK(ClusterAggregate::retryOnViewError(
+            opCtx, viewAggRequest, resolvedView, nss, privileges, &bob));
+
+        // Copy the result from the aggregate command.
+        CommandHelpers::extractOrAppendOk(bob);
+        ViewResponseFormatter responseFormatter(bob.asTempObj().copy());
+
+        // Reset the builder state, as the response will be written to the same builder.
+        bob.resetToEmpty();
+        uassertStatusOK(responseFormatter.appendAsDistinctResponse(&bob, dbName.tenantId()));
     }
 };
 MONGO_REGISTER_COMMAND(DistinctCmd).forRouter();

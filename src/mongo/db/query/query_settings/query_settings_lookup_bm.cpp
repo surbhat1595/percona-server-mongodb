@@ -47,8 +47,7 @@ namespace {
 static auto const kSerializationContext =
     SerializationContext{SerializationContext::Source::Command,
                          SerializationContext::CallerType::Request,
-                         SerializationContext::Prefix::Default,
-                         true /* nonPrefixedTenantId */};
+                         SerializationContext::Prefix::ExcludePrefix};
 
 NamespaceString makeNamespace(const boost::optional<TenantId>& tenantId = boost::none) {
     auto dbName = DatabaseName::createDatabaseName_forTest(tenantId, "db");
@@ -255,8 +254,10 @@ public:
 
             QuerySettings querySettings;
             querySettings.setQueryFramework(QueryFrameworkControlEnum::kTrySbeEngine);
-            return {
-                findCmdShape.sha256Hash(opCtx.get(), kSerializationContext), querySettings, query};
+            QueryShapeConfiguration result(
+                findCmdShape.sha256Hash(opCtx.get(), kSerializationContext), querySettings);
+            result.setRepresentativeQuery(query);
+            return result;
         };
 
         for (auto i = 0; i < dummyQuerySettingsCount; i++) {
@@ -286,17 +287,6 @@ public:
         return TenantId(OID::fromTerm(threadId));
     }
 
-    query_settings::QuerySettings lookup(OperationContext* opCtx,
-                                         const boost::intrusive_ptr<ExpressionContext> expCtx,
-                                         const ParsedFindCommand& parsedFind,
-                                         const SerializationContext& serializationContext,
-                                         const NamespaceString& nss) {
-        return query_settings::lookupQuerySettings(expCtx, nss, serializationContext, [&]() {
-            query_shape::FindCmdShape findCmdShape(parsedFind, expCtx);
-            return findCmdShape.sha256Hash(opCtx, serializationContext);
-        });
-    }
-
     void runBenchmark(benchmark::State& state) {
         auto client = getGlobalServiceContext()->getService()->makeClient(
             str::stream() << "thread: " << state.thread_index);
@@ -316,11 +306,11 @@ public:
                 // Create new query shape configuration with the generated request.
                 QuerySettings querySettings;
                 querySettings.setQueryFramework(QueryFrameworkControlEnum::kTrySbeEngine);
-                QueryShapeConfiguration hitQueryShapeConfiguration = {
+                QueryShapeConfiguration hitQueryShapeConfiguration{
                     query_shape::FindCmdShape(*parsedFindRequest, expCtx)
                         .sha256Hash(opCtx.get(), kSerializationContext),
-                    querySettings,
-                    bob.asTempObj().getOwned()};
+                    querySettings};
+                hitQueryShapeConfiguration.setRepresentativeQuery(bob.asTempObj().getOwned());
 
                 // Update the query shape configurations by adding a new one, which will be used for
                 // the lookup.
@@ -345,7 +335,7 @@ public:
 
         while (state.KeepRunning()) {
             benchmark::DoNotOptimize(
-                lookup(opCtx.get(), expCtx, *parsedFind, kSerializationContext, ns));
+                query_settings::lookupQuerySettingsForFind(expCtx, *parsedFind, ns));
         }
     }
 

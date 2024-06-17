@@ -18,8 +18,9 @@
  *     requires_profiling,
  *     # We need a timeseries collection.
  *     requires_timeseries,
- *     # Plan cache state is node-local and will not get migrated alongside tenant data.
+ *     # Plan cache state is node-local and will not get migrated alongside user data.
  *     tenant_migration_incompatible,
+ *     assumes_balancer_off,
  * ]
  */
 import {
@@ -97,7 +98,7 @@ const testBoundedSorterPlanCache = (sortDirection, indexDirection) => {
     // Get constants needed for replanning.
     const cursorStageName = "$cursor";
     const planCacheKey =
-        getPlanCacheKeyFromExplain(getAggPlanStage(explain, cursorStageName)[cursorStageName], db);
+        getPlanCacheKeyFromExplain(getAggPlanStage(explain, cursorStageName)[cursorStageName]);
     const planCacheEntry = (() => {
         const planCache = bucketsColl.getPlanCache().list([{$match: {planCacheKey}}]);
         assert.eq(planCache.length, 1, planCache);

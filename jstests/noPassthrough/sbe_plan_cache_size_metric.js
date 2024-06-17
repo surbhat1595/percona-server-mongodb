@@ -8,8 +8,6 @@
  *   # If all chunks are moved off of a shard, it can cause the plan cache to miss commands.
  *   assumes_balancer_off,
  *   does_not_support_stepdowns,
- *   # TODO SERVER-67607: Test plan cache with CQF enabled.
- *   cqf_experimental_incompatible,
  *   featureFlagSbeFull,
  * ]
  */
@@ -27,7 +25,7 @@ function getCacheEntriesByQueryHashKey(coll, queryHash) {
 
 function assertQueryInPlanCache(coll, query) {
     const explainResult = assert.commandWorked(coll.explain().find(query).finish());
-    const queryHash = getQueryHashFromExplain(explainResult, db);
+    const queryHash = getQueryHashFromExplain(explainResult);
     const planCacheEntries = getCacheEntriesByQueryHashKey(coll, queryHash);
     assert.eq(1, planCacheEntries.length, planCacheEntries);
 }

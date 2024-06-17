@@ -48,7 +48,6 @@
 #include "mongo/db/auth/authorization_checks.h"
 #include "mongo/db/auth/authorization_session.h"
 #include "mongo/db/auth/privilege.h"
-#include "mongo/db/catalog/external_data_source_scope_guard.h"
 #include "mongo/db/commands.h"
 #include "mongo/db/commands/run_aggregate.h"
 #include "mongo/db/database_name.h"
@@ -63,6 +62,7 @@
 #include "mongo/db/query/explain_verbosity_gen.h"
 #include "mongo/db/query/query_knobs_gen.h"
 #include "mongo/db/query/query_request_helper.h"
+#include "mongo/db/query/query_settings/query_settings_utils.h"
 #include "mongo/db/read_concern_support_result.h"
 #include "mongo/db/repl/read_concern_level.h"
 #include "mongo/db/server_options.h"
@@ -83,7 +83,7 @@ class PipelineCommand final : public Command {
 public:
     PipelineCommand() : Command("aggregate") {}
 
-    const std::set<std::string>& apiVersions() const {
+    const std::set<std::string>& apiVersions() const override {
         return kApiVersions1;
     }
 
@@ -115,7 +115,7 @@ public:
 
         const auto aggregationRequest = aggregation_request_helper::parseFromBSON(
             opCtx,
-            opMsgRequest.getDbName(),
+            opMsgRequest.parseDbName(),
             opMsgRequest.body,
             explainVerbosity,
             APIParameters::get(opCtx).getAPIStrict().value_or(false),
@@ -129,11 +129,10 @@ public:
 
         // TODO: SERVER-73632 Remove feature flag for PM-635.
         // Forbid users from passing 'querySettings' explicitly.
-        const bool isInternalCLient =
-            opCtx->getClient()->session() && opCtx->getClient()->isInternalClient();
         uassert(7708001,
                 "BSON field 'querySettings' is an unknown field",
-                isInternalCLient || !aggregationRequest.getQuerySettings().has_value());
+                query_settings::utils::allowQuerySettingsFromClient(opCtx->getClient()) ||
+                    !aggregationRequest.getQuerySettings().has_value());
 
         return std::make_unique<Invocation>(
             this, opMsgRequest, std::move(aggregationRequest), std::move(privileges));
@@ -171,7 +170,7 @@ public:
                    PrivilegeVector privileges)
             : CommandInvocation(cmd),
               _request(request),
-              _dbName(request.getDbName()),
+              _dbName(aggregationRequest.getDbName()),
               _aggregationRequest(std::move(aggregationRequest)),
               _liteParsedPipeline(_aggregationRequest),
               _privileges(std::move(privileges)) {
@@ -202,7 +201,7 @@ public:
                         option.getDataSources().size() > 0);
             }
 
-            auto findCollNameInExternalDataSourceOption = [&](const StringData& collName) {
+            auto findCollNameInExternalDataSourceOption = [&](StringData collName) {
                 return std::find_if(externalDataSources->begin(),
                                     externalDataSources->end(),
                                     [&](const ExternalDataSourceOption& externalDataSourceOption) {
@@ -243,6 +242,10 @@ public:
             return true;
         }
 
+        bool isSubjectToIngressAdmissionControl() const override {
+            return true;
+        }
+
         bool canIgnorePrepareConflicts() const override {
             // Aggregate is a special case for prepare conflicts. It may do writes to an output
             // collection, but it enables enforcement of prepare conflicts before doing so.
@@ -269,19 +272,13 @@ public:
             CommandHelpers::handleMarkKillOnClientDisconnect(
                 opCtx, !Pipeline::aggHasWriteStage(_request.body));
 
-            // Create virtual collections and drop them when aggregate command is done. Conceptually
-            // ownership of virtual collections are moved to runAggregate() function together with
-            // 'dropVcollGuard' so that it can clean up virtual collections when it's done with
-            // them. ExternalDataSourceScopeGuard will take care of the situation when any
-            // collection could not be created.
-            ExternalDataSourceScopeGuard dropVcollGuard(opCtx, _usedExternalDataSources);
             uassertStatusOK(runAggregate(opCtx,
                                          _aggregationRequest,
                                          _liteParsedPipeline,
                                          _request.body,
                                          _privileges,
                                          reply,
-                                         std::move(dropVcollGuard)));
+                                         _usedExternalDataSources));
 
             // The aggregate command's response is unstable when 'explain' or 'exchange' fields are
             // set.
@@ -298,18 +295,21 @@ public:
             return _aggregationRequest.getNamespace();
         }
 
+        const DatabaseName& db() const override {
+            return _dbName;
+        }
+
         void explain(OperationContext* opCtx,
                      ExplainOptions::Verbosity verbosity,
                      rpc::ReplyBuilderInterface* result) override {
             // See run() method for details.
-            ExternalDataSourceScopeGuard dropVcollGuard(opCtx, _usedExternalDataSources);
             uassertStatusOK(runAggregate(opCtx,
                                          _aggregationRequest,
                                          _liteParsedPipeline,
                                          _request.body,
                                          _privileges,
                                          result,
-                                         std::move(dropVcollGuard)));
+                                         _usedExternalDataSources));
         }
 
         void doCheckAuthorization(OperationContext* opCtx) const override {
@@ -339,7 +339,7 @@ public:
     bool maintenanceOk() const override {
         return false;
     }
-    ReadWriteType getReadWriteType() const {
+    ReadWriteType getReadWriteType() const override {
         return ReadWriteType::kRead;
     }
 

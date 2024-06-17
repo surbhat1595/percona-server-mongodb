@@ -4,9 +4,10 @@
  * collection. Since we use the same coordinator, we both check the createUnsplittableCollection
  * works and that shardCollection won't generate unsplittable collection.
  * @tags: [
- *   featureFlagTrackUnshardedCollectionsOnShardingCatalog,
- *   multiversion_incompatible,
+ *   # Needed to run createUnsplittableCollection
+ *   featureFlagAuthoritativeShardCollection,
  *   assumes_balancer_off,
+ *   requires_fcv_80
  * ]
  */
 
@@ -42,10 +43,9 @@ jsTest.log(
     assert.eq(chunk.shard, shard1);
 }
 
-if (FeatureFlagUtil.isEnabled(st.s, "AuthoritativeShardCollection")) {
-    jsTest.log(
-        "Testing that creating a collection on a different data shard when it exists already fails");
-
+jsTest.log(
+    "Testing that creating a collection on a different data shard when it exists already fails");
+{
     const kDataColl = 'unsplittable_collection_on_different_shard_2';
 
     assert.commandWorked(st.s.getDB(kDbName).runCommand(

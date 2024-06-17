@@ -50,14 +50,13 @@ void BatchedWriteContext::addBatchedOperation(OperationContext* opCtx,
     invariant(_batchWrites);
 
     // Current support is only limited to insert update and delete operations, no change stream
-    // pre-images, no multi-doc transactions, no retryable writes.
+    // pre-images, no multi-doc transactions.
     invariant(operation.getOpType() == repl::OpTypeEnum::kDelete ||
               operation.getOpType() == repl::OpTypeEnum::kInsert ||
               operation.getOpType() == repl::OpTypeEnum::kUpdate);
     invariant(operation.getChangeStreamPreImageRecordingMode() ==
               repl::ReplOperation::ChangeStreamPreImageRecordingMode::kOff);
     invariant(!opCtx->inMultiDocumentTransaction());
-    invariant(!opCtx->getTxnNumber());
     invariant(shard_role_details::getLocker(opCtx)->inAWriteUnitOfWork());
 
     invariantStatusOK(_batchedOperations.addOperation(operation));
@@ -70,6 +69,7 @@ TransactionOperations* BatchedWriteContext::getBatchedOperations(OperationContex
 
 void BatchedWriteContext::clearBatchedOperations(OperationContext* opCtx) {
     _batchedOperations.clear();
+    _defaultFromMigrate = false;
 }
 
 bool BatchedWriteContext::writesAreBatched() const {
@@ -78,5 +78,11 @@ bool BatchedWriteContext::writesAreBatched() const {
 void BatchedWriteContext::setWritesAreBatched(bool batched) {
     _batchWrites = batched;
 }
+
+void BatchedWriteContext::setDefaultFromMigrate(bool defaultFromMigrate) {
+    invariant(_defaultFromMigrate == defaultFromMigrate || _batchedOperations.isEmpty());
+    _defaultFromMigrate = defaultFromMigrate;
+}
+
 
 }  // namespace mongo

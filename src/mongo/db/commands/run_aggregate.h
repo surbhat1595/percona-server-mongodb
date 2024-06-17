@@ -55,25 +55,18 @@ namespace mongo {
  *
  * On success, fills out 'result' with the command response.
  */
-Status runAggregate(OperationContext* opCtx,
-                    AggregateCommandRequest& request,
-                    const LiteParsedPipeline& liteParsedPipeline,
-                    const BSONObj& cmdObj,
-                    const PrivilegeVector& privileges,
-                    rpc::ReplyBuilderInterface* result,
-                    ExternalDataSourceScopeGuard externalDataSourceGuard);
-
-/**
- * Convenience version that internally constructs the LiteParsedPipeline.
- */
-Status runAggregate(OperationContext* opCtx,
-                    AggregateCommandRequest& request,
-                    const BSONObj& cmdObj,
-                    const PrivilegeVector& privileges,
-                    rpc::ReplyBuilderInterface* result);
+Status runAggregate(
+    OperationContext* opCtx,
+    AggregateCommandRequest& request,
+    const LiteParsedPipeline& liteParsedPipeline,
+    const BSONObj& cmdObj,
+    const PrivilegeVector& privileges,
+    rpc::ReplyBuilderInterface* result,
+    const std::vector<std::pair<NamespaceString, std::vector<ExternalDataSourceInfo>>>&
+        usedExternalDataSources = {});
 
 /**
  * Tracks explicit use of allowDiskUse:false with find and aggregate commands.
  */
-extern CounterMetric allowDiskUseFalseCounter;
+extern Counter64& allowDiskUseFalseCounter;
 }  // namespace mongo

@@ -53,7 +53,8 @@ const testAddingParticipant = function(
     }) {
     let st = new ShardingTest({shards: 4, causallyConsistent: true});
 
-    // SERVER-67748
+    // TODO SERVER-85353 Remove or modify this test to avoid relying on the failpoint and feature
+    // flag to inject added participants
     const featureFlagAllowAdditionalParticipants = FeatureFlagUtil.isEnabled(
         st.configRS.getPrimary().getDB('admin'), "AllowAdditionalParticipants");
     if (!featureFlagAllowAdditionalParticipants) {
@@ -153,14 +154,19 @@ jsTestLog("===Additional Participants Fail Point is ON===");
 
 print("Adding one additional participant:");
 const fpDataOneFunc = (st) => {
-    return {"cmdName": "insert", "ns": ns, "shardId": [st.shard2.shardName]};
+    return {"cmdName": "insert", "ns": ns, "shardId": [st.shard2.shardName], "readOnly": false};
 };
 let expectedParticipantListOne = [0, 1, 2];
 testAddingParticipant(true, expectedParticipantListOne, fpDataOneFunc);
 
 print("Adding multiple additional participants:");
 const fpDataMultipleFunc = (st) => {
-    return {"cmdName": "insert", "ns": ns, "shardId": [st.shard2.shardName, st.shard3.shardName]};
+    return {
+        "cmdName": "insert",
+        "ns": ns,
+        "shardId": [st.shard2.shardName, st.shard3.shardName],
+        "readOnly": false
+    };
 };
 let expectedParticipantListMultiple = [0, 1, 2, 3];
 testAddingParticipant(true, expectedParticipantListMultiple, fpDataMultipleFunc);

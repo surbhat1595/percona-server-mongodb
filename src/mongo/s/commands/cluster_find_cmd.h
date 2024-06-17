@@ -32,20 +32,14 @@
 #include <boost/optional.hpp>
 
 #include "mongo/client/read_preference.h"
-#include "mongo/db/auth/authorization_checks.h"
 #include "mongo/db/auth/authorization_session.h"
-#include "mongo/db/catalog/collection.h"
 #include "mongo/db/commands.h"
 #include "mongo/db/fle_crud.h"
-#include "mongo/db/matcher/extensions_callback_noop.h"
 #include "mongo/db/pipeline/query_request_conversion.h"
 #include "mongo/db/query/cursor_response.h"
 #include "mongo/db/query/query_settings/query_settings_utils.h"
-#include "mongo/db/query/query_shape/query_shape.h"
 #include "mongo/db/query/query_stats/find_key.h"
 #include "mongo/db/query/query_stats/query_stats.h"
-#include "mongo/db/query/query_utils.h"
-#include "mongo/db/stats/counters.h"
 #include "mongo/db/views/resolved_view.h"
 #include "mongo/rpc/get_status_from_command_result.h"
 #include "mongo/s/catalog_cache.h"
@@ -67,7 +61,7 @@ public:
 
     ClusterFindCmdBase() : Command(Impl::kName) {}
 
-    const std::set<std::string>& apiVersions() const {
+    const std::set<std::string>& apiVersions() const override {
         return Impl::getApiVersions();
     }
 
@@ -97,11 +91,11 @@ public:
      * A find command does not increment the command counter, but rather increments the
      * query counter.
      */
-    bool shouldAffectCommandCounter() const override final {
+    bool shouldAffectCommandCounter() const final {
         return false;
     }
 
-    bool shouldAffectQueryCounter() const override final {
+    bool shouldAffectQueryCounter() const final {
         return true;
     }
 
@@ -116,7 +110,7 @@ public:
     class Invocation final : public CommandInvocation {
     public:
         Invocation(const ClusterFindCmdBase* definition, const OpMsgRequest& request)
-            : CommandInvocation(definition), _request(request), _dbName(request.getDbName()) {}
+            : CommandInvocation(definition), _request(request), _dbName(request.parseDbName()) {}
 
     private:
         bool supportsWriteConcern() const override {
@@ -134,6 +128,10 @@ public:
                 CommandHelpers::parseNsCollectionRequired(_dbName, _request.body));
         }
 
+        const DatabaseName& db() const override {
+            return _dbName;
+        }
+
         /**
          * In order to run the find command, you must be authorized for the "find" action
          * type on the collection.
@@ -149,7 +147,7 @@ public:
             Impl::checkCanExplainHere(opCtx);
 
             auto findCommand = _parseCmdObjectToFindCommandRequest(opCtx, ns(), _request.body);
-            auto expCtx = makeExpressionContext(opCtx, *findCommand);
+            auto expCtx = makeExpressionContext(opCtx, *findCommand, verbosity);
             auto parsedFind = uassertStatusOK(parsed_find_command::parse(
                 expCtx,
                 {.findCommand = std::move(findCommand),
@@ -157,15 +155,14 @@ public:
 
             // Update 'findCommand' by setting the looked up query settings, such that they can be
             // applied on the shards.
-            auto querySettings = lookupQuerySettings(expCtx, *parsedFind);
+            auto querySettings =
+                query_settings::lookupQuerySettingsForFind(expCtx, *parsedFind, ns());
+            expCtx->setQuerySettings(querySettings);
             findCommand = std::move(parsedFind->findCommandRequest);
-            if (!querySettings.toBSON().isEmpty()) {
-                findCommand->setQuerySettings(std::move(querySettings));
-            }
 
             try {
-                const auto explainCmd =
-                    ClusterExplain::wrapAsExplain(findCommand->toBSON(BSONObj()), verbosity);
+                const auto explainCmd = ClusterExplain::wrapAsExplain(
+                    findCommand->toBSON(BSONObj()), verbosity, querySettings.toBSON());
 
                 long long millisElapsed;
                 std::vector<AsyncRequestsSender::Response> shardResponses;
@@ -193,7 +190,7 @@ public:
                     ClusterExplain::getStageNameForReadOp(shardResponses.size(), _request.body);
 
                 auto bodyBuilder = result->getBodyBuilder();
-                uassertStatusOK(ClusterExplain::buildExplainResult(opCtx,
+                uassertStatusOK(ClusterExplain::buildExplainResult(expCtx,
                                                                    shardResponses,
                                                                    mongosStageName,
                                                                    millisElapsed,
@@ -204,6 +201,7 @@ public:
                 retryOnViewError(opCtx,
                                  result,
                                  *findCommand,
+                                 querySettings,
                                  *ex.extraInfo<ResolvedView>(),
                                  // An empty PrivilegeVector is acceptable because these privileges
                                  // are only checked on getMore and explain will not open a cursor.
@@ -227,7 +225,7 @@ public:
             }
         }
 
-        void run(OperationContext* opCtx, rpc::ReplyBuilderInterface* result) {
+        void run(OperationContext* opCtx, rpc::ReplyBuilderInterface* result) override {
             Impl::checkCanRunHere(opCtx);
 
             CommandHelpers::handleMarkKillOnClientDisconnect(opCtx);
@@ -242,7 +240,9 @@ public:
             registerRequestForQueryStats(expCtx, *parsedFind);
 
             // Perform the query settings lookup and attach it to 'expCtx'.
-            expCtx->setQuerySettings(lookupQuerySettings(expCtx, *parsedFind));
+            auto querySettings =
+                query_settings::lookupQuerySettingsForFind(expCtx, *parsedFind, ns());
+            expCtx->setQuerySettings(querySettings);
 
             auto cq = std::make_unique<CanonicalQuery>(CanonicalQueryParams{
                 .expCtx = std::move(expCtx), .parsedFind = std::move(parsedFind)});
@@ -273,6 +273,7 @@ public:
                     opCtx,
                     result,
                     cq->getFindCommandRequest(),
+                    querySettings,
                     *ex.extraInfo<ResolvedView>(),
                     {Privilege(ResourcePattern::forExactNamespace(ns()), ActionType::find)});
             }
@@ -339,29 +340,11 @@ public:
             }
         }
 
-        /**
-         * Perform query settings lookup for non IDHACK queries.
-         */
-        query_settings::QuerySettings lookupQuerySettings(
-            const boost::intrusive_ptr<ExpressionContext>& expCtx,
-            const ParsedFindCommand& parsedFind) {
-            // No QuerySettings lookup for IDHACK queries.
-            if (isIdHackEligibleQueryWithoutCollator(*parsedFind.findCommandRequest)) {
-                return {};
-            }
-
-            auto opCtx = expCtx->opCtx;
-            auto serializationContext = parsedFind.findCommandRequest->getSerializationContext();
-            return query_settings::lookupQuerySettings(expCtx, ns(), serializationContext, [&]() {
-                query_shape::FindCmdShape findCmdShape(parsedFind, expCtx);
-                return findCmdShape.sha256Hash(opCtx, serializationContext);
-            });
-        }
-
         void retryOnViewError(
             OperationContext* opCtx,
             rpc::ReplyBuilderInterface* result,
             const FindCommandRequest& findCommand,
+            const query_settings::QuerySettings& querySettings,
             const ResolvedView& resolvedView,
             const PrivilegeVector& privileges,
             boost::optional<mongo::ExplainOptions::Verbosity> verbosity = boost::none) {
@@ -371,6 +354,9 @@ public:
             auto aggRequestOnView =
                 query_request_conversion::asAggregateCommandRequest(findCommand);
             aggRequestOnView.setExplain(verbosity);
+            if (!query_settings::utils::isDefault(querySettings)) {
+                aggRequestOnView.setQuerySettings(querySettings);
+            }
 
             uassertStatusOK(ClusterAggregate::retryOnViewError(
                 opCtx, aggRequestOnView, resolvedView, ns(), privileges, &bodyBuilder));

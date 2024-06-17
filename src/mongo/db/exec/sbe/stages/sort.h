@@ -41,7 +41,6 @@
 #include "mongo/db/exec/sbe/util/debug_print.h"
 #include "mongo/db/exec/sbe/values/slot.h"
 #include "mongo/db/exec/sbe/values/value.h"
-#include "mongo/db/exec/trial_run_tracker.h"
 #include "mongo/db/query/stage_types.h"
 #include "mongo/db/sorter/sorter_stats.h"
 
@@ -85,10 +84,11 @@ public:
               std::unique_ptr<EExpression> limit,
               size_t memoryLimit,
               bool allowDiskUse,
+              PlanYieldPolicy* yieldPolicy,
               PlanNodeId planNodeId,
               bool participateInTrialRunTracking = true);
 
-    ~SortStage();
+    ~SortStage() override;
 
     std::unique_ptr<PlanStage> clone() const final;
 
@@ -102,11 +102,6 @@ public:
     const SpecificStats* getSpecificStats() const final;
     std::vector<DebugPrinter::Block> debugPrint() const final;
     size_t estimateCompileTimeSize() const final;
-
-protected:
-    void doDetachFromTrialRunTracker() override;
-    TrialRunTrackerAttachResultMask doAttachToTrialRunTracker(
-        TrialRunTracker* tracker, TrialRunTrackerAttachResultMask childrenAttachResult) override;
 
 private:
     class SortIface {
@@ -123,7 +118,7 @@ private:
     class SortImpl : public SortIface {
     public:
         SortImpl(SortStage& stage);
-        ~SortImpl();
+        ~SortImpl() override;
 
         void prepare(CompileCtx& ctx) final;
         value::SlotAccessor* getAccessor(CompileCtx& ctx, value::SlotId slot) final;
@@ -175,8 +170,5 @@ private:
     std::unique_ptr<EExpression> _limitExpr;
 
     SortStats _specificStats;
-    // If provided, used during a trial run to accumulate certain execution stats. Once the
-    // trial run is complete, this pointer is reset to nullptr.
-    TrialRunTracker* _tracker{nullptr};
 };
 }  // namespace mongo::sbe

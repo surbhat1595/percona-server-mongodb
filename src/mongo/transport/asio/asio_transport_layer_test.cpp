@@ -342,6 +342,16 @@ TEST(AsioTransportLayer, TCPResetAfterConnectionIsSilentlySwallowed) {
     ASSERT_EQ(sessionsCreated.load(), 0);
 }
 
+TEST(AsioTransportLayer, StopAcceptingSessionsBeforeStart) {
+    auto sm = std::make_unique<test::MockSessionManager>();
+    auto tla = std::make_unique<AsioTransportLayer>(defaultTLAOptions(), std::move(sm));
+    ON_BLOCK_EXIT([&] { tla->shutdown(); });
+
+    ASSERT_OK(tla->setup());
+    tla->stopAcceptingSessions();
+    ASSERT_OK(tla->start());
+}
+
 #ifdef __linux__
 /**
  * Test that the server successfully captures the TCP socket queue depth, and places the value both
@@ -735,6 +745,36 @@ TEST(AsioTransportLayer, ConfirmSocketSetOptionOnResetConnections) {
           "msg"_attr = "{}"_format(thrown ? thrown->message() : ""));
 }
 
+DEATH_TEST_REGEX(AsioTransportLayer, ScheduleOnReactorAfterShutdownFails, "Shutdown in progress") {
+    TestFixture tf;
+
+    Notification<void> shutdown;
+    auto reactor = tf.tla().getReactor(TransportLayer::kNewReactor);
+    auto reactorThread = stdx::thread([reactor, &shutdown] {
+        LOGV2(8703700, "running reactor");
+        reactor->run();
+        LOGV2(8703701, "reactor stopped, draining");
+        reactor->drain();
+        LOGV2(8703702, "reactor drain complete");
+        shutdown.set();
+    });
+    Notification<void> firstTask;
+    reactor->schedule([&](Status s) {
+        LOGV2(8703703, "first task scheduled", "status"_attr = s);
+        firstTask.set();
+    });
+    firstTask.get();
+
+    LOGV2(8703704, "shutting down reactor");
+    reactor->stop();
+    shutdown.get();
+
+    auto guaranteedReactor = makeGuaranteedExecutor(reactor);
+    guaranteedReactor->schedule(
+        [](Status s) { LOGV2(8703705, "task scheduled after stop", "status"_attr = s); });
+    reactorThread.join();
+}
+
 class AsioTransportLayerWithServiceContextTest : public ServiceContextTest {
 public:
     class ThreadCounter {
@@ -924,7 +964,7 @@ public:
     }
 
 private:
-    RAIIServerParameterControllerForTest _scopedFeature{"featureFlagEmbeddedRouter", true};
+    RAIIServerParameterControllerForTest _scopedFeature{"featureFlagRouterPort", true};
     ScopedValueGuard<ClusterRole> _scopedClusterRole{
         serverGlobalParams.clusterRole, {ClusterRole::RouterServer, ClusterRole::ShardServer}};
     std::shared_ptr<void> _disableTfo = tfo::setConfigForTest(0, 0, 0, 1024, Status::OK());
@@ -967,10 +1007,6 @@ public:
 
         ~FirstSessionManager() override {
             _join();
-        }
-
-        Status start() override {
-            return Status::OK();
         }
 
         void startSession(std::shared_ptr<Session> session) override {
@@ -1276,10 +1312,36 @@ TEST_F(IngressAsioNetworkingBatonTest, WaitAndNotify) {
     notification.get(opCtx.get());
 }
 
-TEST_F(IngressAsioNetworkingBatonTest, NotifyDuringPoll) {
+TEST_F(IngressAsioNetworkingBatonTest, NotifyDuringPollWithSessions) {
     // Exercises the interaction between `notify()` and polling, specifically in the case where the
     // notification occurs during polling. `thread` waits until polling has begun and then sends
-    // a notification, while the main thread verifies that `run_until()` is interrupted.
+    // a notification, while the main thread verifies that `run_until()` is interrupted. This
+    // test covers the case where the baton has an active session, which may affect the mechanism
+    // used for polling.
+    auto opCtx = client().makeOperationContext();
+    auto baton = opCtx->getBaton()->networking();
+    auto clkSource = getServiceContext()->getPreciseClockSource();
+    auto session = client().session();
+
+    baton->addSession(*session, NetworkingBaton::Type::In).getAsync([](Status) {});
+
+    MilestoneThread thread([&](Notification<void>& isReady) {
+        FailPointEnableBlock fp("blockAsioNetworkingBatonBeforePoll");
+        isReady.set();
+        waitForTimesEntered(fp, 1);
+        baton->notify();
+    });
+
+    const auto state = baton->run_until(clkSource, Date_t::max());
+    ASSERT_EQ(state, Waitable::TimeoutState::NoTimeout);
+}
+
+TEST_F(IngressAsioNetworkingBatonTest, NotifyDuringPollNoSessions) {
+    // Exercises the interaction between `notify()` and polling, specifically in the case where the
+    // notification occurs during polling. `thread` waits until polling has begun and then sends
+    // a notification, while the main thread verifies that `run_until()` is interrupted. This test
+    // covers the case where the baton has no active sessions, which may affect the mechanism used
+    // for polling.
     auto opCtx = client().makeOperationContext();
     auto baton = opCtx->getBaton()->networking();
     auto clkSource = getServiceContext()->getPreciseClockSource();
@@ -1295,9 +1357,31 @@ TEST_F(IngressAsioNetworkingBatonTest, NotifyDuringPoll) {
     ASSERT_EQ(state, Waitable::TimeoutState::NoTimeout);
 }
 
-TEST_F(IngressAsioNetworkingBatonTest, NotifyBeforePoll) {
+TEST_F(IngressAsioNetworkingBatonTest, NotifyBeforePollWithSessions) {
     // Exercises the interaction between `notify()` and polling in the case where the notification
-    // occurs outside of polling.
+    // occurs outside of polling. This test covers the case where the baton has active sessions,
+    // which is a slightly different codepath from the no sessions case.
+    auto opCtx = client().makeOperationContext();
+    auto baton = opCtx->getBaton()->networking();
+    auto clkSource = getServiceContext()->getPreciseClockSource();
+    auto session = client().session();
+
+    baton->addSession(*session, NetworkingBaton::Type::In).getAsync([](Status) {});
+
+    // Notification prevents timeout
+    baton->notify();
+    auto state = baton->run_until(clkSource, Date_t::max());
+    ASSERT_EQ(state, Waitable::TimeoutState::NoTimeout);
+
+    // No pre-existing notification yields a timeout
+    state = baton->run_until(clkSource, clkSource->now() + Milliseconds(1));
+    ASSERT_EQ(state, Waitable::TimeoutState::Timeout);
+}
+
+TEST_F(IngressAsioNetworkingBatonTest, NotifyBeforePollNoSessions) {
+    // Exercises the interaction between `notify()` and polling in the case where the notification
+    // occurs outside of polling. This test covers the case where the baton has no active sessions,
+    // which is a slightly different codepath from the case where it has active sessions.
     auto opCtx = client().makeOperationContext();
     auto baton = opCtx->getBaton()->networking();
     auto clkSource = getServiceContext()->getPreciseClockSource();

@@ -59,7 +59,8 @@ void PlanStageTestFixture::assertValuesEqual(value::TypeTags lhsTag,
     const auto equal = valueEquals(lhsTag, lhsVal, rhsTag, rhsVal);
     if (!equal) {
         std::stringstream ss;
-        ss << std::make_pair(lhsTag, lhsVal) << " != " << std::make_pair(rhsTag, rhsVal);
+        ss << "assertValuesEqual failure: " << std::make_pair(lhsTag, lhsVal)
+           << " != " << std::make_pair(rhsTag, rhsVal);
         LOGV2(5075401, "{msg}", "msg"_attr = ss.str());
     }
     ASSERT_TRUE(equal);
@@ -122,7 +123,7 @@ std::pair<value::TypeTags, value::Value> PlanStageTestFixture::getAllResults(
     // into the array.
     size_t i = 0;
     for (auto st = stage->getNext(); st == PlanState::ADVANCED; st = stage->getNext(), ++i) {
-        auto [tag, val] = accessor->copyOrMoveValue();
+        auto [tag, val] = accessor->getCopyOfValue();
         resultsView->push_back(tag, val);
 
         // Test out saveState() and restoreState() for 50% of the documents (the first document,
@@ -155,7 +156,7 @@ std::pair<value::TypeTags, value::Value> PlanStageTestFixture::getAllResultsMult
         value::ValueGuard guard{arrTag, arrVal};
         auto arrView = value::getArrayView(arrVal);
         for (size_t i = 0; i < accessors.size(); ++i) {
-            auto [tag, val] = accessors[i]->copyOrMoveValue();
+            auto [tag, val] = accessors[i]->getCopyOfValue();
             arrView->push_back(tag, val);
         }
         guard.reset();

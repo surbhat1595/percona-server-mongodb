@@ -50,7 +50,7 @@ UnionStage::UnionStage(PlanStage::Vector inputStages,
                        value::SlotVector outputVals,
                        PlanNodeId planNodeId,
                        bool participateInTrialRunTracking)
-    : PlanStage("union"_sd, planNodeId, participateInTrialRunTracking),
+    : PlanStage("union"_sd, nullptr /* yieldPolicy */, planNodeId, participateInTrialRunTracking),
       _inputVals{std::move(inputVals)},
       _outputVals{std::move(outputVals)} {
     _children = std::move(inputStages);
@@ -72,7 +72,7 @@ std::unique_ptr<PlanStage> UnionStage::clone() const {
                                         _inputVals,
                                         _outputVals,
                                         _commonStats.nodeId,
-                                        _participateInTrialRunTracking);
+                                        participateInTrialRunTracking());
 }
 
 void UnionStage::prepare(CompileCtx& ctx) {

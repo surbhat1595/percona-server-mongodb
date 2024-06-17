@@ -512,6 +512,15 @@ TEST_F(QueryStatsStoreTest, CorrectlyRedactsFindCommandRequestAllFields) {
     fcr.setAllowDiskUse(false);
     fcr.setShowRecordId(true);
     fcr.setMirrored(true);
+    auto readPreference = BSON("mode"
+                               << "nearest"
+                               << "tags"
+                               << BSON_ARRAY(BSON("some"
+                                                  << "tag")
+                                             << BSON("some"
+                                                     << "other tag")));
+    ReadPreferenceSetting::get(expCtx->opCtx) =
+        uassertStatusOK(ReadPreferenceSetting::fromInnerBSON(readPreference));
     key = makeQueryStatsKeyFindRequest(fcr, expCtx, true);
 
     ASSERT_BSONOBJ_EQ_AUTO(  // NOLINT
@@ -552,6 +561,11 @@ TEST_F(QueryStatsStoreTest, CorrectlyRedactsFindCommandRequestAllFields) {
                 "allowDiskUse": false,
                 "showRecordId": true,
                 "mirrored": true
+            },
+            "$readPreference": { 
+                "mode": "nearest", 
+                "tags": [ { "some": "other tag" }, { "some": "tag" } ], 
+                "hedge": { "enabled": true } 
             },
             "collectionType": "collection",
             "hint": {
@@ -607,6 +621,11 @@ TEST_F(QueryStatsStoreTest, CorrectlyRedactsFindCommandRequestAllFields) {
                 "showRecordId": true,
                 "mirrored": true
             },
+            "$readPreference": { 
+                "mode": "nearest", 
+                "tags": [ { "some": "other tag" }, { "some": "tag" } ], 
+                "hedge": { "enabled": true } 
+            },
             "collectionType": "collection",
             "hint": {
                 "HASH<z>": 1,
@@ -618,13 +637,17 @@ TEST_F(QueryStatsStoreTest, CorrectlyRedactsFindCommandRequestAllFields) {
             "batchSize": "?number"
         })",
         key);
+}
 
-    FindCommandRequest fcr2(
+TEST_F(QueryStatsStoreTest, CorrectlyRedactsTailableFindCommandRequest) {
+    auto expCtx = make_intrusive<ExpressionContextForTest>();
+
+    FindCommandRequest fcr(
         NamespaceStringOrUUID(NamespaceString::createNamespaceString_forTest("testDB.testColl")));
-    fcr2.setAwaitData(true);
-    fcr2.setTailable(true);
-    fcr2.setSort(BSON("$natural" << 1));
-    key = makeQueryStatsKeyFindRequest(fcr2, expCtx, true);
+    fcr.setAwaitData(true);
+    fcr.setTailable(true);
+    fcr.setSort(BSON("$natural" << 1));
+    auto key = makeQueryStatsKeyFindRequest(fcr, expCtx, true);
     ASSERT_BSONOBJ_EQ_AUTO(  // NOLINT
         R"({
             "queryShape": {
@@ -809,8 +832,10 @@ TEST_F(QueryStatsStoreTest, DefinesLetVariables) {
     // Note that this ExpressionContext will not have the let variables defined - we expect the
     // 'makeQueryStatsKey' call to do that.
     auto opCtx = makeOperationContext();
+    auto tenantId = "010203040506070809AABBCC"_sd;
     auto fcr = std::make_unique<FindCommandRequest>(
-        NamespaceStringOrUUID(NamespaceString::createNamespaceString_forTest("testDB.testColl")));
+        NamespaceStringOrUUID(NamespaceString::createNamespaceString_forTest(
+            TenantId::parseFromString(tenantId), "testDB.testColl")));
     fcr->setLet(BSON("var" << 2));
     fcr->setFilter(fromjson("{$expr: [{$eq: ['$a', '$$var']}]}"));
     fcr->setProjection(fromjson("{varIs: '$$var'}"));
@@ -844,6 +869,7 @@ TEST_F(QueryStatsStoreTest, DefinesLetVariables) {
                     "_id": true
                 }
             },
+            "tenantId": "010203040506070809aabbcc",
             "collectionType": "collection"
         })",
         hmacApplied);
@@ -875,6 +901,7 @@ TEST_F(QueryStatsStoreTest, DefinesLetVariables) {
                     "HASH<_id>": true
                 }
             },
+            "tenantId": "HASH<010203040506070809aabbcc>",
             "collectionType": "collection"
         })",
         hmacApplied);

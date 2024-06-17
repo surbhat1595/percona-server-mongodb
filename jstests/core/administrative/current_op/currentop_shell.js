@@ -23,7 +23,7 @@ import {FixtureHelpers} from "jstests/libs/fixture_helpers.js";
 const coll = db.currentOp_cursor;
 coll.drop();
 
-for (let i = 0; i < 3; i++) {
+for (let i = 0; i < 100; i++) {
     assert.commandWorked(coll.insert({val: 1}));
 }
 
@@ -93,10 +93,17 @@ function startShellWithOp(comment) {
 const serverCommandTest = startShellWithOp("currentOp_server");
 res = db.adminCommand({
     currentOp: true,
-    $and: [{"ns": "test.currentOp_cursor"}, {"command.comment": "currentOp_server"}]
+    $and: [
+        {"ns": "test.currentOp_cursor"},
+        {"command.comment": "currentOp_server"},
+        // On the replica set endpoint, currentOp reports both router and shard operations. So
+        // filter out one of them.
+        TestData.testingReplicaSetEndpoint ? {role: "ClusterRole{router}"}
+                                           : {role: {$exists: false}}
+    ]
 });
 
-if (FixtureHelpers.isMongos(db) && FixtureHelpers.isSharded(coll)) {
+if (FixtureHelpers.numberOfShardsForCollection(coll) > 1) {
     // Assert currentOp truncation behavior for each shard in the cluster.
     assert(res.inprog.length >= 1, res);
     res.inprog.forEach((result) => {
@@ -121,9 +128,18 @@ serverCommandTest();
 
 // Test that the db.currentOp() shell helper does not truncate ops.
 const shellHelperTest = startShellWithOp("currentOp_shell");
-res = db.currentOp({"ns": "test.currentOp_cursor", "command.comment": "currentOp_shell"});
+res = db.currentOp({
+    $and: [
+        {"ns": "test.currentOp_cursor"},
+        {"command.comment": "currentOp_shell"},
+        // On the replica set endpoint, currentOp reports both router and shard operations. So
+        // filter out one of them.
+        TestData.testingReplicaSetEndpoint ? {role: "ClusterRole{router}"}
+                                           : {role: {$exists: false}}
+    ]
+});
 
-if (FixtureHelpers.isMongos(db) && FixtureHelpers.isSharded(coll)) {
+if (FixtureHelpers.numberOfShardsForCollection(coll) > 1) {
     assert(res.inprog.length >= 1, res);
     res.inprog.forEach((result) => {
         assert.eq(result.op, "getmore", res);

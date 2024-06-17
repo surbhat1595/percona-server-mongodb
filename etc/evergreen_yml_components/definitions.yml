@@ -27,135 +27,19 @@ ignore:
 ## Some variables for convenience:
 variables:
 
-# Used when the tests it runs depend only on mongod, mongos, the jstestshell and the tools.
-# THIS HAS COPIES IN
-# - etc/evergreen_yml_components/definitions.yml
-# - etc/evergreen_yml_components/tasks/resmoke/server_divisions/clusters_and_integrations/tasks.yml
-# - etc/evergreen_yml_components/tasks/resmoke/server_divisions/durable_transactions_and_availability/tasks.yml
-# - etc/evergreen_yml_components/tasks/resmoke/server_divisions/query/tasks.yml
-# - etc/evergreen_yml_components/tasks/resmoke/non_server_teams/tasks.yml
-# ANY MODIFICATIONS HERE SHOULD ALSO BE MADE IN THOSE FILES
-- &task_template
-  name: template
-  depends_on:
-  - name: archive_dist_test_debug
-  commands:
-  - func: "do setup"
-  - func: "run tests"
-    vars:
-      resmoke_args: --help
-      resmoke_jobs_max: 0  # No cap on number of jobs.
-
-# THIS HAS COPIES IN
-# - etc/evergreen_yml_components/definitions.yml
-# - etc/evergreen_yml_components/tasks/resmoke/server_divisions/clusters_and_integrations/tasks.yml
-# - etc/evergreen_yml_components/tasks/resmoke/server_divisions/durable_transactions_and_availability/tasks.yml
-# - etc/evergreen_yml_components/tasks/resmoke/server_divisions/query/tasks.yml
-# - etc/evergreen_yml_components/tasks/resmoke/non_server_teams/tasks.yml
-# ANY MODIFICATIONS HERE SHOULD ALSO BE MADE IN THOSE FILES
-- &gen_task_template
-  name: gen_task_template
-  depends_on:
-  - name: version_gen
-    variant: generate-tasks-for-version
-    # This is added because of EVG-18211.
-    # Without this we are adding extra dependencies on evergreen and it is causing strain
-    omit_generated_tasks: true
-  - name: archive_dist_test_debug
-  commands:
-  - func: "generate resmoke tasks"
-    vars:
-      resmoke_args: --help
-
-# THIS HAS COPIES IN
-# - etc/evergreen_yml_components/definitions.yml
-# - etc/evergreen_yml_components/tasks/resmoke/server_divisions/clusters_and_integrations/tasks.yml
-# - etc/evergreen_yml_components/tasks/resmoke/server_divisions/durable_transactions_and_availability/tasks.yml
-# - etc/evergreen_yml_components/tasks/resmoke/server_divisions/query/tasks.yml
-# - etc/evergreen_yml_components/tasks/resmoke/non_server_teams/tasks.yml
-# ANY MODIFICATIONS HERE SHOULD ALSO BE MADE IN THOSE FILES
-- &benchmark_template
-  name: benchmark_template
-  depends_on:
-  - name: compile_upload_benchmarks
-  commands:
-  - func: "do benchmark setup"
-  - func: "run tests"
-    vars:
-      resmoke_args: --help
-      resmoke_jobs_max: 1
-  - func: "send benchmark results"
-#  - func: "analyze benchmark results"
-    vars:
-      suite: benchmark_suite
-
-# THIS HAS COPIES IN
-# - etc/evergreen_yml_components/definitions.yml
-# - etc/evergreen_yml_components/tasks/resmoke/server_divisions/clusters_and_integrations/tasks.yml
-# - etc/evergreen_yml_components/tasks/resmoke/server_divisions/durable_transactions_and_availability/tasks.yml
-# - etc/evergreen_yml_components/tasks/resmoke/server_divisions/query/tasks.yml
-# ANY MODIFICATIONS HERE SHOULD ALSO BE MADE IN THOSE FILES
-- &jstestfuzz_config_vars
-  is_jstestfuzz: true
-  num_files: 15
-  num_tasks: 5  # Upperbound by `max_sub_suites` specified through the variant with each task still running `num_files` files.
-  # It is error prone to require each fuzzer-related Evergreen task to need to override the
-  # resmoke_args variable. However, the resmoke_args variable must be defined as a string in the
-  # task generation configuration to satisfy mongodb/mongo-task-generator. We therefore specify an
-  # empty string for the variable to reflect there are no additional arguments provided to resmoke
-  # by default for the fuzzer-related tasks.
-  resmoke_args: ""
-  resmoke_jobs_max: 1
-  should_shuffle: false
-  continue_on_failure: false
-  # Terminate the function when there has been no output to stdout for 30 minutes. E.g. when something is stuck in an infinite loop.
-  # resmoke.py writes the test output to logkeeper and only writes to stdout when starting the next test.
-  # resmoke.py not producing output on stdout means that the test is still running and presumably not going to finish.
-  # Note that timeout_secs is different from exec_timeout_secs, which applies to a task and times out regardless of whether output has been written to stdout.
-  timeout_secs: 1800
-
-# Used for tests that invoke 'resmoke.py --suites=jstestfuzz*'.
-# THIS HAS COPIES IN
-# - etc/evergreen_yml_components/definitions.yml
-# - etc/evergreen_yml_components/tasks/resmoke/server_divisions/clusters_and_integrations/tasks.yml
-# - etc/evergreen_yml_components/tasks/resmoke/server_divisions/durable_transactions_and_availability/tasks.yml
-# - etc/evergreen_yml_components/tasks/resmoke/server_divisions/query/tasks.yml
-# ANY MODIFICATIONS HERE SHOULD ALSO BE MADE IN THOSE FILES
-- &jstestfuzz_template
-  name: jstestfuzz_template
-  exec_timeout_secs: 14400 # Time out the task if it runs for more than 4 hours.
-  depends_on:
-  - name: version_gen
-    variant: generate-tasks-for-version
-    # This is added because of EVG-18211.
-    # Without this we are adding extra dependencies on evergreen and it is causing strain
-    omit_generated_tasks: true
-  - archive_dist_test_debug
-  commands:
-  - func: "generate resmoke tasks"
-
 # List of all variants that use the packages.tgz
 - package_variants: &package_variants
   - amazon
   - enterprise-linux-64-amazon-ami
-  - amazon2
-  - amazon2-openssl111
-  - amazon2-arm64-openssl111
   - amazon2023
   - amazon2023-arm64
-  - enterprise-amazon2
   - enterprise-amazon2-openssl111
-  - enterprise-amazon2-arm64
   - enterprise-amazon2-arm64-openssl111
   - enterprise-amazon2023
   - enterprise-amazon2023-arm64
-  - debian11
   - debian12
-  - enterprise-debian11-64
   - enterprise-debian12-64
-  - rhel70
-  - rhel76_compile_rhel70
-  - enterprise-rhel-70-64-bit
+  - enterprise-rhel-79-64-bit
   - enterprise-rhel-81-ppc64le
   - ubi8
   - rhel80
@@ -168,8 +52,6 @@ variables:
   - enterprise-rhel-83-s390x
   - enterprise-rhel-90-64-bit
   - enterprise-rhel-90-arm64
-  - suse12
-  - enterprise-suse12-64
   - suse15
   - enterprise-suse15-64
   - ubuntu2004-arm64
@@ -190,6 +72,7 @@ variables:
 functions:
   "f_expansions_write": &f_expansions_write
     command: expansions.write
+    display_name: "f_expansions_write"
     params:
       file: expansions.yml
       redacted: true
@@ -197,6 +80,7 @@ functions:
   "remove files":
   - *f_expansions_write
   - command: subprocess.exec
+    display_name: "remove files"
     params:
       binary: bash
       args:
@@ -204,6 +88,7 @@ functions:
 
   "configure evergreen api credentials": &configure_evergreen_api_credentials
     command: subprocess.exec
+    display_name: "configure evergreen api credentials"
     type: test
     params:
       binary: bash
@@ -212,20 +97,11 @@ functions:
 
   "git get project": &git_get_project
     command: git.get_project
+    display_name: "git get project"
     params:
       directory: ${git_project_directory|src}
       revisions: # for each module include revision as <module_name> : ${<module_name>_rev}
-        enterprise: ${enterprise_rev}
         wtdevelop: ${wtdevelop_rev}
-        dsi: ${dsi_rev}
-        genny: ${genny_rev}
-        linkbench: ${linkbench_rev}
-        linkbench2: ${linkbench2_rev}
-        tsbs: ${tsbs_rev}
-        workloads: ${workloads_rev}
-        YCSB: ${YCSB_rev}
-        flamegraph: ${flamegraph_rev}
-        PrivateWorkloads: ${PrivateWorkloads_rev}
 
   # Get get the mongo repo, no modules. Useful for inspecting the commit history with the
   # `git` Python tool.
@@ -237,6 +113,7 @@ functions:
 
   "add git tag": &add_git_tag
     command: subprocess.exec
+    display_name: "add git tag"
     params:
       binary: bash
       args:
@@ -252,6 +129,7 @@ functions:
 
   "gen feature flags": &gen_feature_flags
     command: subprocess.exec
+    display_name: "gen feature flags"
     type: test
     params:
       binary: bash
@@ -260,6 +138,7 @@ functions:
 
   "fetch artifacts": &fetch_artifacts
     command: s3.get
+    display_name: "fetch artifacts"
     params:
       aws_key: ${aws_key}
       aws_secret: ${aws_secret}
@@ -269,6 +148,7 @@ functions:
 
   "fetch venv": &fetch_venv
     command: s3.get
+    display_name: "fetch venv"
     params:
       aws_key: ${aws_key}
       aws_secret: ${aws_secret}
@@ -276,29 +156,46 @@ functions:
       bucket: mciuploads
       extract_to: "."
 
-  "get engflow creds": &get_engflow_creds
-  - command: s3.get
+  "get engflow key": &get_engflow_key
+    command: s3.get
+    display_name: "get engflow key"
     params:
       aws_key: ${engflow_key}
       aws_secret: ${engflow_secret}
       remote_file: engflow/engflow.key
       bucket: serverengflow
       local_file: "src/engflow.key"
-  - command: s3.get
+      # Mark as optional to allow local-mode execution to succeed.
+      optional: true
+
+  "get engflow cert": &get_engflow_cert
+    command: s3.get
+    display_name: "get engflow cert"
     params:
       aws_key: ${engflow_key}
       aws_secret: ${engflow_secret}
       remote_file: engflow/engflow.cert
       bucket: serverengflow
       local_file: "src/engflow.cert"
-  - command: subprocess.exec
+      # Mark as optional to allow local-mode execution to succeed.
+      optional: true
+
+  "generate evergreen engflow bazelrc": &generate_evergreen_engflow_bazelrc
+    command: subprocess.exec
     params:
+      display_name: "generate evergreen engflow bazelrc"
       binary: bash
       args:
       - "src/evergreen/generate_evergreen_engflow_bazelrc.sh"
 
+  "get engflow creds":
+  - *get_engflow_key
+  - *get_engflow_cert
+  - *generate_evergreen_engflow_bazelrc
+
   "adjust venv": &adjust_venv
     command: subprocess.exec
+    display_name: "adjust venv"
     params:
       binary: bash
       args:
@@ -306,6 +203,7 @@ functions:
 
   "fetch packages": &fetch_packages
     command: s3.get
+    display_name: "fetch packages"
     params:
       aws_key: ${aws_key}
       aws_secret: ${aws_secret}
@@ -316,6 +214,7 @@ functions:
 
   "fetch dist tarball": &fetch_dist_tarball
     command: s3.get
+    display_name: "fetch dist tarball"
     params:
       aws_key: ${aws_key}
       aws_secret: ${aws_secret}
@@ -325,6 +224,7 @@ functions:
 
   "fetch dist debugsymbols": &fetch_dist_debugsymbols
     command: s3.get
+    display_name: "fetch dist debugsymbols"
     params:
       aws_key: ${aws_key}
       aws_secret: ${aws_secret}
@@ -335,6 +235,7 @@ functions:
 
   "fetch binaries": &fetch_binaries
     command: s3.get
+    display_name: "fetch binaries"
     params:
       aws_key: ${aws_key}
       aws_secret: ${aws_secret}
@@ -344,6 +245,7 @@ functions:
 
   "extract binaries": &extract_binaries
     command: subprocess.exec
+    display_name: "extract binaries"
     params:
       binary: bash
       args:
@@ -354,8 +256,22 @@ functions:
       - "--change-dir=${extraction_change_dir}"
       - "${move_outputs}"
 
+  "extract benchmarks": &extract_benchmarks
+    command: subprocess.exec
+    display_name: "extract benchmarks"
+    params:
+      binary: bash
+      args:
+      - "src/evergreen/run_python_script.sh"
+      - "evergreen/functions/binaries_extract.py"
+      - "--tarball=mongo_benchmarks.tgz"
+      - "--extraction-command=${decompress}"
+      - "--change-dir=build/install"
+      - "--move-output=build/install/benchmarks.txt:build/"
+
   "get version expansions": &get_version_expansions
     command: s3.get
+    display_name: "get version expansions"
     params:
       aws_key: ${aws_key}
       aws_secret: ${aws_secret}
@@ -365,6 +281,7 @@ functions:
 
   "apply version expansions": &apply_version_expansions
     command: expansions.update
+    display_name: "apply version expansions"
     params:
       file: src/version_expansions.yml
 
@@ -374,15 +291,17 @@ functions:
 
   "fetch benchmarks": &fetch_benchmarks
     command: s3.get
+    display_name: "fetch benchmarks"
     params:
       aws_key: ${aws_key}
       aws_secret: ${aws_secret}
-      remote_file: ${project}/${build_variant}/${revision}/benchmarks/${build_id}.tgz
+      remote_file: ${mongo_benchmarks}
       bucket: mciuploads
-      extract_to: src
+      local_file: src/mongo_benchmarks.tgz
 
   "fetch corpus": &fetch_corpus
     command: s3.get
+    display_name: "fetch corpus"
     params:
       aws_key: ${s3_access_key_id}
       aws_secret: ${s3_secret_access_key}
@@ -393,6 +312,7 @@ functions:
 
   "archive new corpus": &archive_new_corpus
     command: archive.targz_pack
+    display_name: "archive new corpus"
     params:
       target: corpora.tgz
       source_dir: src/corpora-merged
@@ -401,6 +321,7 @@ functions:
 
   "upload new corpus": &upload_new_corpus
     command: s3.put
+    display_name: "upload new corpus"
     params:
       aws_key: ${s3_access_key_id}
       aws_secret: ${s3_secret_access_key}
@@ -415,6 +336,7 @@ functions:
 
   "upload new corpus for mciuploads": &upload_new_corpus_mciuploads
     command: s3.put
+    display_name: "upload new corpus for mciuploads"
     params:
       aws_key: ${aws_key}
       aws_secret: ${aws_secret}
@@ -429,12 +351,14 @@ functions:
 
   "get buildnumber": &get_buildnumber
     command: keyval.inc
+    display_name: "get buildnumber"
     params:
       key: "${build_variant}_master"
       destination: "builder_num"
 
   "run diskstats": &run_diskstats
     command: subprocess.exec
+    display_name: "run diskstats"
     params:
       background: true
       system_log: true
@@ -444,6 +368,7 @@ functions:
 
   "collect system resource info": &collect_system_resource_info
     command: subprocess.exec
+    display_name: "collect system resource info"
     params:
       background: true
       system_log: true
@@ -453,6 +378,7 @@ functions:
 
   "collect ulimit info": &collect_ulimit_info
     command: subprocess.exec
+    display_name: "collect ulimit info"
     params:
       background: true
       system_log: true
@@ -464,6 +390,7 @@ functions:
   # display how many threads interesting processes are using.
   "monitor process threads": &monitor_process_threads
     command: subprocess.exec
+    display_name: "monitor process threads"
     params:
       background: true
       system_log: true
@@ -473,15 +400,16 @@ functions:
 
   "set up credentials": &set_up_credentials
     command: subprocess.exec
+    display_name: "set up credentials"
     params:
       binary: bash
       silent: true
       args:
       - "./src/evergreen/functions/credentials_setup.sh"
 
-  "set up win mount script":
-  - *f_expansions_write
-  - command: subprocess.exec
+  "set up win mount script": &set_up_win_mount_script
+    command: subprocess.exec
+    display_name: "win mount script setup"
     params:
       binary: bash
       silent: true
@@ -491,6 +419,7 @@ functions:
   "set up notary client credentials":
   - *f_expansions_write
   - command: subprocess.exec
+    display_name: "notary client credentials setup"
     params:
       binary: bash
       silent: true
@@ -499,6 +428,7 @@ functions:
 
   "f_remote_credentials_setup_exec": &set_up_remote_credentials
     command: subprocess.exec
+    display_name: "remote credentials setup"
     params:
       binary: bash
       args:
@@ -512,6 +442,7 @@ functions:
 
   "upload debugsymbols": &upload_debugsymbols
     command: s3.put
+    display_name: "upload debugsymbols"
     params:
       aws_key: ${aws_key}
       aws_secret: ${aws_secret}
@@ -521,9 +452,9 @@ functions:
       permissions: public-read
       content_type: ${content_type|application/gzip}
 
-  "use WiredTiger develop":
-  - *f_expansions_write
-  - command: subprocess.exec
+  "use WiredTiger develop": &use_wiredtiger_develop
+    command: subprocess.exec
+    display_name: "wiredtiger develop use"
     params:
       binary: bash
       args:
@@ -532,15 +463,16 @@ functions:
   "shared scons cache pruning":
   - *f_expansions_write
   - command: subprocess.exec
+    display_name: "shared scons cache pruning"
     type: system
     params:
       binary: bash
       args:
       - "./src/evergreen/functions/shared_scons_cache_pruning.sh"
 
-  "umount shared scons directory":
-  - *f_expansions_write
-  - command: subprocess.exec
+  "umount shared scons directory": &umount_shared_scons_directory
+    command: subprocess.exec
+    display_name: "shared scons directory umount"
     params:
       binary: bash
       args:
@@ -549,6 +481,7 @@ functions:
   "umount tmp directory":
   - *f_expansions_write
   - command: subprocess.exec
+    display_name: "tmp directory umount"
     params:
       binary: bash
       args:
@@ -556,6 +489,7 @@ functions:
 
   "determine resmoke jobs": &determine_resmoke_jobs
     command: subprocess.exec
+    display_name: "determine resmoke jobs"
     params:
       binary: bash
       args:
@@ -563,12 +497,14 @@ functions:
 
   "update resmoke jobs expansions": &update_resmoke_jobs_expansions
     command: expansions.update
+    display_name: "update resmoke jobs expansions"
     params:
       ignore_missing_file: true
       file: src/resmoke_jobs_expansion.yml
 
   "determine task timeout": &determine_task_timeout
     command: subprocess.exec
+    display_name: "determine task timeout"
     params:
       binary: bash
       args:
@@ -576,12 +512,14 @@ functions:
 
   "update task timeout expansions": &update_task_timeout_expansions
     command: expansions.update
+    display_name: "update task timeout expansions"
     params:
       ignore_missing_file: true
       file: src/task_timeout_expansions.yml
 
   "update task timeout": &update_task_timeout
     command: timeout.update
+    display_name: "update task timeout"
     params:
       exec_timeout_secs: ${exec_timeout_secs}
       timeout_secs: ${timeout_secs}
@@ -589,6 +527,7 @@ functions:
   ### Set expansion macros used in each task.
   "set task expansion macros": &set_task_expansion_macros
     command: expansions.update
+    display_name: "set task expansion macros"
     params:
       updates:
       - key: mongo_binaries
@@ -605,6 +544,10 @@ functions:
         value: ${project}/${compile_variant}/${version_id}/binaries/mongo-jstestshell-debugsymbols-${revision_order_id}.tgz
       - key: mongo_artifacts
         value: ${project}/${compile_variant}/${version_id}/artifacts/${revision_order_id}.tgz
+      - key: mongo_benchmarks
+        value: ${project}/${compile_variant}/${version_id}/binaries/benchmarks-${revision_order_id}.${ext|tgz}
+      - key: mongo_benchmarks_debugsymbols
+        value: ${project}/${compile_variant}/${version_id}/binaries/benchmarksdebugsymbols-${revision_order_id}.${ext|tgz}
       - key: mongo_venv
         value: ${project}/${compile_variant}/${version_id}/venv/${revision_order_id}.tgz
       - key: mongo_fuzzer_corpus_mciuploads
@@ -616,6 +559,7 @@ functions:
 
   "set up venv": &set_up_venv
     command: subprocess.exec
+    display_name: "set up venv"
     params:
       binary: bash
       args:
@@ -626,6 +570,7 @@ functions:
   # This just installs the extra deps needed for libdeps
   "set up libdeps venv": &set_up_libdeps_venv
     command: subprocess.exec
+    display_name: "set up libdeps venv"
     params:
       binary: bash
       args:
@@ -633,6 +578,7 @@ functions:
 
   "upload pip requirements": &upload_pip_requirements
     command: s3.put
+    display_name: "upload pip requirements"
     params:
       aws_key: ${aws_key}
       aws_secret: ${aws_secret}
@@ -643,8 +589,20 @@ functions:
       content_type: text/plain
       display_name: Pip Requirements
 
+  "run clang tidy": &run_clang_tidy
+    - command: subprocess.exec
+      params:
+        binary: bash
+        add_expansions_to_env: true
+        args:
+        - "src/evergreen/run_python_script.sh"
+        - "buildscripts/clang_tidy.py"
+        - "--split-jobs=4"
+        - "--split=${split}"
+
   "upload clang tidy results": &upload_clang_tidy_results
     - command: s3.put
+      display_name: "upload clang_tidy_fixes.tgz"
       params:
         aws_key: ${aws_key}
         aws_secret: ${aws_secret}
@@ -655,6 +613,7 @@ functions:
         content_type: application/gzip
         display_name: clang_tidy_fixes.tgz
     - command: s3.put
+      display_name: "upload clang_tidy_fixes.json"
       params:
         aws_key: ${aws_key}
         aws_secret: ${aws_secret}
@@ -665,8 +624,9 @@ functions:
         content_type: application/json
         display_name: clang_tidy_fixes.json
 
-  "send benchmark results":
-  - command: perf.send
+  "send benchmark results": &send_benchmark_results
+    command: perf.send
+    display_name: "send benchmark results"
     params:
       aws_key: ${aws_key}
       aws_secret: ${aws_secret}
@@ -674,18 +634,9 @@ functions:
       prefix: ${task_id}_${execution}
       file: src/cedar_report.json
 
-  "analyze benchmark results":
-  - *f_expansions_write
-  - *configure_evergreen_api_credentials
-  - command: subprocess.exec
-    type: test
-    params:
-      binary: bash
-      args:
-      - "./src/evergreen/functions/benchmark_results_analyze.sh"
-
   "cleanup environment": &cleanup_environment
     command: subprocess.exec
+    display_name: "cleanup environment"
     params:
       binary: bash
       args:
@@ -693,6 +644,7 @@ functions:
 
   "kill processes": &kill_processes
     command: subprocess.exec
+    display_name: "kill processes"
     params:
       silent: true
       binary: bash
@@ -767,9 +719,11 @@ functions:
   - *f_expansions_write
   - *set_up_credentials
   - *fetch_benchmarks
+  - *extract_benchmarks
 
   "f_multiversion_setup_exec": &do_multiversion_setup
     command: subprocess.exec
+    display_name: "multiversion setup"
     params:
       binary: bash
       args:
@@ -783,6 +737,7 @@ functions:
   # Used by generator
   "get compiled binaries":
     command: subprocess.exec
+    display_name: "get compiled binaries"
     params:
       binary: bash
       args:
@@ -799,12 +754,14 @@ functions:
   - *upload_pip_requirements
 
   - command: subprocess.exec
+    display_name: "powercycle tasks generate"
     params:
       binary: bash
       args:
       - "./src/evergreen/powercycle_tasks_generate.sh"
 
   - command: archive.targz_pack
+    display_name: "targz_pack powercycle_tasks_config.tgz"
     params:
       target: powercycle_tasks_config.tgz
       source_dir: "./"
@@ -812,6 +769,7 @@ functions:
       - "powercycle_tasks.json"
 
   - command: s3.put
+    display_name: "upload powercycle_tasks_config.tgz"
     params:
       aws_key: ${aws_key}
       aws_secret: ${aws_secret}
@@ -823,6 +781,7 @@ functions:
       display_name: Generated Task Config - Execution ${execution}
 
   - command: generate.tasks
+    display_name: "generate.tasks powercycle_tasks.json"
     params:
       files:
       - powercycle_tasks.json
@@ -839,6 +798,7 @@ functions:
   - *configure_evergreen_api_credentials
 
   - command: subprocess.exec
+    display_name: "powercycle sentinel run"
     type: system
     params:
       binary: bash
@@ -847,6 +807,7 @@ functions:
 
   "sign macos dev binaries": &sign_macos_dev_binaries
     command: subprocess.exec
+    display_name: "sign macos dev binaries"
     params:
       binary: bash
       args:
@@ -855,6 +816,7 @@ functions:
 
   "execute resmoke tests": &execute_resmoke_tests
     command: subprocess.exec
+    display_name: "execute resmoke tests"
     type: test
     params:
       binary: bash
@@ -867,6 +829,7 @@ functions:
 
   "retrieve generated test configuration": &retrieve_generated_test_configuration
     command: s3.get
+    display_name: "retrieve generated test configuration"
     params:
       aws_key: ${aws_key}
       aws_secret: ${aws_secret}
@@ -876,6 +839,7 @@ functions:
 
   "extract generated test configuration": &extract_generated_test_configuration
     command: subprocess.exec
+    display_name: "extract generated test configuration"
     type: test
     params:
       binary: bash
@@ -884,28 +848,34 @@ functions:
 
   "minimize jstestfuzz":
     command: subprocess.exec
+    display_name: "minimize jstestfuzz"
     type: test
     params:
       binary: bash
       args:
       - "./src/evergreen/jstestfuzz_minimize.sh"
 
-  "generate version":
-  - *f_expansions_write
-  - *configure_evergreen_api_credentials
-  - command: subprocess.exec
+  "generate version sh": &generate_version_sh
+    command: subprocess.exec
+    display_name: "generate version sh"
     type: test
     params:
       binary: bash
       args:
       - "./src/evergreen/generate_version.sh"
-  - command: archive.targz_pack
+
+  "pack generate tasks config": &pack_generate_tasks_config
+    command: archive.targz_pack
+    display_name: "pack generate tasks config"
     params:
       target: generate_tasks_config.tgz
       source_dir: src/generated_resmoke_config
       include:
       - "*"
-  - command: subprocess.exec
+
+  "validate generate tasks config filesize": &validate_generate_tasks_config_filesize
+    command: subprocess.exec
+    display_name: "validate generate tasks config filesize"
     type: test
     params:
       binary: bash
@@ -913,7 +883,10 @@ functions:
       - "src/evergreen/run_python_script.sh"
       - "buildscripts/validate_file_size.py"
       - "generate_tasks_config.tgz"
-  - command: s3.put
+
+  "upload generate tasks config": &upload_generate_tasks_config
+    command: s3.put
+    display_name: "upload generate tasks config"
     params:
       aws_key: ${aws_key}
       aws_secret: ${aws_secret}
@@ -924,60 +897,10 @@ functions:
       content_type: ${content_type|application/gzip}
       display_name: Generated Task Config - Execution ${execution}
       optional: true
-  - command: generate.tasks
-    params:
-      optional: true
-      files:
-      - src/generated_resmoke_config/*.json
 
-  "generate version validation":
-  - *f_expansions_write
-  - *configure_evergreen_api_credentials
-  - command: subprocess.exec
-    type: test
-    params:
-      binary: bash
-      args:
-      - "./src/evergreen/generate_version.sh"
-  - command: archive.targz_pack
-    params:
-      target: generate_tasks_config.tgz
-      source_dir: src/generated_resmoke_config
-      include:
-      - "*"
-  - command: subprocess.exec
-    type: test
-    params:
-      binary: bash
-      args:
-      - "src/evergreen/run_python_script.sh"
-      - "buildscripts/validate_file_size.py"
-      - "generate_tasks_config.tgz"
-
-  "generate version burn in":
-  - *f_expansions_write
-  - *configure_evergreen_api_credentials
-  - command: subprocess.exec
-    type: test
-    params:
-      binary: bash
-      args:
-      - "./src/evergreen/generate_version_burn_in.sh"
-  - command: archive.targz_pack
-    params:
-      target: generate_tasks_config.tgz
-      source_dir: src/generated_resmoke_config
-      include:
-      - "*"
-  - command: subprocess.exec
-    type: test
-    params:
-      binary: bash
-      args:
-      - "src/evergreen/run_python_script.sh"
-      - "buildscripts/validate_file_size.py"
-      - "generate_tasks_config.tgz"
-  - command: s3.put
+  "upload burn in generate tasks config": &upload_burn_in_generate_tasks_config
+    command: s3.put
+    display_name: "upload burn in generate tasks config"
     params:
       aws_key: ${aws_key}
       aws_secret: ${aws_secret}
@@ -988,11 +911,45 @@ functions:
       content_type: ${content_type|application/gzip}
       display_name: Generated Burn In Task Config - Execution ${execution}
       optional: true
-  - command: generate.tasks
+
+  "generate resmoke tasks config": &generate_resmoke_tasks_config
+    command: generate.tasks
+    display_name: "generate resmoke tasks config"
     params:
       optional: true
       files:
       - src/generated_resmoke_config/*.json
+
+  "generate version":
+  - *f_expansions_write
+  - *configure_evergreen_api_credentials
+  - *generate_version_sh
+  - *pack_generate_tasks_config
+  - *validate_generate_tasks_config_filesize
+  - *upload_generate_tasks_config
+  - *generate_resmoke_tasks_config
+
+  "generate version validation":
+  - *f_expansions_write
+  - *configure_evergreen_api_credentials
+  - *generate_version_sh
+  - *pack_generate_tasks_config
+  - *validate_generate_tasks_config_filesize
+
+  "generate version burn in":
+  - *f_expansions_write
+  - *configure_evergreen_api_credentials
+  - command: subprocess.exec
+    display_name: "generate version burn in sh"
+    type: test
+    params:
+      binary: bash
+      args:
+      - "./src/evergreen/generate_version_burn_in.sh"
+  - *pack_generate_tasks_config
+  - *validate_generate_tasks_config_filesize
+  - *upload_burn_in_generate_tasks_config
+  - *generate_resmoke_tasks_config
 
   "initialize multiversion tasks": &initialize_multiversion_tasks
   - command: shell.exec
@@ -1010,8 +967,8 @@ functions:
   - *adjust_venv
   - *f_expansions_write
   - *configure_evergreen_api_credentials
-
   - command: subprocess.exec
+    display_name: "gen tasks activate sh"
     type: test
     params:
       binary: bash
@@ -1023,11 +980,38 @@ functions:
   - *f_expansions_write
   - *configure_evergreen_api_credentials
   - command: subprocess.exec
+    display_name: "resmoke tests runtime validate sh"
     type: test
     params:
       binary: bash
       args:
       - "./src/evergreen/resmoke_tests_runtime_validate.sh"
+
+  "multiversion exclude tags generate": &multiversion_exclude_tags_generate
+    command: subprocess.exec
+    display_name: "multiversion exclude tags generate"
+    params:
+      binary: bash
+      args:
+      - "./src/evergreen/multiversion_exclude_tags_generate.sh"
+
+  "check run tests infrastructure failure": &check_run_tests_infrastructure_failure
+    command: subprocess.exec
+    display_name: "check run tests infrastructure failure"
+    type: setup
+    params:
+      binary: bash
+      args:
+      - "./src/evergreen/check_run_tests_infrastructure_failure.sh"
+
+  "check resmoke failure": &check_resmoke_failure
+    command: subprocess.exec
+    display_name: "check resmoke failure"
+    type: test
+    params:
+      binary: bash
+      args:
+      - "./src/evergreen/check_resmoke_failure.sh"
 
   # Used by generator
   "run generated tests":
@@ -1056,27 +1040,13 @@ functions:
   - *update_task_timeout
   - *f_expansions_write
   - *sign_macos_dev_binaries
-  - command: subprocess.exec
-    params:
-      binary: bash
-      args:
-      - "./src/evergreen/multiversion_exclude_tags_generate.sh"
+  - *multiversion_exclude_tags_generate
   - *execute_resmoke_tests
     # The existence of the "run_tests_infrastructure_failure" file indicates this failure isn't
     # directly actionable. We use type=setup rather than type=system or type=test for this command
   # because we don't intend for any human to look at this failure.
-  - command: subprocess.exec
-    type: setup
-    params:
-      binary: bash
-      args:
-      - "./src/evergreen/check_run_tests_infrastructure_failure.sh"
-  - command: subprocess.exec
-    type: test
-    params:
-      binary: bash
-      args:
-      - "./src/evergreen/check_resmoke_failure.sh"
+  - *check_run_tests_infrastructure_failure
+  - *check_resmoke_failure
 
   "run tests":
   - *f_expansions_write
@@ -1106,55 +1076,85 @@ functions:
   - *f_expansions_write
   - *configure_evergreen_api_credentials
   - *sign_macos_dev_binaries
-  - command: subprocess.exec
-    params:
-      binary: bash
-      args:
-      - "./src/evergreen/multiversion_exclude_tags_generate.sh"
+  - *multiversion_exclude_tags_generate
   - *execute_resmoke_tests
     # The existence of the "run_tests_infrastructure_failure" file indicates this failure isn't
     # directly actionable. We use type=setup rather than type=system or type=test for this command
   # because we don't intend for any human to look at this failure.
-  - command: subprocess.exec
-    type: setup
+  - *check_run_tests_infrastructure_failure
+  - *check_resmoke_failure
+
+  "run benchmark tests":
+  - *f_expansions_write
+  - *configure_evergreen_api_credentials
+  - *determine_task_timeout
+  - *update_task_timeout_expansions
+  - *f_expansions_write
+  - *update_task_timeout
+  - *f_expansions_write
+  - command: expansions.update
     params:
-      binary: bash
-      args:
-      - "./src/evergreen/check_run_tests_infrastructure_failure.sh"
-  - command: subprocess.exec
-    type: test
-    params:
-      binary: bash
-      args:
-      - "./src/evergreen/check_resmoke_failure.sh"
+      env:
+        CEDAR_USER: ${cedar_user}
+        CEDAR_API_KEY: ${cedar_api_key}
+      updates:
+      - key: aws_key_remote
+        value: ${mongodatafiles_aws_key}
+      - key: aws_profile_remote
+        value: mongodata_aws
+      - key: aws_secret_remote
+        value: ${mongodatafiles_aws_secret}
+  - *f_expansions_write
+  - *set_up_remote_credentials
+  - *f_expansions_write
+  - *determine_resmoke_jobs
+  - *update_resmoke_jobs_expansions
+  - *f_expansions_write
+  - *configure_evergreen_api_credentials
+  - *sign_macos_dev_binaries
+  - *multiversion_exclude_tags_generate
+  - *execute_resmoke_tests
+  - *send_benchmark_results
+    # The existence of the "run_tests_infrastructure_failure" file indicates this failure isn't
+    # directly actionable. We use type=setup rather than type=system or type=test for this command
+  # because we don't intend for any human to look at this failure.
+  - *check_run_tests_infrastructure_failure
+  - *check_resmoke_failure
 
   "scons lint":
   - *f_expansions_write
   - command: subprocess.exec
+    display_name: "scons lint sh"
     type: test
     params:
       binary: bash
       args:
       - "src/evergreen/scons_lint.sh"
 
-  "scons compile":
-  - *get_version_expansions
-  - *apply_version_expansions
-  - *f_expansions_write
-  - command: subprocess.exec
+  "scons splunk": &scons_splunk
+    command: subprocess.exec
+    display_name: "scons splunk"
     params:
       background: true
       continue_on_err: true
       binary: bash
       args:
       - "./src/evergreen/scons_splunk.sh"
+
+  "scons compile":
+  - *get_version_expansions
+  - *apply_version_expansions
+  - *f_expansions_write
+  - *scons_splunk
   - command: subprocess.exec
+    display_name: "scons compile sh"
     type: test
     params:
       binary: bash
       args:
       - "src/evergreen/scons_compile.sh"
   - command: expansions.update
+    display_name: "expansions update install_dir"
     params:
       updates:
       - key: install_dir
@@ -1165,14 +1165,9 @@ functions:
   - *get_version_expansions
   - *apply_version_expansions
   - *f_expansions_write
+  - *scons_splunk
   - command: subprocess.exec
-    params:
-      background: true
-      continue_on_err: true
-      binary: bash
-      args:
-      - "./src/evergreen/scons_splunk.sh"
-  - command: subprocess.exec
+    display_name: "scons raw compile sh"
     type: test
     params:
       binary: bash
@@ -1181,6 +1176,7 @@ functions:
 
   "fetch bazel":
   - command: subprocess.exec
+    display_name: "fetch bazel"
     type: test
     params:
       binary: bash
@@ -1191,66 +1187,70 @@ functions:
   # Args:
   #   $output (string) - relpath to the file-to-be-checked
   - command: shell.exec
+    display_name: "verify build output present"
     params:
       working_dir: src
       script: |
         test -f ${output}
 
-  "bazel compile (gcc)":
-  - *get_version_expansions
-  - *apply_version_expansions
-  - *f_expansions_write
-  - command: subprocess.exec
+  "bazel compile sh": &bazel_compile_sh
+    command: subprocess.exec
+    display_name: "bazel compile sh"
     type: test
     params:
       binary: bash
       args:
       - "src/evergreen/bazel_compile.sh"
+
+  "bazel compile (gcc)":
+  - *get_version_expansions
+  - *apply_version_expansions
+  - *f_expansions_write
+  - *bazel_compile_sh
 
   "bazel compile (clang)":
   - *get_version_expansions
   - *apply_version_expansions
   - *f_expansions_write
-  - command: subprocess.exec
-    type: test
-    params:
-      binary: bash
-      args:
-      - "src/evergreen/bazel_compile.sh"
+  - *bazel_compile_sh
 
   "bazel compile (msvc)":
   - *get_version_expansions
   - *apply_version_expansions
   - *f_expansions_write
-  - command: subprocess.exec
-    type: test
-    params:
-      binary: bash
-      args:
-      - "src/evergreen/bazel_compile.sh"
+  - *bazel_compile_sh
 
-  "bazel run":
-  - *get_version_expansions
-  - *apply_version_expansions
-  - *f_expansions_write
-  - command: subprocess.exec
+  "bazel run sh": &bazel_run_sh
+    command: subprocess.exec
+    display_name: "bazel run sh"
     type: test
     params:
       binary: bash
       args:
       - "src/evergreen/bazel_run.sh"
 
-  "ninja compile":
+  "bazel run":
+  - *get_version_expansions
+  - *apply_version_expansions
   - *f_expansions_write
-  - command: subprocess.exec
+  - *bazel_run_sh
+
+  "ninja compile sh": &ninja_compile_sh
+    command: subprocess.exec
+    display_name: "ninja compile sh"
     type: test
     params:
       binary: bash
       args:
       - "./src/evergreen/ninja_compile.sh"
 
+  "ninja compile":
+  - *f_expansions_write
+  - *ninja_compile_sh
+
   "generate version expansions": &generate_version_expansions
     command: subprocess.exec
+    display_name: "generate version expansions"
     params:
       binary: bash
       args:
@@ -1258,6 +1258,7 @@ functions:
 
   "upload version expansions": &upload_version_expansions
    command: s3.put
+   display_name: "upload version expansions"
    params:
      aws_key: ${aws_key}
      aws_secret: ${aws_secret}
@@ -1274,6 +1275,7 @@ functions:
 
   "generate resmoke constants": &generate_resmoke_constants
     command: subprocess.exec
+    display_name: "generate resmoke constants"
     type: test
     params:
       binary: bash
@@ -1286,6 +1288,7 @@ functions:
 
   "archive resmoke constants": &archive_resmoke_constants
     command: archive.targz_pack
+    display_name: "archive resmoke constants"
     params:
       target: resmoke_constants.tgz
       source_dir: "src"
@@ -1295,6 +1298,7 @@ functions:
 
   "upload resmoke constants": &upload_remoske_constants
     command: s3.put
+    display_name: "upload resmoke constants"
     params:
       aws_key: ${aws_key}
       aws_secret: ${aws_secret}
@@ -1313,6 +1317,7 @@ functions:
 
   "fetch resmoke constants": &fetch_resmoke_constants
     command: s3.get
+    display_name: "fetch resmoke constants"
     params:
       aws_key: ${aws_key}
       aws_secret: ${aws_secret}
@@ -1320,19 +1325,18 @@ functions:
       bucket: mciuploads
       extract_to: src
 
-  "generate compile expansions":
-  - *f_expansions_write
-  - command: subprocess.exec
+  "generate compile expansions": &generate_compile_expansions
+    command: subprocess.exec
+    display_name: "compile expansions generate sh"
     params:
       binary: bash
       args:
       - "src/evergreen/functions/compile_expansions_generate.sh"
 
-  "apply compile expansions":
-  - command: expansions.update
+  "apply compile expansions": &apply_compile_expansions
+    command: expansions.update
     params:
       file: src/compile_expansions.yml
-  - *f_expansions_write
 
   "do jepsen setup":
   - *f_expansions_write
@@ -1448,6 +1452,7 @@ functions:
   "setup jstestfuzz":
   - *f_expansions_write
   - command: subprocess.exec
+    display_name: "jstestfuzz setup sh"
     params:
       binary: bash
       args:
@@ -1485,6 +1490,7 @@ functions:
   "sync repo with copybara":
   - *f_expansions_write
   - command: subprocess.exec
+    display_name: "sync repo with copybara"
     type: test
     params:
       binary: bash
@@ -1496,24 +1502,28 @@ functions:
   "run jstestfuzz":
   - *f_expansions_write
   - command: subprocess.exec
+    display_name: "clone repos sh"
     params:
       binary: bash
       args:
       - "./src/evergreen/run_jstestfuzz/clone_repos.sh"
   - *f_expansions_write
   - command: subprocess.exec
+    display_name: "jstestfuzz run sh"
     type: test
     params:
       binary: bash
       args:
       - "./src/evergreen/jstestfuzz_run.sh"
   - command: archive.targz_pack
+    display_name: "archive jstests.tgz"
     params:
       target: "jstests.tgz"
       source_dir: "src/jstestfuzz"
       include:
       - "out/*.js"
   - command: s3.put
+    display_name: "upload jstests.tgz"
     params:
       aws_key: ${aws_key}
       aws_secret: ${aws_secret}
@@ -1609,6 +1619,7 @@ functions:
   "run powercycle test":
   - *f_expansions_write
   - command: subprocess.exec
+    display_name: "powercycle run test sh"
     type: test
     params:
       binary: bash
@@ -1638,6 +1649,7 @@ functions:
   - *apply_version_expansions
   - *f_expansions_write
   - command: subprocess.exec
+    display_name: "packager py_run sh"
     params:
       binary: bash
       args:
@@ -1655,6 +1667,7 @@ functions:
   - *apply_version_expansions
   - *f_expansions_write
   - command: subprocess.exec
+    display_name: "package test py"
     type: test
     params:
       binary: bash
@@ -1675,6 +1688,7 @@ functions:
   "run release package test":
   - *f_expansions_write
   - command: subprocess.exec
+    display_name: "package release test py"
     type: test
     params:
       binary: bash
@@ -1930,6 +1944,7 @@ functions:
   ### Process & archive mongo coredumps ###
   "gather mongo coredumps": &gather_mongo_coredumps
     command: subprocess.exec
+    display_name: "gather mongo coredumps"
     params:
       binary: bash
       args:
@@ -1937,6 +1952,7 @@ functions:
 
   "tar mongo coredumps": &tar_mongo_coredumps
     command: subprocess.exec
+    display_name: "tar mongo coredumps"
     params:
       binary: bash
       args:
@@ -1949,12 +1965,14 @@ functions:
 
   "archive mongo coredumps": &archive_mongo_coredumps
     command: attach.artifacts
+    display_name: "archive mongo coredumps"
     params:
       files:
         - src/mongo-coredumps.json
 
   "upload mongo-coredumps.json": &upload_coredumps_json
     command: s3.put
+    display_name: "upload mongo coredumps json"
     params:
       aws_key: ${aws_key}
       aws_secret: ${aws_secret}
@@ -2095,6 +2113,7 @@ functions:
   - *f_expansions_write
   - *configure_evergreen_api_credentials
   - command: subprocess.exec
+    display_name: "hang analyzer sh"
     params:
       binary: bash
       args:
@@ -2102,6 +2121,7 @@ functions:
 
   "wait for resmoke to shutdown":
     command: subprocess.exec
+    display_name: "wait for resmoke to shutdown"
     params:
       binary: bash
       args:
@@ -2109,6 +2129,7 @@ functions:
 
   "tar hang analyzer debugger files": &tar_hang_analyzer_debugger_files
     command: archive.targz_pack
+    display_name: "tar hang analyzer debugger files"
     params:
       target: "src/mongo-hanganalyzer.tgz"
       source_dir: "src"
@@ -2117,6 +2138,7 @@ functions:
 
   "archive hang analyzer debugger files": &archive_hang_analyzer_debugger_files
     command: s3.put
+    display_name: "archive hang analyzer debugger files"
     params:
       aws_key: ${aws_key}
       aws_secret: ${aws_secret}
@@ -2217,8 +2239,8 @@ functions:
   - *archive_undodb_recordings
 
   ### Attach report & artifacts ###
-  "attach scons logs":
-  - command: s3.put
+  "attach scons config logs": &attach_scons_config_logs
+    command: s3.put
     params:
       optional: true
       aws_key: ${aws_key}
@@ -2230,7 +2252,8 @@ functions:
       content_type: text/plain
       display_name: SCons configure log
 
-  - command: s3.put
+  "attach scons cache logs": &attach_scons_cache_logs
+    command: s3.put
     params:
       optional: true
       aws_key: ${aws_key}
@@ -2242,7 +2265,21 @@ functions:
       permissions: public-read
       display_name: SCons cache debug log
 
-  - command: s3.put
+  "attach scons cache prune logs": &attach_scons_cache_prune_logs
+    command: s3.put
+    params:
+      optional: true
+      aws_key: ${aws_key}
+      aws_secret: ${aws_secret}
+      local_file: src/scons_cache_prune.log
+      content_type: text/plain
+      remote_file: ${project}/${build_variant}/${revision}/artifacts/scons_cache_prune.log.${build_id}-${task_name}.${execution}
+      bucket: mciuploads
+      permissions: public-read
+      display_name: SCons cache prune log
+
+  "attach scons stdout logs": &attach_scons_stdout_logs
+    command: s3.put
     params:
       optional: true
       aws_key: ${aws_key}
@@ -2253,6 +2290,12 @@ functions:
       bucket: mciuploads
       permissions: public-read
       display_name: SCons stdout log
+
+  "attach scons logs":
+  - *attach_scons_config_logs
+  - *attach_scons_cache_logs
+  - *attach_scons_cache_prune_logs
+  - *attach_scons_stdout_logs
 
   "attach report":
     command: attach.results
@@ -2417,6 +2460,19 @@ functions:
       content_type: text/plain
       display_name: Resmoke.py Invocation for Local Usage
 
+  "attach bazel invocation":
+    command: s3.put
+    params:
+      optional: true
+      aws_key: ${aws_key}
+      aws_secret: ${aws_secret}
+      local_file: src/bazel-invocation.txt
+      remote_file: ${project}/${build_variant}/${revision}/bazel-invocation-${task_id}-${execution}.txt
+      bucket: mciuploads
+      permissions: public-read
+      content_type: text/plain
+      display_name: Bazel invocation for local usage
+
   "attach multiversion download links":
     command: s3.put
     params:
@@ -2451,196 +2507,50 @@ functions:
       args:
       - "./src/evergreen/antithesis_image_build_and_push.sh"
 
-
-#######################################
-#               Tasks                 #
-#######################################
-tasks:
-
-## pretty_printer ##
-- <<: *task_template
-  name: run_pretty_printer_tests
-  tags: []
-  commands:
-  - func: "git get project and add git tag"
-  - *f_expansions_write
-  - *kill_processes
-  - *cleanup_environment
-  - func: "set up venv"
-  - func: "upload pip requirements"
-  - func: "configure evergreen api credentials"
-  - func: "do setup"
-    vars:
-      extraction_change_dir: build/install/
-  - command: s3.get
-    params:
-      aws_key: ${aws_key}
-      aws_secret: ${aws_secret}
-      remote_file: ${mongo_debugsymbols}
-      bucket: mciuploads
-      local_file: src/mongo-debugsymbols.tgz
-      optional: true
+  "cleanup external auth OIDC resources":
   - command: subprocess.exec
     params:
       binary: bash
       args:
-      - "src/evergreen/run_python_script.sh"
-      - "evergreen/functions/binaries_extract.py"
-      - "--tarball=mongo-debugsymbols.tgz"
-      - "--extraction-command=${decompress}"
-      - "--change-dir=build/install/"
-      - "--move-output=build/install/dist-test/pretty_printer_tests.txt:build/"
-  - func: "run tests"
-    vars:
-      suite: pretty-printer-tests
-      install_dir: build/install/dist-test/bin
-      exec_timeout_secs: 1800 # 30 min timeout.
+      - "./src/evergreen/external_auth_gcp_teardown.sh"
+  - command: subprocess.exec
+    params:
+      binary: bash
+      args:
+      - "./src/evergreen/external_auth_azure_teardown.sh"
+  - command: subprocess.exec
+    params:
+      binary: bash
+      args:
+      - "./src/evergreen/external_auth_oidc_teardown.sh"
 
-- <<: *benchmark_template
-  name: benchmarks_orphaned_first_half
-  tags: ["benchmarks"]
-  commands:
-  - func: "do benchmark setup"
-  - func: "run tests"
-    vars:
-      suite: benchmarks_first_half
-      exec_timeout_secs: 21600 # 6 hour timeout.
-      resmoke_jobs_max: 1
-  - func: "send benchmark results"
-    vars:
-      suite: benchmarks_first_half
-
-- <<: *benchmark_template
-  name: benchmarks_orphaned_second_half
-  tags: ["benchmarks"]
-  commands:
-  - func: "do benchmark setup"
-  - func: "run tests"
-    vars:
-      suite: benchmarks_second_half
-      exec_timeout_secs: 21600 # 6 hour timeout.
-      resmoke_jobs_max: 1
-  - func: "send benchmark results"
-    vars:
-      suite: benchmarks_second_half
-
-## jstestfuzz ##
-- <<: *jstestfuzz_template
-  name: jstestfuzz_gen
-  tags: ["jstestfuzz", "common", "require_npm", "random_name"]
-  commands:
-  - func: "generate resmoke tasks"
-    vars:
-      <<: *jstestfuzz_config_vars
-      jstestfuzz_vars: --jsTestsDir ../jstests
-      suite: jstestfuzz
-      resmoke_args: "--mongodSetParameters='{logComponentVerbosity: {command: 2}}'"
-      npm_command: jstestfuzz
-
-## jstestfuzz concurrent ##
-- <<: *jstestfuzz_template
-  name: jstestfuzz_concurrent_gen
-  tags: ["jstestfuzz", "common", "require_npm", "random_name"]
-  commands:
-  - func: "generate resmoke tasks"
-    vars:
-      <<: *jstestfuzz_config_vars
-      num_files: ${jstestfuzz_concurrent_num_files|10}
-      num_tasks: 5
-      jstestfuzz_vars: --jsTestsDir ../jstests
-      suite: jstestfuzz
-      resmoke_args: --numClientsPerFixture=10
-
-- <<: *gen_task_template
-  name: multiversion_future_git_tag_gen
-  tags: ["multiversion", "no_multiversion_generate_tasks", "multiversion_future_git_tag"]
-  commands:
-  - func: "generate resmoke tasks"
-    vars:
-      suite: multiversion_future_git_tag
-
-- <<: *task_template
-  name: jsCore
-  tags: ["jscore", "common"]
-  commands:
-  - func: "do setup"
-  - func: "run tests"
-    vars:
-      suite: core
-
-- <<: *task_template
-  name: mongosTest
-  tags: ["misc_js", "non_read_maj", "non_live_record"]
-  commands:
-  - func: "do setup"
-  - func: "run tests"
-    vars:
-      suite: mongos_test
-
-- <<: *gen_task_template
-  name: multiversion_gen
-  tags: ["multiversion", "no_multiversion_generate_tasks", "future_git_tag_incompatible"]
-  commands:
-  - func: "generate resmoke tasks"
-
-- <<: *gen_task_template
-  name: noPassthrough_gen
-  tags: ["misc_js", "no_debug_mode"]
-  commands:
-  - func: "generate resmoke tasks"
-    vars:
-      suite: no_passthrough
-      use_large_distro: "true"
-
-# Only run hot_backups tests for hot_backups variant.
-- <<: *gen_task_template
-  name: noPassthroughHotBackups_gen
-  tags: []
-  commands:
-  - func: "generate resmoke tasks"
-    vars:
-      suite: no_passthrough
-      resmoke_args: src/mongo/db/modules/*/jstests/hot_backups/*.js
-      use_large_distro: "true"
-
-- <<: *gen_task_template
-  name: noPassthroughWithMongod_gen
-  tags: ["misc_js"]
-  commands:
-  - func: "generate resmoke tasks"
-    vars:
-      suite: no_passthrough_with_mongod
-      use_large_distro: "true"
-
-- <<: *gen_task_template
-  name: slow1_gen
-  tags: ["misc_js", "non_win_dbg"]
-  commands:
-  - func: "generate resmoke tasks"
-    vars:
-      resmoke_jobs_max: 1
-      use_large_distro: "true"
-
-- <<: *gen_task_template
-  name: parallel_gen
-  tags: ["misc_js", "parallel"]
-  commands:
-  - func: "generate resmoke tasks"
-    vars:
-      resmoke_jobs_max: 1
-
-- <<: *gen_task_template
-  name: concurrency_gen
-  tags: ["concurrency", "common"]
-  commands:
-  - func: "generate resmoke tasks"
-    vars:
-      resmoke_jobs_max: 1
-
-- <<: *gen_task_template
-  name: concurrency_simultaneous_gen
-  tags: ["concurrency", "common", "random_name"]
-  commands:
-  - func: "generate resmoke tasks"
-    vars:
-      resmoke_jobs_max: 1
+  "do scons setup":
+  - command: manifest.load
+  - *f_expansions_write
+  - *git_get_project
+  - *add_git_tag
+  - *set_task_expansion_macros
+  - *f_expansions_write
+  - *kill_processes
+  - *cleanup_environment
+  - *set_up_venv
+  - *upload_pip_requirements
+  - *f_expansions_write
+  - *configure_evergreen_api_credentials
+  - *get_buildnumber
+  - *f_expansions_write
+  - *set_up_credentials
+  - *f_expansions_write
+  - *use_wiredtiger_develop
+  - *f_expansions_write
+  - *set_up_win_mount_script
+  - *f_expansions_write
+  - *generate_compile_expansions
+  - *f_expansions_write
+  - *apply_compile_expansions
+  - *f_expansions_write
+  - *set_task_expansion_macros
+  - *f_expansions_write
+  - *get_engflow_key
+  - *get_engflow_cert
+  - *generate_evergreen_engflow_bazelrc

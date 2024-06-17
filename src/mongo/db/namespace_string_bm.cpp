@@ -97,6 +97,24 @@ void BM_CreateLongNsFromConstexpr(benchmark::State& state) {
     }
 }
 
+void BM_NamespaceStringShortDbName(benchmark::State& state) {
+    const auto dbName = "short"_sd;
+    NamespaceString ns = makeNS(dbName, kMapCollName);
+
+    for (auto _ : state) {
+        benchmark::DoNotOptimize(ns.dbName());
+    }
+}
+
+void BM_NamespaceStringLongDbName(benchmark::State& state) {
+    const std::string dbName(60, 'x');
+    NamespaceString ns = makeNS(dbName, kMapCollName);
+
+    for (auto _ : state) {
+        benchmark::DoNotOptimize(ns.dbName());
+    }
+}
+
 void searchInMap(benchmark::State& state, const NamespaceString& ns) {
     immutable::map<DatabaseName, std::shared_ptr<int>> dbMap;
 
@@ -143,11 +161,42 @@ void BM_NamespaceStringDbNameUnorderedMapLookupDoesntExist(benchmark::State& sta
     searchInUnorderedMap(state, makeNS("LongDatabaseNameThatIsNotInTheMap", kMapCollName));
 }
 
+void BM_NamespaceStringIsShardLocalCollection_ConfigDb_ShardLocal(benchmark::State& state) {
+    const std::string dbName("config");
+    const NamespaceString ns = makeNS(dbName, "foo");
+
+    for (auto _ : state) {
+        benchmark::DoNotOptimize(discardValue(ns.isShardLocalNamespace()));
+    }
+}
+
+void BM_NamespaceStringIsShardLocalCollection_LocalDb(benchmark::State& state) {
+    const std::string dbName("local");
+    const NamespaceString ns = makeNS(dbName, kMapCollName);
+
+    for (auto _ : state) {
+        benchmark::DoNotOptimize(discardValue(ns.isShardLocalNamespace()));
+    }
+}
+
+void BM_NamespaceStringIsShardLocalCollection_UserDb(benchmark::State& state) {
+    const std::string dbName("test");
+    const NamespaceString ns = makeNS(dbName, kMapCollName);
+
+    for (auto _ : state) {
+        benchmark::DoNotOptimize(discardValue(ns.isShardLocalNamespace()));
+    }
+}
+
 BENCHMARK(BM_NamespaceStringCreation)->DenseRange(1, 63);
 
 BENCHMARK(BM_CreateShortNsFromConstexpr);
 
 BENCHMARK(BM_CreateLongNsFromConstexpr);
+
+BENCHMARK(BM_NamespaceStringShortDbName);
+
+BENCHMARK(BM_NamespaceStringLongDbName);
 
 BENCHMARK(BM_NamespaceStringShortDbNameMapLookupExist);
 
@@ -160,5 +209,9 @@ BENCHMARK(BM_NamespaceStringShortDbNameUnorderedMapLookupExist);
 BENCHMARK(BM_NamespaceStringLongDbNameUnorderedMapLookupExist);
 
 BENCHMARK(BM_NamespaceStringDbNameUnorderedMapLookupDoesntExist);
+
+BENCHMARK(BM_NamespaceStringIsShardLocalCollection_ConfigDb_ShardLocal);
+BENCHMARK(BM_NamespaceStringIsShardLocalCollection_LocalDb);
+BENCHMARK(BM_NamespaceStringIsShardLocalCollection_UserDb);
 
 }  // namespace mongo

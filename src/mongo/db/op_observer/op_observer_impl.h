@@ -69,7 +69,7 @@ class OpObserverImpl : public OpObserver {
 
 public:
     OpObserverImpl(std::unique_ptr<OperationLogger> operationLogger);
-    virtual ~OpObserverImpl() = default;
+    ~OpObserverImpl() override = default;
 
     NamespaceFilters getNamespaceFilters() const final {
         return {NamespaceFilter::kAll, NamespaceFilter::kAll};
@@ -123,6 +123,7 @@ public:
                    const CollectionPtr& coll,
                    std::vector<InsertStatement>::const_iterator first,
                    std::vector<InsertStatement>::const_iterator last,
+                   const std::vector<RecordId>& recordIds,
                    std::vector<bool> fromMigrate,
                    bool defaultFromMigrate,
                    OpStateAccumulator* opAccumulator = nullptr) final;
@@ -228,7 +229,9 @@ public:
         const ApplyOpsOplogSlotAndOperationAssignment& applyOpsOperationAssignment,
         OpStateAccumulator* opAccumulator = nullptr) final;
     void onBatchedWriteStart(OperationContext* opCtx) final;
-    void onBatchedWriteCommit(OperationContext* opCtx) final;
+    void onBatchedWriteCommit(OperationContext* opCtx,
+                              WriteUnitOfWork::OplogEntryGroupType oplogGroupingFormat,
+                              OpStateAccumulator* opAccumulator = nullptr) final;
     void onBatchedWriteAbort(OperationContext* opCtx) final;
     void onPreparedTransactionCommit(
         OperationContext* opCtx,

@@ -152,9 +152,12 @@ NamespaceString parseLookupFromAndResolveNamespace(const BSONElement& elem,
         ? boost::make_optional(auth::ValidatedTenancyScopeFactory::create(
               *tenantId, auth::ValidatedTenancyScopeFactory::TrustedForInnerOpMsgRequestTag{}))
         : boost::none;
-    auto spec = NamespaceSpec::parse(
-        IDLParserContext{elem.fieldNameStringData(), false /* apiStrict */, vts, tenantId},
-        elem.embeddedObject());
+    auto spec = NamespaceSpec::parse(IDLParserContext{elem.fieldNameStringData(),
+                                                      false /* apiStrict */,
+                                                      vts,
+                                                      tenantId,
+                                                      SerializationContext::stateDefault()},
+                                     elem.embeddedObject());
     auto nss = NamespaceStringUtil::deserialize(spec.getDb().value_or(DatabaseName()),
                                                 spec.getColl().value_or(""));
     uassert(
@@ -252,6 +255,7 @@ DocumentSourceLookUp::DocumentSourceLookUp(
 
     _fromExpCtx = expCtx->copyForSubPipeline(resolvedNamespace.ns, resolvedNamespace.uuid);
     _fromExpCtx->inLookup = true;
+
     if (fromCollator) {
         _fromExpCtx->setCollator(std::move(fromCollator.value()));
         _hasExplicitCollation = true;
@@ -353,7 +357,7 @@ DocumentSourceLookUp::DocumentSourceLookUp(const DocumentSourceLookUp& original,
       _hasExplicitCollation(original._hasExplicitCollation),
       _resolvedPipeline(original._resolvedPipeline),
       _userPipeline(original._userPipeline),
-      _resolvedIntrospectionPipeline(original._resolvedIntrospectionPipeline->clone()),
+      _resolvedIntrospectionPipeline(original._resolvedIntrospectionPipeline->clone(_fromExpCtx)),
       _letVariables(original._letVariables) {
     if (!_localField && !_foreignField) {
         _cache.emplace(internalDocumentSourceCursorBatchSizeBytes.load());
@@ -455,7 +459,9 @@ const char* DocumentSourceLookUp::getSourceName() const {
 }
 
 bool DocumentSourceLookUp::foreignShardedLookupAllowed() const {
-    return !pExpCtx->opCtx->inMultiDocumentTransaction();
+    const auto fcvSnapshot = serverGlobalParams.mutableFCV.acquireFCVSnapshot();
+    return !pExpCtx->opCtx->inMultiDocumentTransaction() ||
+        gFeatureFlagAllowAdditionalParticipants.isEnabled(fcvSnapshot);
 }
 
 void DocumentSourceLookUp::determineSbeCompatibility() {
@@ -483,10 +489,11 @@ void DocumentSourceLookUp::determineSbeCompatibility() {
 
 StageConstraints DocumentSourceLookUp::constraints(Pipeline::SplitState pipeState) const {
     HostTypeRequirement hostRequirement;
+    bool nominateMergingShard = false;
     if (_fromNs.isConfigDotCacheDotChunks()) {
         // $lookup from config.cache.chunks* namespaces is permitted to run on each individual
-        // shard, rather than just the primary, since each shard should have an identical copy of
-        // the namespace.
+        // shard, rather than just a merging shard, since each shard should have an identical copy
+        // of the namespace.
         hostRequirement = HostTypeRequirement::kAnyShard;
     } else if (pipeState == Pipeline::SplitState::kSplitForShards) {
         // This stage will only be on the shards pipeline if $lookup on sharded foreign collections
@@ -498,6 +505,7 @@ StageConstraints DocumentSourceLookUp::constraints(Pipeline::SplitState pipeStat
     } else {
         // If the pipeline is unsplit, then this $lookup can run anywhere.
         hostRequirement = HostTypeRequirement::kNone;
+        nominateMergingShard = pipeState == Pipeline::SplitState::kSplitForMerge;
     }
 
     // By default, $lookup is allowed in a transaction and does not use disk.
@@ -517,12 +525,23 @@ StageConstraints DocumentSourceLookUp::constraints(Pipeline::SplitState pipeStat
             _resolvedIntrospectionPipeline->getSources(), constraints);
     }
 
+    if (nominateMergingShard) {
+        constraints.mergeShardId = getMergeShardId();
+    }
+
+    constraints.canSwapWithMatch = true;
+    constraints.canSwapWithSkippingOrLimitingStage = !_unwindSrc;
+
+    return constraints;
+}
+
+boost::optional<ShardId> DocumentSourceLookUp::computeMergeShardId() const {
     // If this $lookup is on the merging half of the pipeline and the inner collection isn't
     // sharded (that is, it is either unsplittable or untracked), then we should merge on the shard
     // which owns the inner collection.
-    if (pipeState == Pipeline::SplitState::kSplitForMerge) {
-        constraints.mergeShardId =
-            pExpCtx->mongoProcessInterface->determineSpecificMergeShard(pExpCtx->opCtx, _fromNs);
+    if (auto msi =
+            pExpCtx->mongoProcessInterface->determineSpecificMergeShard(pExpCtx->opCtx, _fromNs)) {
+        return msi;
     }
 
     // If we have not yet designated a merging shard, and are either executing on mongod, the
@@ -533,16 +552,12 @@ StageConstraints DocumentSourceLookUp::constraints(Pipeline::SplitState pipeStat
     // involved shard). When this stage is part of a deeply nested pipeline, it  prevents creating
     // an exponential explosion of cursors/resources (proportional to the level of pipeline
     // nesting).
-    if (!constraints.mergeShardId && hostRequirement == HostTypeRequirement::kNone &&
-        !(pExpCtx->inMongos && pExpCtx->mongoProcessInterface->isSharded(pExpCtx->opCtx, _fromNs) &&
+    if (!(pExpCtx->inMongos && pExpCtx->mongoProcessInterface->isSharded(pExpCtx->opCtx, _fromNs) &&
           foreignShardedLookupAllowed())) {
-        constraints.mergeShardId = ShardingState::get(pExpCtx->opCtx)->shardId();
+        return ShardingState::get(pExpCtx->opCtx)->shardId();
     }
 
-    constraints.canSwapWithMatch = true;
-    constraints.canSwapWithSkippingOrLimitingStage = !_unwindSrc;
-
-    return constraints;
+    return boost::none;
 }
 
 DocumentSource::GetNextResult DocumentSourceLookUp::doGetNext() {
@@ -653,6 +668,11 @@ PipelinePtr DocumentSourceLookUp::buildPipeline(
     _variables.copyToExpCtx(_variablesParseState, fromExpCtx.get());
     fromExpCtx->forcePlanCache = true;
 
+    // Query settings are looked up after parsing and therefore are not populated in the
+    // 'fromExpCtx' as part of DocumentSourceLookUp constructor. Assign query settings to the
+    // 'fromExpCtx' by copying them from the parent query ExpressionContext.
+    setQuerySettingsIfNeeded(fromExpCtx, getContext()->getQuerySettings());
+
     // Resolve the 'let' variables to values per the given input document.
     resolveLetVariables(inputDoc, &fromExpCtx->variables);
 
@@ -660,7 +680,7 @@ PipelinePtr DocumentSourceLookUp::buildPipeline(
         expectUnshardedCollectionInScope;
 
     const auto allowForeignShardedColl = foreignShardedLookupAllowed();
-    if (!allowForeignShardedColl) {
+    if (!allowForeignShardedColl && !fromExpCtx->inMongos) {
         // Enforce that the foreign collection must be unsharded for lookup.
         expectUnshardedCollectionInScope =
             fromExpCtx->mongoProcessInterface->expectUnshardedCollectionInScope(
@@ -842,8 +862,8 @@ Pipeline::SourceContainer::iterator DocumentSourceLookUp::doOptimizeAt(
         return container->end();
     }
 
-    // If the following stage is $sort and there is no internal $unwind, consider pushing it ahead
-    // of $lookup.
+    // If the following stage is $sort and this $lookup has not absorbed a following $unwind, try to
+    // move the $sort ahead of the $lookup.
     if (!_unwindSrc) {
         itr = tryReorderingWithSort(itr, container);
         if (*itr != this) {
@@ -853,13 +873,22 @@ Pipeline::SourceContainer::iterator DocumentSourceLookUp::doOptimizeAt(
 
     auto nextUnwind = dynamic_cast<DocumentSourceUnwind*>((*std::next(itr)).get());
 
-    // If we are not already handling an $unwind stage internally, we can combine with the
-    // following $unwind stage.
+    // If we are not already handling an $unwind stage internally and the following stage is an
+    // $unwind of the $lookup "as" output array, subsume the $unwind into the current $lookup as an
+    // $LU ($lookup + $unwind) macro stage. The combined stage acts like a SQL join (one result
+    // record per LHS x RHS match instead of one result per LHS with an array of its RHS matches).
+    //
+    // Ideally for simplicity in the stage builder we would not absorb the downstream $unwind if the
+    // lookup strategy is kNonExistentForeignCollection, but that is not determined until later and
+    // would be hard to do so here as it requires several inputs we do not have. It is also hard to
+    // move that determination earlier as it occurs in the deep stack under createLegacyExecutor().
     if (nextUnwind && !_unwindSrc && nextUnwind->getUnwindPath() == _as.fullPath()) {
+        if (nextUnwind->preserveNullAndEmptyArrays() || nextUnwind->indexPath()) {
+            downgradeSbeCompatibility(SbeCompatibility::notCompatible);
+        } else {
+            downgradeSbeCompatibility(SbeCompatibility::requiresTrySbe);
+        }
         _unwindSrc = std::move(nextUnwind);
-
-        // We cannot push absorbed $unwind stages into SBE.
-        _sbeCompatibility = SbeCompatibility::notCompatible;
         container->erase(std::next(itr));
         return itr;
     }
@@ -944,17 +973,13 @@ Pipeline::SourceContainer::iterator DocumentSourceLookUp::doOptimizeAt(
         return std::next(itr);
     }
 
-    // We can internalize the $match. This $lookup should already be marked as SBE incompatible
-    // because a $match can only be internalized if an $unwind, which is SBE incompatible, was
-    // absorbed as well.
-    tassert(5843701,
-            "This $lookup cannot be compatible with SBE",
-            _sbeCompatibility == SbeCompatibility::notCompatible);
+    // We cannot yet lower $LUM (combined $lookup + $unwind + $match) stages to SBE.
+    _sbeCompatibility = SbeCompatibility::notCompatible;
     if (!_matchSrc) {
         _matchSrc = nextMatch;
     } else {
         // We have already absorbed a $match. We need to join it with 'dependent'.
-        _matchSrc->joinMatchWith(nextMatch);
+        _matchSrc->joinMatchWith(nextMatch, "$and"_sd);
     }
 
     // Remove the original $match.
@@ -978,7 +1003,7 @@ Pipeline::SourceContainer::iterator DocumentSourceLookUp::doOptimizeAt(
     // There may be further optimization between this $lookup and the new neighbor, so we return an
     // iterator pointing to ourself.
     return itr;
-}
+}  // doOptimizeAt
 
 bool DocumentSourceLookUp::usedDisk() {
     if (_pipeline)
@@ -1270,6 +1295,11 @@ boost::optional<DocumentSource::DistributedPlanLogic> DocumentSourceLookUp::dist
     // either choice will work correctly; we are simply applying a heuristic optimization.
     if (foreignShardedLookupAllowed() && pExpCtx->subPipelineDepth == 0 &&
         pExpCtx->mongoProcessInterface->isSharded(_fromExpCtx->opCtx, _fromNs)) {
+        tassert(
+            8725000,
+            "Should not attempt to nominate merging shard when $lookup is not acting as a merger",
+            !mergeShardId.isInitialized() ||
+                (mergeShardId.isInitialized() && getMergeShardId() == boost::none));
         return boost::none;
     }
 
@@ -1277,6 +1307,11 @@ boost::optional<DocumentSource::DistributedPlanLogic> DocumentSourceLookUp::dist
         // When $lookup reads from config.cache.chunks.* namespaces, it should run on each
         // individual shard in parallel. This is a special case, and atypical for standard $lookup
         // since a full copy of config.cache.chunks.* collections exists on all shards.
+        tassert(
+            8725001,
+            "Should not attempt to nominate merging shard when $lookup is not acting as a merger",
+            !mergeShardId.isInitialized() ||
+                (mergeShardId.isInitialized() && getMergeShardId() == boost::none));
         return boost::none;
     }
 
@@ -1450,6 +1485,17 @@ void DocumentSourceLookUp::addInvolvedCollections(
     for (auto&& stage : _resolvedIntrospectionPipeline->getSources()) {
         stage->addInvolvedCollections(collectionNames);
     }
+}
+
+void DocumentSourceLookUp::setQuerySettingsIfNeeded(
+    const boost::intrusive_ptr<ExpressionContext>& expCtx,
+    const query_settings::QuerySettings& querySettings) {
+    if (_didSetQuerySettingsToPipeline) {
+        return;
+    }
+
+    expCtx->setQuerySettings(querySettings);
+    _didSetQuerySettingsToPipeline = true;
 }
 
 }  // namespace mongo

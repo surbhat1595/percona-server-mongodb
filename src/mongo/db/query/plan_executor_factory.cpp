@@ -58,7 +58,7 @@ namespace mongo::plan_executor_factory {
 StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> make(
     std::unique_ptr<CanonicalQuery> cq,
     std::unique_ptr<WorkingSet> ws,
-    std::unique_ptr<PlanStage> rt,
+    std::unique_ptr<PlanStage> rootStage,
     VariantCollectionPtrOrAcquisition collection,
     PlanYieldPolicy::YieldPolicy yieldPolicy,
     size_t plannerOptions,
@@ -68,7 +68,7 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> make(
     auto expCtx = cq->getExpCtx();
     return make(expCtx->opCtx,
                 std::move(ws),
-                std::move(rt),
+                std::move(rootStage),
                 std::move(qs),
                 std::move(cq),
                 expCtx,
@@ -83,7 +83,7 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> make(
 StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> make(
     const boost::intrusive_ptr<ExpressionContext>& expCtx,
     std::unique_ptr<WorkingSet> ws,
-    std::unique_ptr<PlanStage> rt,
+    std::unique_ptr<PlanStage> rootStage,
     VariantCollectionPtrOrAcquisition collection,
     PlanYieldPolicy::YieldPolicy yieldPolicy,
     size_t plannerOptions,
@@ -92,7 +92,7 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> make(
 
     return make(expCtx->opCtx,
                 std::move(ws),
-                std::move(rt),
+                std::move(rootStage),
                 std::move(qs),
                 nullptr,
                 expCtx,
@@ -105,7 +105,7 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> make(
 StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> make(
     OperationContext* opCtx,
     std::unique_ptr<WorkingSet> ws,
-    std::unique_ptr<PlanStage> rt,
+    std::unique_ptr<PlanStage> rootStage,
     std::unique_ptr<QuerySolution> qs,
     std::unique_ptr<CanonicalQuery> cq,
     const boost::intrusive_ptr<ExpressionContext>& expCtx,
@@ -122,7 +122,7 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> make(
     try {
         auto execImpl = new PlanExecutorImpl(opCtx,
                                              std::move(ws),
-                                             std::move(rt),
+                                             std::move(rootStage),
                                              std::move(qs),
                                              std::move(cq),
                                              expCtx,
@@ -150,11 +150,12 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> make(
     NamespaceString nss,
     std::unique_ptr<PlanYieldPolicySBE> yieldPolicy,
     bool planIsFromCache,
-    bool matchesCachedPlan,
+    boost::optional<size_t> cachedPlanHash,
     bool generatedByBonsai,
     OptimizerCounterInfo optCounterInfo,
     std::unique_ptr<RemoteCursorMap> remoteCursors,
-    std::unique_ptr<RemoteExplainVector> remoteExplains) {
+    std::unique_ptr<RemoteExplainVector> remoteExplains,
+    std::unique_ptr<MultiPlanStage> classicRuntimePlannerStage) {
     auto&& [rootStage, data] = root;
     LOGV2_DEBUG(4822860,
                 5,
@@ -173,17 +174,18 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> make(
                       sbe::plan_ranker::CandidatePlanData{std::move(data)},
                       false /*exitedEarly*/,
                       Status::OK(),
-                      planIsFromCache,
-                      matchesCachedPlan}),
+                      planIsFromCache}),
                   0},
                  plannerOptions & QueryPlannerParams::RETURN_OWNED_DATA,
                  std::move(nss),
                  false /*isOpen*/,
                  std::move(yieldPolicy),
                  generatedByBonsai,
+                 cachedPlanHash,
                  std::move(optCounterInfo),
                  std::move(remoteCursors),
-                 std::move(remoteExplains)),
+                 std::move(remoteExplains),
+                 std::move(classicRuntimePlannerStage)),
              PlanExecutor::Deleter{opCtx}}};
 }
 
@@ -194,7 +196,10 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> make(
     const MultipleCollectionAccessor& collections,
     size_t plannerOptions,
     NamespaceString nss,
-    std::unique_ptr<PlanYieldPolicySBE> yieldPolicy) {
+    std::unique_ptr<PlanYieldPolicySBE> yieldPolicy,
+    std::unique_ptr<RemoteCursorMap> remoteCursors,
+    std::unique_ptr<RemoteExplainVector> remoteExplains,
+    boost::optional<size_t> cachedPlanHash) {
     LOGV2_DEBUG(4822861,
                 5,
                 "SBE plan",
@@ -211,7 +216,11 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> make(
                                  true, /*isOpen*/
                                  std::move(yieldPolicy),
                                  false /*generatedByBonsai*/,
-                                 {} /* optCounterInfo */),
+                                 cachedPlanHash,
+                                 {} /* optCounterInfo */,
+                                 std::move(remoteCursors),
+                                 std::move(remoteExplains),
+                                 nullptr /*classicRuntimePlannerStage*/),
              PlanExecutor::Deleter{opCtx}}};
 }
 

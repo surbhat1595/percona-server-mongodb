@@ -69,6 +69,7 @@
 #include "mongo/db/pipeline/aggregate_command_gen.h"
 #include "mongo/db/pipeline/document_source.h"
 #include "mongo/db/pipeline/document_source_cursor.h"
+#include "mongo/db/pipeline/initialize_auto_get_helper.h"
 #include "mongo/db/pipeline/lite_parsed_pipeline.h"
 #include "mongo/db/pipeline/pipeline_d.h"
 #include "mongo/db/pipeline/search/search_helper.h"
@@ -485,7 +486,7 @@ CommonMongodProcessInterface::attachCursorSourceToPipelineForLocalRead(
     if (!skipRequiresInputDocSourceCheck && firstStage &&
         !(*firstStage)->constraints().requiresInputDocSource) {
         // There's no need to attach a cursor here.
-        search_helpers::prepareSearchForNestedPipeline(pipeline.get());
+        search_helpers::prepareSearchForNestedPipelineLegacyExecutor(pipeline.get());
         return pipeline;
     }
 
@@ -508,23 +509,34 @@ CommonMongodProcessInterface::attachCursorSourceToPipelineForLocalRead(
     // when constructing our query executor.
     auto lpp = LiteParsedPipeline(expCtx->ns, pipeline->serializeToBson());
     std::vector<NamespaceStringOrUUID> secondaryNamespaces = lpp.getForeignExecutionNamespaces();
+    auto* opCtx = expCtx->opCtx;
 
-    AutoGetCollectionForReadCommandMaybeLockFree autoColl(
-        expCtx->opCtx,
-        expCtx->ns,
-        AutoGetCollection::Options{}.secondaryNssOrUUIDs(secondaryNamespaces.cbegin(),
-                                                         secondaryNamespaces.cend()),
-        AutoStatsTracker::LogMode::kUpdateTop);
+    boost::optional<AutoGetCollectionForReadCommandMaybeLockFree> autoColl = boost::none;
+    auto initAutoGetCallback = [&]() {
+        autoColl.emplace(opCtx,
+                         expCtx->ns,
+                         AutoGetCollection::Options{}.secondaryNssOrUUIDs(
+                             secondaryNamespaces.cbegin(), secondaryNamespaces.cend()),
+                         AutoStatsTracker::LogMode::kUpdateTop);
+    };
 
+    bool isAnySecondaryCollectionNotLocal =
+        intializeAutoGet(opCtx, expCtx->ns, secondaryNamespaces, initAutoGetCallback);
+
+    tassert(8322002,
+            "Should have initialized AutoGet* after calling 'initializeAutoGet'",
+            autoColl.has_value());
     uassert(ErrorCodes::NamespaceNotFound,
             fmt::format("collection '{}' does not match the expected uuid",
                         expCtx->ns.toStringForErrorMsg()),
-            !expCtx->uuid || (autoColl && autoColl->uuid() == expCtx->uuid));
+            !expCtx->uuid ||
+                (autoColl->getCollection() && autoColl->getCollection()->uuid() == expCtx->uuid));
 
     MultipleCollectionAccessor holder{expCtx->opCtx,
-                                      &autoColl.getCollection(),
-                                      autoColl.getNss(),
-                                      autoColl.isAnySecondaryNamespaceAViewOrSharded(),
+                                      &autoColl->getCollection(),
+                                      autoColl->getNss(),
+                                      autoColl->isAnySecondaryNamespaceAView() ||
+                                          isAnySecondaryCollectionNotLocal,
                                       secondaryNamespaces};
     auto resolvedAggRequest = aggRequest ? &aggRequest.get() : nullptr;
     PipelineD::buildAndAttachInnerQueryExecutorToPipeline(
@@ -727,10 +739,10 @@ BSONObj CommonMongodProcessInterface::_reportCurrentOpForClient(
         }
 
         // Append lock stats before returning.
-        if (auto lockerInfo = shard_role_details::getLocker(clientOpCtx)
-                                  ->getLockerInfo(CurOp::get(*clientOpCtx)->getLockStatsBase())) {
-            fillLockerInfo(*lockerInfo, builder);
-        }
+        auto lockerInfo = shard_role_details::getLocker(clientOpCtx)
+                              ->getLockerInfo(CurOp::get(*clientOpCtx)->getLockStatsBase());
+        fillLockerInfo(lockerInfo, builder);
+
 
         if (auto tcWorkerRepo = getTransactionCoordinatorWorkerCurOpRepository()) {
             tcWorkerRepo->reportState(clientOpCtx, &builder);
@@ -812,12 +824,6 @@ std::unique_ptr<CollatorInterface> CommonMongodProcessInterface::_getCollectionD
     auto& collator = it->second;
     return collator ? collator->clone() : nullptr;
 }
-
-std::unique_ptr<ResourceYielder> CommonMongodProcessInterface::getResourceYielder(
-    StringData cmdName) const {
-    return TransactionParticipantResourceYielder::make(cmdName);
-}
-
 
 std::pair<std::set<FieldPath>, boost::optional<ChunkVersion>>
 CommonMongodProcessInterface::ensureFieldsUniqueOrResolveDocumentKey(

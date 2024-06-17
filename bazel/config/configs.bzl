@@ -15,32 +15,10 @@ compiler_type = rule(
 )
 
 # ==========
-# build_mode
-# ==========
-
-build_mode_values = ["dbg", "release", "opt_on", "opt_off", "opt_size", "opt_debug"]
-
-build_mode_provider = provider(
-    doc = "Select the overall mode of the build, e.g debug/optimized or some combination/extension of those.",
-    fields = {"build_mode": "choose one of " + ".".join(build_mode_values)},
-)
-
-def build_mode_impl(ctx):
-    build_mode_value = ctx.build_setting_value
-    if build_mode_value not in build_mode_values:
-        fail(str(ctx.label) + " build_mode allowed to take values {" + ", ".join(build_mode_values) + "} but was set to unallowed value " + build_mode_value)
-    return build_mode_provider(build_mode = build_mode_value)
-
-build_mode = rule(
-    implementation = build_mode_impl,
-    build_setting = config.string(flag = True),
-)
-
-# ==========
 # linker
 # ==========
 
-linker_values = ["gold", "lld"]
+linker_values = ["auto", "gold", "lld"]
 
 linker_provider = provider(
     doc = "Specify the type of linker to use.",
@@ -50,7 +28,7 @@ linker_provider = provider(
 def linker_impl(ctx):
     linker_value = ctx.build_setting_value
     if linker_value not in linker_values:
-        fail(str(ctx.label) + " build_mode allowed to take values {" + ", ".join(linker_values) + "} but was set to unallowed value " + linker_value)
+        fail(str(ctx.label) + " linker allowed to take values {" + ", ".join(linker_values) + "} but was set to unallowed value " + linker_value)
     return linker_provider(linker = linker_value)
 
 linker = rule(
@@ -64,11 +42,11 @@ linker = rule(
 
 use_gdbserver_provider = provider(
     doc = "Choose if gdbserver should be used",
-    fields = ["type"],
+    fields = ["enabled"],
 )
 
 use_gdbserver = rule(
-    implementation = lambda ctx: use_gdbserver_provider(type = ctx.build_setting_value),
+    implementation = lambda ctx: use_gdbserver_provider(enabled = ctx.build_setting_value),
     build_setting = config.bool(flag = True),
 )
 
@@ -109,7 +87,7 @@ spider_monkey_dbg = rule(
 # allocator
 # =========
 
-allocator_values = ["auto", "system", "tcmalloc"]
+allocator_values = ["auto", "system", "tcmalloc-gperf", "tcmalloc-google"]
 
 allocator_provider = provider(
     doc = "Allocator to use (use \"auto\" for best choice for current platform)",
@@ -133,11 +111,11 @@ allocator = rule(
 
 use_lldbserver_provider = provider(
     doc = "Choose if lldbserver should be used",
-    fields = ["type"],
+    fields = ["enabled"],
 )
 
 use_lldbserver = rule(
-    implementation = lambda ctx: use_lldbserver_provider(type = ctx.build_setting_value),
+    implementation = lambda ctx: use_lldbserver_provider(enabled = ctx.build_setting_value),
     build_setting = config.bool(flag = True),
 )
 
@@ -379,4 +357,120 @@ build_enterprise_provider = provider(
 build_enterprise = rule(
     implementation = lambda ctx: build_enterprise_provider(enabled = ctx.build_setting_value),
     build_setting = config.bool(flag = True),
+)
+
+# =========
+# streams-release-build
+# =========
+streams_release_build_provider = provider(
+    doc = """If set, will include the enterprise streams module in a release build.""",
+    fields = ["enabled"],
+)
+
+streams_release_build = rule(
+    implementation = lambda ctx: streams_release_build_provider(enabled = ctx.build_setting_value),
+    build_setting = config.bool(flag = True),
+)
+
+# =========
+# visibility-support
+# =========
+
+visibility_support_values = ["auto", "on", "off"]
+
+visibility_support_provider = provider(
+    doc = "Enable visibility annotations",
+    fields = ["type"],
+)
+
+def visibility_support_impl(ctx):
+    visibility_support_value = ctx.build_setting_value
+    if visibility_support_value not in visibility_support_values:
+        fail(str(ctx.label) + " visibility-support allowed to take values {" + ", ".join(visibility_support_values) + "} but was set to unallowed value " + visibility_support_value)
+    return visibility_support_provider(type = visibility_support_value)
+
+visibility_support = rule(
+    implementation = visibility_support_impl,
+    build_setting = config.string(flag = True),
+)
+
+# =========
+# dbg
+# =========
+dbg_provider = provider(
+    doc = """Enable runtime debugging checks.""",
+    fields = ["enabled"],
+)
+
+dbg = rule(
+    implementation = lambda ctx: dbg_provider(enabled = ctx.build_setting_value),
+    build_setting = config.bool(flag = True),
+)
+
+# =========
+# opt
+# =========
+opt_values = ["auto", "on", "off", "size", "debug"]
+
+opt_provider = provider(
+    doc = "Enable compiler optimizations.",
+    fields = {"opt": "choose one of " + ".".join(opt_values)},
+)
+
+def opt_impl(ctx):
+    opt_value = ctx.build_setting_value
+    if opt_value not in opt_values:
+        fail(str(ctx.label) + " opt allowed to take values {" + ", ".join(opt_values) + "} but was set to unallowed value " + opt_value)
+    return opt_provider(opt = opt_value)
+
+opt = rule(
+    implementation = opt_impl,
+    build_setting = config.string(flag = True),
+)
+
+# =========
+# release
+# =========
+release_provider = provider(
+    doc = """Release build.""",
+    fields = ["enabled"],
+)
+
+release = rule(
+    implementation = lambda ctx: release_provider(enabled = ctx.build_setting_value),
+    build_setting = config.bool(flag = True),
+)
+
+# =========
+# local_build
+# =========
+local_build_provider = provider(
+    doc = """Allows configurations based on local builds""",
+    fields = ["enabled"],
+)
+
+local_build = rule(
+    implementation = lambda ctx: local_build_provider(enabled = ctx.build_setting_value),
+    build_setting = config.bool(flag = True),
+)
+
+# =========
+# dwarf_version
+# =========
+dwarf_version_values = ["4", "5"]
+
+dwarf_version_provider = provider(
+    doc = """Sets the DWARF version (non-Windows). Incompatible with SPLIT_DWARF=1""",
+    fields = {"dwarf_version": "choose one of " + ".".join(dwarf_version_values)},
+)
+
+def dwarf_version_impl(ctx):
+    dwarf_version = ctx.build_setting_value
+    if dwarf_version != "" and dwarf_version not in dwarf_version_values:
+        fail(str(ctx.label) + " version allowed to take values {" + ", ".join(dwarf_version_values) + "} but was set to unallowed value " + dwarf_version)
+    return dwarf_version_provider(dwarf_version = dwarf_version)
+
+dwarf_version = rule(
+    implementation = dwarf_version_impl,
+    build_setting = config.string(flag = True),
 )

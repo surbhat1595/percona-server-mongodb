@@ -90,6 +90,10 @@
  *       useAutoBootstrapProcedure {boolean}: Use the auto-bootstrapping procedure on every shard
  *          and config server if set to true.
  *       alwaysUseTestNameForShardName {boolean}: Always use the testname as the name of the shard.
+ *       embeddedRouter {boolean}: Use mongod's embedding routing functionality instead of mongos.
+ *          Each st.s, s0, s1,.... points to the router port of a mongod instead of a dedicated
+ * mongos. Chooses `numMongos` mongod nodes from the shards to act as
+ * routers, at random. Incompatible with useBridge.
  *     }
  *   }
  *
@@ -263,6 +267,11 @@ var ShardingTest = function ShardingTest(params) {
         }
 
         return this.config.shards.find({_id: {$ne: x.primary}}).map(z => z._id);
+    };
+
+    ShardingTest.prototype.printNodes = function() {
+        print("ShardingTest " + this._testName + " :\n" +
+              tojson({config: this._configDB, shards: this._connections, mongos: this._mongos}));
     };
 
     ShardingTest.prototype.getConnNames = function() {
@@ -502,6 +511,14 @@ var ShardingTest = function ShardingTest(params) {
     ShardingTest.prototype.stopAllMongos = function(opts) {
         for (var i = 0; i < this._mongos.length; i++) {
             this.stopMongos(i, opts);
+        }
+    };
+
+    ShardingTest.prototype.awaitMigrations = function() {
+        this.stopBalancer();
+
+        for (let i = 0; i < numShards; i++) {
+            assert.commandWorked(this["shard" + i].adminCommand({"_shardsvrJoinMigrations": 1}));
         }
     };
 
@@ -882,8 +899,9 @@ var ShardingTest = function ShardingTest(params) {
                     (tlsOptions.includes(currNode.fullOptions.tlsMode) ||
                      sslOptions.includes(currNode.fullOptions.sslMode));
 
-                const x509AuthRequired = (conn.fullOptions && conn.fullOptions.clusterAuthMode &&
-                                          conn.fullOptions.clusterAuthMode === "x509");
+                const x509AuthRequired =
+                    (this.s.fullOptions && this.s.fullOptions.clusterAuthMode &&
+                     this.s.fullOptions.clusterAuthMode === "x509");
 
                 if (keyFileUsed) {
                     authutil.asCluster(currNode, keyFileUsed, () => {
@@ -929,7 +947,12 @@ var ShardingTest = function ShardingTest(params) {
             MongoRunner.stopMongos(this._unbridgedMongos[n], undefined, opts, waitpid);
             this["s" + n].stop();
         } else {
-            MongoRunner.stopMongos(this["s" + n], undefined, opts, waitpid);
+            let mongos = this["s" + n];
+            // this isn't a real mongos, it's the embedded router of a mongod. Don't do anything.
+            if (mongos.isEmbeddedRouter) {
+                return;
+            }
+            MongoRunner.stopMongos(mongos, undefined, opts, waitpid);
         }
     };
 
@@ -941,7 +964,8 @@ var ShardingTest = function ShardingTest(params) {
     };
 
     /**
-     * Stops and restarts a mongos process.
+     * Stops and restarts a mongos process. The operation fails if this connection is not against a
+     * mongos process (i.e. an embedded router).
      *
      * If 'opts' is not specified, starts the mongos with its previous parameters.  If 'opts' is
      * specified and 'opts.restart' is false or missing, starts mongos with the parameters specified
@@ -958,6 +982,9 @@ var ShardingTest = function ShardingTest(params) {
         } else {
             mongos = this["s" + n];
         }
+
+        assert(!mongos.isEmbeddedRouter,
+               "This mongos is an embedded router, it can't be restarted separately");
 
         opts = opts || mongos;
         opts.port = opts.port || mongos.port;
@@ -1001,6 +1028,67 @@ var ShardingTest = function ShardingTest(params) {
             this.admin = this._mongos[n].getDB('admin');
             this.config = this._mongos[n].getDB('config');
         }
+    };
+
+    /**
+     * Restarts a router node. The node can be either a standalone mongoS, or a mongoD with an
+     * embedded router. If the node is a mongoD with embedded router, this command will wait until
+     * the triggered election finishes. As a consequence, the primary of the affected RS could
+     * change.
+     *
+     * If 'opts' is not specified, starts the node with its previous parameters.  If 'opts' is
+     * specified and 'opts.restart' is false or missing, starts the node with the parameters
+     * specified in 'opts'.  If opts is specified and 'opts.restart' is true, merges the previous
+     * options with the options specified in 'opts', with the options in 'opts' taking precedence.
+     *
+     * Warning: Overwrites the old s (if n = 0) admin, config, and sn member variables.
+     */
+    ShardingTest.prototype.restartRouterNode = function(n, opts) {
+        const routerConn = (() => {
+            if (this._useBridge) {
+                return this._unbridgedMongos[n];
+            } else {
+                return this["s" + n];
+            }
+        })();
+
+        if (!routerConn.isEmbeddedRouter) {
+            this.restartMongos(n, opts);
+            return;
+        }
+
+        assert(!this._useBridge, "BUG: mongobridge and embedded router are not compatible");
+
+        const nodeInfo = routerConn.nodeInfo;
+
+        if (nodeInfo.isConfig) {
+            this.restartConfigServer(nodeInfo.index, opts);
+        } else {
+            nodeInfo.rs.restart(nodeInfo.index, opts);
+        }
+
+        const mongodConn = nodeInfo.rs.nodes[nodeInfo.index];
+        const newConn =
+            MongoRunner.awaitConnection({pid: mongodConn.pid, port: mongodConn.routerPort});
+        newConn.isEmbeddedRouter = true;
+        newConn.port = mongodConn.routerPort;
+        newConn.nodeInfo = nodeInfo;
+        newConn.fullOptions = mongodConn.fullOptions;
+        newConn.commandLine = mongodConn.commandLine;
+        newConn.name = routerConn.name;
+        newConn.host = routerConn.host;
+
+        this._mongos[n] = newConn;
+        this["s" + n] = newConn;
+
+        if (n == 0) {
+            this.s = this._mongos[n];
+            this.admin = this._mongos[n].getDB('admin');
+            this.config = this._mongos[n].getDB('config');
+        }
+
+        // Wait for any election to succeed.
+        nodeInfo.rs.awaitNodesAgreeOnPrimary();
     };
 
     /**
@@ -1067,13 +1155,21 @@ var ShardingTest = function ShardingTest(params) {
 
             // Must check shardMixedBinVersion because it causes shardOptions.binVersion to be an
             // object (versionIterator) rather than a version string. Must check mongosBinVersion,
-            // as well, because it does not update mongosOptions.binVersion.
+            // as well, because it does not update mongosOptions.binVersion. Also check
+            // useRandomBinVersionsWithinReplicaSet, as it may cause some nodes within a replica set
+            // to be downgraded.
             const isMixedVersionShard = jsTestOptions().shardMixedBinVersions &&
                 MongoRunner.areBinVersionsTheSame(binVersion,
                                                   jsTestOptions().shardMixedBinVersions);
+
             const isMixedVersionMongos = jsTestOptions().mongosBinVersion &&
                 MongoRunner.areBinVersionsTheSame(binVersion, jsTestOptions().mongosBinVersion);
-            if (isMixedVersionShard || isMixedVersionMongos) {
+
+            const isMixedVersionReplicaSet = jsTestOptions().useRandomBinVersionsWithinReplicaSet &&
+                MongoRunner.areBinVersionsTheSame(
+                    binVersion, jsTestOptions().useRandomBinVersionsWithinReplicaSet);
+
+            if (isMixedVersionShard || isMixedVersionMongos || isMixedVersionReplicaSet) {
                 return true;
             }
 
@@ -1204,11 +1300,9 @@ var ShardingTest = function ShardingTest(params) {
     let isEmbeddedRouterMode =
         otherParams.hasOwnProperty('embeddedRouter') ? otherParams.embeddedRouter : false;
     isEmbeddedRouterMode = isEmbeddedRouterMode || jsTestOptions().embeddedRouter;
+
     if (isEmbeddedRouterMode) {
-        // TODO (SERVER-84239): Make ShardingTest and ReplSetTest fully support embedded routers.
-        assert(numShards == 1 && isConfigShardMode,
-               "The embedded router mode is currently only supported on a single-shard " +
-                   "cluster in the config shard mode");
+        assert(!otherParams.useBridge, "Embedded router mode is not compatible with mongobridge");
     }
 
     if ("shardAsReplicaSet" in otherParams) {
@@ -1354,10 +1448,66 @@ var ShardingTest = function ShardingTest(params) {
     }
 
     try {
+        const clusterVersionInfo = this.getClusterVersionInfo();
+
+        let startTime = new Date();  // Measure the execution time of startup and initiate.
+        if (!isConfigShardMode) {
+            //
+            // Start up the config server replica set.
+            //
+
+            var rstOptions = {
+                useHostName: otherParams.useHostname,
+                host: hostName,
+                useBridge: otherParams.useBridge,
+                bridgeOptions: otherParams.bridgeOptions,
+                keyFile: this.keyFile,
+                waitForKeys: false,
+                name: testName + "-configRS",
+                seedRandomNumberGenerator: !randomSeedAlreadySet,
+                isConfigServer: true,
+                isRouterServer: isEmbeddedRouterMode,
+            };
+
+            // always use wiredTiger as the storage engine for CSRS
+            var startOptions = {
+                pathOpts: pathOpts,
+                // Ensure that journaling is always enabled for config servers.
+                configsvr: "",
+                storageEngine: "wiredTiger",
+            };
+
+            if (otherParams.configOptions && otherParams.configOptions.binVersion) {
+                otherParams.configOptions.binVersion =
+                    MongoRunner.versionIterator(otherParams.configOptions.binVersion);
+            }
+
+            startOptions = Object.merge(startOptions, otherParams.configOptions);
+            rstOptions = Object.merge(rstOptions, otherParams.configReplSetTestOptions);
+
+            var nodeOptions = [];
+            for (var i = 0; i < numConfigs; ++i) {
+                nodeOptions.push(otherParams["c" + i] || {});
+                if (isEmbeddedRouterMode && otherParams.mongosOptions) {
+                    nodeOptions[i] = Object.merge(otherParams.mongosOptions, nodeOptions[i]);
+                    if (otherParams.mongosOptions.setParameter) {
+                        nodeOptions[i].setParameter = Object.merge(
+                            otherParams.mongosOptions.setParameter, nodeOptions[i].setParameter);
+                    }
+                }
+            }
+
+            rstOptions.nodes = nodeOptions;
+
+            // Start the config server's replica set without waiting for it to complete. This allows
+            // it to proceed in parallel with the startup of each shard.
+            this.configRS = new ReplSetTest(rstOptions);
+            this.configRS.startSetAsync(startOptions, false, clusterVersionInfo.isMixedVersion);
+        }
+
         //
         // Start each shard replica set.
         //
-        let startTime = new Date();  // Measure the execution time of startup and initiate.
         for (var i = 0; i < numShards; i++) {
             var setName = testName + "-rs" + i;
 
@@ -1417,8 +1567,23 @@ var ShardingTest = function ShardingTest(params) {
             }
 
             rsDefaults.setParameter = rsDefaults.setParameter || {};
+
+            if (typeof (rsDefaults.setParameter) === "string") {
+                var eqIdx = rsDefaults.setParameter.indexOf("=");
+                if (eqIdx != -1) {
+                    var param = rsDefaults.setParameter.substring(0, eqIdx);
+                    var value = rsDefaults.setParameter.substring(eqIdx + 1);
+                    rsDefaults.setParameter = {};
+                    rsDefaults.setParameter[param] = value;
+                }
+            }
+
             rsDefaults.setParameter.migrationLockAcquisitionMaxWaitMS =
                 otherParams.migrationLockAcquisitionMaxWaitMS;
+
+            if (isConfigShardMode && i == 0) {
+                rsDefaults.setParameter.featureFlagTransitionToCatalogShard = true
+            }
 
             var rsSettings = rsDefaults.settings;
             delete rsDefaults.settings;
@@ -1442,7 +1607,7 @@ var ShardingTest = function ShardingTest(params) {
             var protocolVersion = rsDefaults.protocolVersion;
             delete rsDefaults.protocolVersion;
 
-            const rs = new ReplSetTest({
+            let replSetTestOpts = {
                 name: setName,
                 nodes: numReplicas,
                 host: hostName,
@@ -1457,62 +1622,31 @@ var ShardingTest = function ShardingTest(params) {
                 isConfigServer: setIsConfigSvr,
                 isRouterServer: isEmbeddedRouterMode,
                 useAutoBootstrapProcedure: useAutoBootstrapProcedure,
-            });
+            };
+
+            if (isEmbeddedRouterMode && otherParams.mongosOptions) {
+                replSetTestOpts = Object.merge(otherParams.mongosOptions, replSetTestOpts);
+                if (otherParams.mongosOptions.setParameter) {
+                    replSetTestOpts.setParameter = Object.merge(
+                        otherParams.mongosOptions.setParameter, replSetTestOpts.setParameter);
+                }
+            }
+
+            const rs = new ReplSetTest(replSetTestOpts);
 
             print("ShardingTest starting replica set for shard: " + setName);
 
             // Start up the replica set but don't wait for it to complete. This allows the startup
             // of each shard to proceed in parallel.
-            this._rs[i] =
-                {setName: setName, test: rs, nodes: rs.startSetAsync(rsDefaults), url: rs.getURL()};
-        }
-
-        if (isConfigShardMode) {
-            this.configRS = this._rs[0].test;
-        } else {
-            //
-            // Start up the config server replica set.
-            //
-
-            var rstOptions = {
-                useHostName: otherParams.useHostname,
-                host: hostName,
-                useBridge: otherParams.useBridge,
-                bridgeOptions: otherParams.bridgeOptions,
-                keyFile: this.keyFile,
-                waitForKeys: false,
-                name: testName + "-configRS",
-                seedRandomNumberGenerator: !randomSeedAlreadySet,
-                isConfigServer: true,
+            this._rs[i] = {
+                setName: setName,
+                test: rs,
+                nodes: rs.startSetAsync(rsDefaults, false, clusterVersionInfo.isMixedVersion),
+                url: rs.getURL()
             };
-
-            // always use wiredTiger as the storage engine for CSRS
-            var startOptions = {
-                pathOpts: pathOpts,
-                // Ensure that journaling is always enabled for config servers.
-                configsvr: "",
-                storageEngine: "wiredTiger",
-            };
-
-            if (otherParams.configOptions && otherParams.configOptions.binVersion) {
-                otherParams.configOptions.binVersion =
-                    MongoRunner.versionIterator(otherParams.configOptions.binVersion);
+            if (i == 0 && isConfigShardMode) {
+                this.configRS = this._rs[0].test;
             }
-
-            startOptions = Object.merge(startOptions, otherParams.configOptions);
-            rstOptions = Object.merge(rstOptions, otherParams.configReplSetTestOptions);
-
-            var nodeOptions = [];
-            for (var i = 0; i < numConfigs; ++i) {
-                nodeOptions.push(otherParams["c" + i] || {});
-            }
-
-            rstOptions.nodes = nodeOptions;
-
-            // Start the config server's replica set without waiting for it to complete. This allows
-            // it to proceed in parallel with the startup of each shard.
-            this.configRS = new ReplSetTest(rstOptions);
-            this.configRS.startSetAsync(startOptions);
         }
 
         //
@@ -1687,7 +1821,7 @@ var ShardingTest = function ShardingTest(params) {
         this.configRS.awaitNodesAgreeOnPrimary();
         var csrsPrimary = this.configRS.getPrimary();
 
-        // TODO: SERVER-80100 Remove assert.soon.
+        // TODO: SERVER-80010 Remove assert.soon.
         if (useAutoBootstrapProcedure) {
             assert.soonNoExcept(() => {
                 function isShardingReady() {
@@ -1727,13 +1861,16 @@ var ShardingTest = function ShardingTest(params) {
             options.setParameter.mongosShutdownTimeoutMillisForSignaledShutdown =
                 options.setParameter.mongosShutdownTimeoutMillisForSignaledShutdown || 0;
 
+            if (isConfigShardMode) {
+                options.setParameter.featureFlagTransitionToCatalogShard = true;
+            }
+
             options.port = options.port || _allocatePortForMongos();
 
             mongosOptions.push(options);
         }
 
         const configRS = this.configRS;
-        const clusterVersionInfo = this.getClusterVersionInfo();
         if (_hasNewFeatureCompatibilityVersion() && clusterVersionInfo.isMixedVersion) {
             const fcv = binVersionToFCV(clusterVersionInfo.oldestBinVersion);
             function setFeatureCompatibilityVersion() {
@@ -1780,54 +1917,118 @@ var ShardingTest = function ShardingTest(params) {
 
         printjson('Config servers: ' + this._configDB);
 
-        print("ShardingTest " + this._testName + " :\n" +
-              tojson({config: this._configDB, shards: this._connections}));
+        this.printNodes();
 
         this._mongos = [];
 
-        // Start the MongoS servers
-        for (var i = 0; i < numMongos; i++) {
-            const options = mongosOptions[i];
-            options.configdb = this._configDB;
+        // Start and connect to the MongoS servers if needed; create connections to the embedded
+        // router ports if not.
+        if (isEmbeddedRouterMode) {
+            print("Connecting to embedded routers...");
 
-            if (otherParams.useBridge) {
-                var bridgeOptions =
-                    Object.merge(otherParams.bridgeOptions, options.bridgeOptions || {});
-                bridgeOptions = Object.merge(bridgeOptions, {
-                    hostName: otherParams.useHostname ? hostName : "localhost",
-                    port: _allocatePortForBridgeForMongos(),
-                    // The mongos processes identify themselves to mongobridge as host:port, where
-                    // the host is the actual hostname of the machine and not localhost.
-                    dest: hostName + ":" + options.port,
-                });
-
-                var bridge = new MongoBridge(bridgeOptions);
+            let allShardNodes = this._rs
+                                    .map(r => r.test.nodes.map((_, index) => ({
+                                                                   rs: r.test,
+                                                                   index: index,
+                                                                   isConfig: false,
+                                                               })))
+                                    .flat();
+            if (!isConfigShardMode) {
+                allShardNodes = allShardNodes.concat(this.configRS.nodes.map((_, index) => ({
+                                                                                 rs: this.configRS,
+                                                                                 index: index,
+                                                                                 isConfig: true,
+                                                                             })));
             }
 
-            var conn = MongoRunner.runMongos(options);
-            if (!conn) {
-                throw new Error("Failed to start mongos " + i);
+            assert(allShardNodes.length >= numMongos,
+                   'Need at least numMongos total mongod nodes in the cluster');
+
+            if (!randomSeedAlreadySet) {
+                Random.setRandomFixtureSeed();
             }
 
-            if (otherParams.causallyConsistent) {
-                conn.setCausalConsistency(true);
-            }
+            // TODO (SERVER-87462): Randomize the list of routers to choose after adding shards from
+            // the router port.
 
-            if (otherParams.useBridge) {
-                bridge.connectToBridge();
-                this._mongos.push(bridge);
-                this._unbridgedMongos.push(conn);
-            } else {
+            // Make sure to push one configsvr router port as the first one so it will be the one
+            // responsible to run the addShard commands, extend all sh methods and stop the
+            // balancer.
+            const shuffledNodes = Array.shuffle(allShardNodes);
+            const index =
+                shuffledNodes.findIndex(node => (node.rs === this.configRS && node.index == 0));
+            assert(index != -1, "Can't find first node of the config server");
+            const configNode = shuffledNodes.splice(index, 1)[0];
+            shuffledNodes.unshift(configNode);
+
+            let routerNodes = shuffledNodes.slice(0, numMongos);
+            let i = 0;
+
+            print("Chose the following nodes to act as embedded routers: " + routerNodes);
+            for (const nodeInfo of routerNodes) {
+                const node = nodeInfo.rs.nodes[nodeInfo.index];
+                const conn = MongoRunner.awaitConnection({pid: node.pid, port: node.routerPort});
+                conn.isEmbeddedRouter = true;
+                conn.port = node.routerPort;
+                conn.nodeInfo = nodeInfo;
+                conn.fullOptions = node.fullOptions;
+                conn.name = MongoRunner.getMongosName(node.routerPort, otherParams.useHostname);
+                conn.host = conn.name;
+                conn.commandLine = node.commandLine;
                 this._mongos.push(conn);
+                this["s" + i++] = conn;
+                print("Connected to embedded router - this.s" + i + " == mongod with pid " +
+                      node.pid + " listening on routerPort " + node.routerPort);
             }
-
-            if (i === 0) {
-                this.s = this._mongos[i];
-                this.admin = this._mongos[i].getDB('admin');
-                this.config = this._mongos[i].getDB('config');
+            if (i > 0) {
+                this.s = this._mongos[0];
+                this.admin = this._mongos[0].getDB('admin');
+                this.config = this._mongos[0].getDB('config');
             }
+        } else {
+            for (var i = 0; i < numMongos; i++) {
+                const options = mongosOptions[i];
+                options.configdb = this._configDB;
 
-            this["s" + i] = this._mongos[i];
+                if (otherParams.useBridge) {
+                    var bridgeOptions =
+                        Object.merge(otherParams.bridgeOptions, options.bridgeOptions || {});
+                    bridgeOptions = Object.merge(bridgeOptions, {
+                        hostName: otherParams.useHostname ? hostName : "localhost",
+                        port: _allocatePortForBridgeForMongos(),
+                        // The mongos processes identify themselves to mongobridge as host:port,
+                        // where the host is the actual hostname of the machine and not localhost.
+                        dest: hostName + ":" + options.port,
+                    });
+
+                    var bridge = new MongoBridge(bridgeOptions);
+                }
+
+                var conn = MongoRunner.runMongos(options, clusterVersionInfo.isMixedVersion);
+                if (!conn) {
+                    throw new Error("Failed to start mongos " + i);
+                }
+
+                if (otherParams.causallyConsistent) {
+                    conn.setCausalConsistency(true);
+                }
+
+                if (otherParams.useBridge) {
+                    bridge.connectToBridge();
+                    this._mongos.push(bridge);
+                    this._unbridgedMongos.push(conn);
+                } else {
+                    this._mongos.push(conn);
+                }
+
+                if (i === 0) {
+                    this.s = this._mongos[i];
+                    this.admin = this._mongos[i].getDB('admin');
+                    this.config = this._mongos[i].getDB('config');
+                }
+
+                this["s" + i] = this._mongos[i];
+            }
         }
 
         _extendWithShMethods(this);

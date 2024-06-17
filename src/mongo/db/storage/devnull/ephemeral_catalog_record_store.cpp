@@ -66,8 +66,8 @@ public:
     RemoveChange(Data* data, RecordId loc, const EphemeralForTestRecord& rec)
         : _data(data), _loc(loc), _rec(rec) {}
 
-    virtual void commit(OperationContext* opCtx, boost::optional<Timestamp>) {}
-    virtual void rollback(OperationContext* opCtx) {
+    void commit(OperationContext* opCtx, boost::optional<Timestamp>) override {}
+    void rollback(OperationContext* opCtx) override {
         stdx::lock_guard<stdx::recursive_mutex> lock(_data->recordsMutex);
 
         Records::iterator it = _data->records.find(_loc);
@@ -103,8 +103,8 @@ public:
         _data->dataSize -= _dataSize;
     }
 
-    virtual void commit(OperationContext* opCtx, boost::optional<Timestamp>) {}
-    virtual void rollback(OperationContext* opCtx) {
+    void commit(OperationContext* opCtx, boost::optional<Timestamp>) override {}
+    void rollback(OperationContext* opCtx) override {
         using std::swap;
 
         stdx::lock_guard<stdx::recursive_mutex> lock(_data->recordsMutex);
@@ -138,6 +138,11 @@ public:
         return {{_it->first, _it->second.toRecordData()}};
     }
 
+    boost::optional<Record> seek(const RecordId& start, BoundInclusion boundInclusion) override {
+        // not implemented
+        return {};
+    }
+
     boost::optional<Record> seekExact(const RecordId& id) final {
         _lastMoveWasRestore = false;
         _needFirstSeek = false;
@@ -145,11 +150,6 @@ public:
         if (_it == _records.end())
             return {};
         return {{_it->first, _it->second.toRecordData()}};
-    }
-
-    boost::optional<Record> seekNear(const RecordId& id) final {
-        // not implemented
-        return boost::none;
     }
 
     void save() final {
@@ -211,6 +211,11 @@ public:
         return {{_it->first, _it->second.toRecordData()}};
     }
 
+    boost::optional<Record> seek(const RecordId& start, BoundInclusion boundInclusion) override {
+        // not implemented
+        return {};
+    }
+
     boost::optional<Record> seekExact(const RecordId& id) final {
         _lastMoveWasRestore = false;
         _needFirstSeek = false;
@@ -228,11 +233,6 @@ public:
         dassert(_it != _records.rend());
         dassert(_it->first == id);
         return {{_it->first, _it->second.toRecordData()}};
-    }
-
-    boost::optional<Record> seekNear(const RecordId& id) final {
-        // not implemented
-        return boost::none;
     }
 
     void save() final {

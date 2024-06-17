@@ -563,6 +563,14 @@ struct BuiltinFn {
 
 /**
  * The map of recognized builtin functions.
+ *
+ * *************************************************************************************
+ * IMPORTANT:
+ *   Iff the third argument ('aggregate') to BuiltinFn{} is true, the actual arity
+ *   WILL BE INCREMENTED BY THE COMPILER (EFunction::compileDirect()) and it will push
+ *   an extra arg onto the stack (the accumulator value) for such fns. So an arityTest
+ *   fn with body {return n == 1} for the arity test really means an arity-2 function.
+ * *************************************************************************************
  */
 static stdx::unordered_map<std::string, BuiltinFn> kBuiltinFunctions = {
     {"dateDiff",
@@ -639,8 +647,12 @@ static stdx::unordered_map<std::string, BuiltinFn> kBuiltinFunctions = {
     {"collAddToSetCapped",
      BuiltinFn{[](size_t n) { return n == 3; }, vm::Builtin::collAddToSetCapped, true}},
     {"setToArray", BuiltinFn{[](size_t n) { return n == 1; }, vm::Builtin::setToArray, false}},
+    {"fillType", BuiltinFn{[](size_t n) { return n == 3; }, vm::Builtin::fillType, false}},
     {"doubleDoubleSum",
      BuiltinFn{[](size_t n) { return n > 0; }, vm::Builtin::doubleDoubleSum, false}},
+    {"convertSimpleSumToDoubleDoubleSum",
+     BuiltinFn{
+         [](size_t n) { return n == 1; }, vm::Builtin::convertSimpleSumToDoubleDoubleSum, false}},
     {"aggDoubleDoubleSum",
      BuiltinFn{[](size_t n) { return n == 1; }, vm::Builtin::aggDoubleDoubleSum, true}},
     {"aggMergeDoubleDoubleSums",
@@ -761,10 +773,16 @@ static stdx::unordered_map<std::string, BuiltinFn> kBuiltinFunctions = {
     {"tsIncrement", BuiltinFn{[](size_t n) { return n == 1; }, vm::Builtin::tsIncrement, false}},
     {"typeMatch", BuiltinFn{[](size_t n) { return n == 2; }, vm::Builtin::typeMatch, false}},
     {"dateTrunc", BuiltinFn{[](size_t n) { return n == 6; }, vm::Builtin::dateTrunc, false}},
-    {"_internalLeast",
-     BuiltinFn{[](size_t n) { return n == 1 || n == 2; }, vm::Builtin::internalLeast, false}},
-    {"_internalGreatest",
-     BuiltinFn{[](size_t n) { return n == 1 || n == 2; }, vm::Builtin::internalGreatest, false}},
+    {"getSortKeyAsc",
+     BuiltinFn{[](size_t n) { return n == 1 || n == 2; }, vm::Builtin::getSortKeyAsc, false}},
+    {"getSortKeyDesc",
+     BuiltinFn{[](size_t n) { return n == 1 || n == 2; }, vm::Builtin::getSortKeyDesc, false}},
+    {"getNonLeafSortKeyAsc",
+     BuiltinFn{
+         [](size_t n) { return n == 1 || n == 2; }, vm::Builtin::getNonLeafSortKeyAsc, false}},
+    {"getNonLeafSortKeyDesc",
+     BuiltinFn{
+         [](size_t n) { return n == 1 || n == 2; }, vm::Builtin::getNonLeafSortKeyDesc, false}},
     {"objectToArray",
      BuiltinFn{[](size_t n) { return n == 1; }, vm::Builtin::objectToArray, false}},
     {"arrayToObject",
@@ -781,11 +799,14 @@ static stdx::unordered_map<std::string, BuiltinFn> kBuiltinFunctions = {
     {"aggLastNMerge", BuiltinFn{[](size_t n) { return n == 1; }, vm::Builtin::aggLastNMerge, true}},
     {"aggLastNFinalize",
      BuiltinFn{[](size_t n) { return n == 1; }, vm::Builtin::aggLastNFinalize, false}},
-    {"aggTopN", BuiltinFn{[](size_t n) { return n == 3; }, vm::Builtin::aggTopN, true}},
+    {"aggTopN", BuiltinFn{[](size_t n) { return n >= 3; }, vm::Builtin::aggTopN, true}},
+    {"aggTopNArray", BuiltinFn{[](size_t n) { return n >= 2; }, vm::Builtin::aggTopNArray, true}},
     {"aggTopNMerge", BuiltinFn{[](size_t n) { return n == 2; }, vm::Builtin::aggTopNMerge, true}},
     {"aggTopNFinalize",
      BuiltinFn{[](size_t n) { return n == 2; }, vm::Builtin::aggTopNFinalize, false}},
-    {"aggBottomN", BuiltinFn{[](size_t n) { return n == 3; }, vm::Builtin::aggBottomN, true}},
+    {"aggBottomN", BuiltinFn{[](size_t n) { return n >= 3; }, vm::Builtin::aggBottomN, true}},
+    {"aggBottomNArray",
+     BuiltinFn{[](size_t n) { return n >= 2; }, vm::Builtin::aggBottomNArray, true}},
     {"aggBottomNMerge",
      BuiltinFn{[](size_t n) { return n == 2; }, vm::Builtin::aggBottomNMerge, true}},
     {"aggBottomNFinalize",
@@ -800,11 +821,11 @@ static stdx::unordered_map<std::string, BuiltinFn> kBuiltinFunctions = {
      BuiltinFn{[](size_t n) { return n == 1 || n == 2; }, vm::Builtin::aggMinNMerge, true}},
     {"aggMinNFinalize",
      BuiltinFn{[](size_t n) { return n == 1 || n == 2; }, vm::Builtin::aggMinNFinalize, false}},
-    {"aggRank", BuiltinFn{[](size_t n) { return n == 1; }, vm::Builtin::aggRank, true}},
-    {"aggRankColl", BuiltinFn{[](size_t n) { return n == 2; }, vm::Builtin::aggRankColl, true}},
-    {"aggDenseRank", BuiltinFn{[](size_t n) { return n == 1; }, vm::Builtin::aggDenseRank, true}},
+    {"aggRank", BuiltinFn{[](size_t n) { return n == 2; }, vm::Builtin::aggRank, true}},
+    {"aggRankColl", BuiltinFn{[](size_t n) { return n == 3; }, vm::Builtin::aggRankColl, true}},
+    {"aggDenseRank", BuiltinFn{[](size_t n) { return n == 2; }, vm::Builtin::aggDenseRank, true}},
     {"aggDenseRankColl",
-     BuiltinFn{[](size_t n) { return n == 2; }, vm::Builtin::aggDenseRankColl, true}},
+     BuiltinFn{[](size_t n) { return n == 3; }, vm::Builtin::aggDenseRankColl, true}},
     {"aggRankFinalize",
      BuiltinFn{[](size_t n) { return n == 1; }, vm::Builtin::aggRankFinalize, false}},
     {"aggExpMovingAvg",
@@ -914,22 +935,48 @@ static stdx::unordered_map<std::string, BuiltinFn> kBuiltinFunctions = {
      BuiltinFn{[](size_t n) { return n == 1; }, vm::Builtin::aggRemovableBottomNFinalize, false}},
     {"valueBlockExists",
      BuiltinFn{[](size_t n) { return n == 1; }, vm::Builtin::valueBlockExists, false}},
+    {"valueBlockTypeMatch",
+     BuiltinFn{[](size_t n) { return n == 2; }, vm::Builtin::valueBlockTypeMatch, false}},
+    {"valueBlockIsTimezone",
+     BuiltinFn{[](size_t n) { return n == 2; }, vm::Builtin::valueBlockIsTimezone, false}},
     {"valueBlockFillEmpty",
      BuiltinFn{[](size_t n) { return n == 2; }, vm::Builtin::valueBlockFillEmpty, false}},
     {"valueBlockFillEmptyBlock",
      BuiltinFn{[](size_t n) { return n == 2; }, vm::Builtin::valueBlockFillEmptyBlock, false}},
-    {"valueBlockMin",
-     BuiltinFn{[](size_t n) { return n == 2; }, vm::Builtin::valueBlockMin, false}},
-    {"valueBlockMax",
-     BuiltinFn{[](size_t n) { return n == 2; }, vm::Builtin::valueBlockMax, false}},
-    {"valueBlockCount",
-     BuiltinFn{[](size_t n) { return n == 1; }, vm::Builtin::valueBlockCount, false}},
+    {"valueBlockFillType",
+     BuiltinFn{[](size_t n) { return n == 3; }, vm::Builtin::valueBlockFillType, false}},
+    {"valueBlockAggMin",
+     BuiltinFn{[](size_t n) { return n == 2; }, vm::Builtin::valueBlockAggMin, true}},
+    {"valueBlockAggMax",
+     BuiltinFn{[](size_t n) { return n == 2; }, vm::Builtin::valueBlockAggMax, true}},
+    {"valueBlockAggCount",
+     BuiltinFn{[](size_t n) { return n == 1; }, vm::Builtin::valueBlockAggCount, true}},
+    {"valueBlockAggSum",
+     BuiltinFn{[](size_t n) { return n == 2; }, vm::Builtin::valueBlockAggSum, true}},
+    {"valueBlockAggDoubleDoubleSum",
+     BuiltinFn{[](size_t n) { return n == 2; }, vm::Builtin::valueBlockAggDoubleDoubleSum, true}},
+    {"valueBlockAggTopN",
+     BuiltinFn{[](size_t n) { return n >= 4; }, vm::Builtin::valueBlockAggTopN, true}},
+    {"valueBlockAggTopNArray",
+     BuiltinFn{[](size_t n) { return n >= 3; }, vm::Builtin::valueBlockAggTopNArray, true}},
+    {"valueBlockAggBottomN",
+     BuiltinFn{[](size_t n) { return n >= 4; }, vm::Builtin::valueBlockAggBottomN, true}},
+    {"valueBlockAggBottomNArray",
+     BuiltinFn{[](size_t n) { return n >= 3; }, vm::Builtin::valueBlockAggBottomNArray, true}},
     {"valueBlockDateDiff",
      BuiltinFn{[](size_t n) { return n == 6 || n == 7; }, vm::Builtin::valueBlockDateDiff, false}},
     {"valueBlockDateTrunc",
      BuiltinFn{[](size_t n) { return n == 7; }, vm::Builtin::valueBlockDateTrunc, false}},
-    {"valueBlockSum",
-     BuiltinFn{[](size_t n) { return n == 2; }, vm::Builtin::valueBlockSum, false}},
+    {"valueBlockDateAdd",
+     BuiltinFn{[](size_t n) { return n == 6; }, vm::Builtin::valueBlockDateAdd, false}},
+    {"valueBlockAdd",
+     BuiltinFn{[](size_t n) { return n == 3; }, vm::Builtin::valueBlockAdd, false}},
+    {"valueBlockSub",
+     BuiltinFn{[](size_t n) { return n == 3; }, vm::Builtin::valueBlockSub, false}},
+    {"valueBlockMult",
+     BuiltinFn{[](size_t n) { return n == 3; }, vm::Builtin::valueBlockMult, false}},
+    {"valueBlockDiv",
+     BuiltinFn{[](size_t n) { return n == 3; }, vm::Builtin::valueBlockDiv, false}},
     {"valueBlockGtScalar",
      BuiltinFn{[](size_t n) { return n == 2; }, vm::Builtin::valueBlockGtScalar, false}},
     {"valueBlockGteScalar",
@@ -958,6 +1005,24 @@ static stdx::unordered_map<std::string, BuiltinFn> kBuiltinFunctions = {
      BuiltinFn{[](size_t n) { return n == 1; }, vm::Builtin::valueBlockSize, false}},
     {"valueBlockNone",
      BuiltinFn{[](size_t n) { return n == 2; }, vm::Builtin::valueBlockNone, false}},
+    {"valueBlockIsMember",
+     BuiltinFn{[](size_t n) { return n == 2; }, vm::Builtin::valueBlockIsMember, false}},
+    {"valueBlockCoerceToBool",
+     BuiltinFn{[](size_t n) { return n == 1; }, vm::Builtin::valueBlockCoerceToBool, false}},
+    {"valueBlockTrunc",
+     BuiltinFn{[](size_t n) { return n == 1 || n == 2; }, vm::Builtin::valueBlockTrunc, false}},
+    {"valueBlockRound",
+     BuiltinFn{[](size_t n) { return n == 1 || n == 2; }, vm::Builtin::valueBlockRound, false}},
+    {"valueBlockMod",
+     BuiltinFn{[](size_t n) { return n == 2; }, vm::Builtin::valueBlockMod, false}},
+    {"valueBlockConvert",
+     BuiltinFn{[](size_t n) { return n == 2; }, vm::Builtin::valueBlockConvert, false}},
+    {"valueBlockGetSortKeyAsc",
+     BuiltinFn{
+         [](size_t n) { return n == 1 || n == 2; }, vm::Builtin::valueBlockGetSortKeyAsc, false}},
+    {"valueBlockGetSortKeyDesc",
+     BuiltinFn{
+         [](size_t n) { return n == 1 || n == 2; }, vm::Builtin::valueBlockGetSortKeyDesc, false}},
     {"cellFoldValues_F",
      BuiltinFn{[](size_t n) { return n == 2; }, vm::Builtin::cellFoldValues_F, false}},
     {"cellFoldValues_P",
@@ -1189,6 +1254,7 @@ static stdx::unordered_map<std::string, InstrFn> kInstrFunctions = {
     {"traverseCsiCellTypes", InstrFn{2, generateTraverseCellTypes, false}},
     {"setField", InstrFn{3, generatorLegacy<&vm::CodeFragment::appendSetField>, false}},
     {"sum", InstrFn{1, generatorLegacy<&vm::CodeFragment::appendSum>, true}},
+    {"count", InstrFn{0, generatorLegacy<&vm::CodeFragment::appendCount>, true}},
     {"min", InstrFn{1, generatorLegacy<&vm::CodeFragment::appendMin>, true}},
     {"max", InstrFn{1, generatorLegacy<&vm::CodeFragment::appendMax>, true}},
     {"first", InstrFn{1, generatorLegacy<&vm::CodeFragment::appendFirst>, true}},
@@ -1217,6 +1283,7 @@ static stdx::unordered_map<std::string, InstrFn> kInstrFunctions = {
 }  // namespace
 
 vm::CodeFragment EFunction::compileDirect(CompileCtx& ctx) const {
+    // Built-in function compilations.
     if (auto it = kBuiltinFunctions.find(_name); it != kBuiltinFunctions.end()) {
         auto arity = _nodes.size();
         if (!it->second.arityTest(arity)) {
@@ -1287,8 +1354,9 @@ vm::CodeFragment EFunction::compileDirect(CompileCtx& ctx) const {
         code.appendFunction(it->second.builtin, arity);
 
         return code;
-    }
+    }  // if built-in function
 
+    // Instruction compilations from here down.
     if (auto it = kInstrFunctions.find(_name); it != kInstrFunctions.end()) {
         if (it->second.arity != _nodes.size()) {
             uasserted(4822845,
@@ -1318,7 +1386,7 @@ vm::CodeFragment EFunction::compileDirect(CompileCtx& ctx) const {
     }
 
     uasserted(4822847, str::stream() << "unknown function call: " << _name);
-}
+}  // compileDirect
 
 std::vector<DebugPrinter::Block> EFunction::debugPrint() const {
     std::vector<DebugPrinter::Block> ret;

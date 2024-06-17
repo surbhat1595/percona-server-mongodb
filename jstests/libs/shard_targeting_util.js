@@ -70,6 +70,30 @@ export class ShardTargetingTest {
         return profileFilter;
     }
 
+    _examineSplitPipeline({splitPipeline, expectedMergingStages, expectedShardStages}) {
+        if (splitPipeline.mergerPart) {
+            const mergerPart = splitPipeline.mergerPart;
+            if (mergerPart.length > 0) {
+                assert(
+                    expectedMergingStages,
+                    "Should have specified merging stages for test case if split pipeline has 'mergerPart'" +
+                        tojson(splitPipeline));
+                this._assertExpectedStages(expectedMergingStages, mergerPart, splitPipeline);
+            }
+        }
+
+        if (splitPipeline.shardsPart) {
+            const shardsPart = splitPipeline.shardsPart;
+            if (shardsPart.length > 0) {
+                assert(
+                    expectedShardStages,
+                    "Should have specified shard stages for test case if split pipeline has 'shardsPart'" +
+                        tojson(splitPipeline));
+                this._assertExpectedStages(expectedShardStages, shardsPart, splitPipeline);
+            }
+        }
+    }
+
     /**
      * Utility which makes certain assertions about 'explain' (obtained by running 'explain'),
      * namely:
@@ -84,17 +108,18 @@ export class ShardTargetingTest {
         expectedMergingStages,
         expectedShard,
         expectedShardStages,
-        assertSBELookupPushdown
+        assertSBELookupPushdown,
+        expectMongos,
     }) {
         if (expectedMergingShard) {
             assert.eq(explain.mergeType, "specificShard", explain);
             assert.eq(explain.mergeShardId, expectedMergingShard, explain);
             assert(explain.hasOwnProperty("splitPipeline"), explain);
-            const split = explain.splitPipeline;
-            assert(split.hasOwnProperty("mergerPart"), explain);
-            const mergerPart = split.mergerPart;
-            assert(expectedMergingStages, explain);
-            this._assertExpectedStages(expectedMergingStages, mergerPart, explain);
+            this._examineSplitPipeline({
+                splitPipeline: explain.splitPipeline,
+                expectedMergingStages: expectedMergingStages,
+                expectedShardStages: expectedShardStages
+            });
         } else {
             assert.neq(explain.mergeType,
                        "specificShard",
@@ -117,11 +142,22 @@ export class ShardTargetingTest {
                 this._assertExpectedStages(expectedShardStages, stages, explain);
             }
 
+            const stage = getAggPlanStage(shard, "EQ_LOOKUP", true /* useQueryPlannerSection */);
             if (assertSBELookupPushdown) {
-                const stage =
-                    getAggPlanStage(shard, "EQ_LOOKUP", true /* useQueryPlannerSection */);
                 assert.neq(stage, null, shard);
+            } else {
+                assert.eq(stage, null, shard);
             }
+        }
+
+        if (expectMongos) {
+            assert.eq(explain.mergeType, "mongos", explain);
+            assert(explain.hasOwnProperty("splitPipeline"), explain);
+            this._examineSplitPipeline({
+                splitPipeline: explain.splitPipeline,
+                expectedMergingStages: expectedMergingStages,
+                expectedShardStages: expectedShardStages
+            });
         }
     }
 
@@ -138,10 +174,6 @@ export class ShardTargetingTest {
      */
     setupColl({collName, indexList, docs, collType, shardKey, chunkList, owningShard}) {
         const coll = this.db[collName];
-        if (indexList && indexList.length > 0) {
-            assert.commandWorked(coll.createIndexes(indexList));
-        }
-
         if (collType === "sharded") {
             assert(shardKey && chunkList,
                    "Must specify shard key and chunk list when setting up a sharded collection");
@@ -149,13 +181,21 @@ export class ShardTargetingTest {
         } else if (collType == "unsplittable") {
             assert(owningShard,
                    "Must specify an owning shard when setting up an unsplittable collection");
+            // TODO (SERVER-85395) Replace createUnsplittableCollection with create command once
+            // featureFlagTrackUnshardedCollectionsUponCreation is enabled.
             assert.commandWorked(this.db.runCommand(
                 {createUnsplittableCollection: collName, dataShard: owningShard}));
         } else {
             assert(false, "Unknown collection type " + tojson(collType));
         }
 
-        assert.commandWorked(coll.insertMany(docs));
+        if (indexList && indexList.length > 0) {
+            assert.commandWorked(coll.createIndexes(indexList));
+        }
+
+        if (docs && docs.length > 0) {
+            assert.commandWorked(coll.insertMany(docs));
+        }
     }
 
     /**
@@ -180,9 +220,11 @@ export class ShardTargetingTest {
     }) {
         const coll = this.db[targetCollName];
 
+        const options = comment ? {'comment': comment} : {};
+
         // Test explain if 'explainAssertionObj' is specified.
         if (explainAssertionObj) {
-            const explain = coll.explain().aggregate(pipeline);
+            const explain = coll.explain().aggregate(pipeline, options);
             this._assertExplainTargeting(explain, explainAssertionObj);
         }
 
@@ -190,7 +232,6 @@ export class ShardTargetingTest {
         this._resetProfiling();
 
         // Verify that 'pipeline' returns the expected results.
-        const options = comment ? {'comment': comment} : {};
         const res = coll.aggregate(pipeline, options).toArray();
         assert(arrayEq(res, expectedResults),
                "sharded aggregation results did not match: " + tojson(res) +

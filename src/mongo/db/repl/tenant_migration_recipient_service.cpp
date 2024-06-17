@@ -232,7 +232,7 @@ namespace {
 class OplogFetcherRestartDecisionTenantMigration
     : public OplogFetcher::OplogFetcherRestartDecision {
 public:
-    ~OplogFetcherRestartDecisionTenantMigration(){};
+    ~OplogFetcherRestartDecisionTenantMigration() override{};
     bool shouldContinue(OplogFetcher* fetcher, Status status) final {
         return false;
     }
@@ -292,7 +292,7 @@ public:
         MONGO_UNREACHABLE;
     };
 
-    virtual StatusWith<ReplSetConfig> getCurrentConfig() const final {
+    StatusWith<ReplSetConfig> getCurrentConfig() const final {
         MONGO_UNREACHABLE;
     }
 
@@ -1124,7 +1124,7 @@ void TenantMigrationRecipientService::Instance::_processCommittedTransactionEntr
     sessionTxnRecord.setStartOpTime(boost::none);
     sessionTxnRecord.setLastWriteDate(noopEntry.getWallClockTime());
 
-    AutoGetOplog oplogWrite(opCtx, OplogAccessMode::kWrite);
+    AutoGetOplogFastPath oplogWrite(opCtx, OplogAccessMode::kWrite);
     writeConflictRetry(
         opCtx, "writeDonorCommittedTxnEntry", NamespaceString::kRsOplogNamespace, [&] {
             WriteUnitOfWork wuow(opCtx);
@@ -1479,11 +1479,8 @@ Status TenantMigrationRecipientService::Instance::_enqueueDocuments(
 
     auto opCtx = cc().makeOperationContext();
     if (info.toApplyDocumentCount != 0) {
-        // Wait for enough space.
-        donorOplogBuffer->waitForSpace(opCtx.get(), info.toApplyDocumentBytes);
-
         // Buffer docs for later application.
-        donorOplogBuffer->push(opCtx.get(), begin, end);
+        donorOplogBuffer->push(opCtx.get(), begin, end, info.toApplyDocumentBytes);
     }
 
     if (info.resumeToken.isNull()) {
@@ -1514,7 +1511,7 @@ Status TenantMigrationRecipientService::Instance::_enqueueDocuments(
     noopEntry.setWallClockTime({});
 
     OplogBuffer::Batch noopVec = {noopEntry.toBSON()};
-    donorOplogBuffer->push(opCtx.get(), noopVec.cbegin(), noopVec.cend());
+    donorOplogBuffer->push(opCtx.get(), noopVec.cbegin(), noopVec.cend(), boost::none);
     return Status::OK();
 }
 

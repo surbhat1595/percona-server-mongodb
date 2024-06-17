@@ -271,9 +271,9 @@ def get_decorations(obj):
 def get_object_decoration(decorable, start, index):
     decoration_data = get_unique_ptr_bytes(decorable["_decorations"]["_data"])
     entry = start[index]
-    deco_type_info = str(entry["_typeInfo"])
+    deco_type_info = str(entry["typeInfo"])
     deco_type_name = re.sub(r'.* <typeinfo for (.*)>', r'\1', deco_type_info)
-    offset = int(entry["_offset"])
+    offset = int(entry["offset"])
     obj = decoration_data[offset]
     obj_addr = re.sub(r'^(.*) .*', r'\1', str(obj.address))
     obj = _cast_decoration_value(deco_type_name, int(obj.address))
@@ -286,7 +286,7 @@ def get_decorable_info(decorable):
     decl_vector = reg_sym.value()["_entries"]
     start = decl_vector["_M_impl"]["_M_start"]
     finish = decl_vector["_M_impl"]["_M_finish"]
-    decinfo_t = lookup_type('mongo::decorable_detail::RegistryEntry')
+    decinfo_t = lookup_type('mongo::decorable_detail::Registry::Entry')
     count = int((int(finish) - int(start)) / decinfo_t.sizeof)
     return start, count
 

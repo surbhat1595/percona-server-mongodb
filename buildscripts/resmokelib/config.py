@@ -29,6 +29,9 @@ DEFAULT_DBTEST_EXECUTABLE = os.path.join(os.curdir, "dbtest")
 DEFAULT_MONGO_EXECUTABLE = "mongo"
 DEFAULT_MONGOD_EXECUTABLE = "mongod"
 DEFAULT_MONGOS_EXECUTABLE = "mongos"
+# TODO SERVER-85977 potentially replace with "mongot" if possible to add a symlink from raw path
+# below as part of setup-mongot-repro.
+DEFAULT_MONGOT_EXECUTABLE = "mongot-localdev/mongot"
 
 DEFAULT_BENCHMARK_REPETITIONS = 3
 DEFAULT_BENCHMARK_MIN_TIME = datetime.timedelta(seconds=5)
@@ -57,6 +60,7 @@ DEFAULTS = {
     "base_port": 20000,
     "backup_on_restart_dir": None,
     "buildlogger_url": "https://logkeeper2.build.10gen.cc",
+    "embedded_router": None,
     "config_shard": None,
     "continue_on_failure": False,
     "dbpath_prefix": None,
@@ -80,13 +84,14 @@ DEFAULTS = {
     "mongod_set_parameters": [],
     "mongos_executable": None,
     "mongos_set_parameters": [],
+    "mongot-localdev/mongot_executable": None,
+    "mongot_set_parameters": [],
     "mongocryptd_set_parameters": [],
     "mrlog": None,
     "no_journal": False,
     "num_clients_per_fixture": 1,
     "use_tenant_client": False,
     "origin_suite": None,
-    "perf_report_file": None,
     "cedar_report_file": None,
     "repeat_suites": 1,
     "repeat_tests": 1,
@@ -145,6 +150,7 @@ DEFAULTS = {
     "task_doc": None,
     "variant_name": None,
     "version_id": None,
+    "work_dir": None,
     "evg_project_config_path": "etc/evergreen.yml",
 
     # WiredTiger options.
@@ -337,6 +343,9 @@ DRY_RUN = None
 # If set, specifies which node is the config shard. Can also be set to 'any'.
 CONFIG_SHARD = None
 
+# If set, use mongod's embedded router functionality for all sharding tests instead of mongos.
+EMBEDDED_ROUTER = None
+
 # if set, enables enterprise jstest to automatically be included
 ENABLE_ENTERPRISE_TESTS = None
 
@@ -381,6 +390,9 @@ EVERGREEN_VARIANT_NAME = None
 # The identifier consisting of the project name and the commit hash. For patch builds, it is just
 # the commit hash.
 EVERGREEN_VERSION_ID = None
+
+# The Evergreen task's working directory.
+EVERGREEN_WORK_DIR = None
 
 # Path to evergreen project configuration yaml file
 EVERGREEN_PROJECT_CONFIG_PATH = None
@@ -456,6 +468,12 @@ MONGOS_EXECUTABLE = None
 # The --setParameter options passed to mongos.
 MONGOS_SET_PARAMETERS = []
 
+# The path to the mongot executable used by resmoke.py.
+MONGOT_EXECUTABLE = None
+
+# The --setParameter options passed to mongot.
+MONGOT_SET_PARAMETERS = []
+
 # The --setParameter options passed to mongocryptd.
 MONGOCRYPTD_SET_PARAMETERS = []
 
@@ -471,9 +489,6 @@ USE_TENANT_CLIENT = False
 
 # Indicates the name of the test suite prior to the suite being split up by uite generation
 ORIGIN_SUITE = None
-
-# Report file for the Evergreen performance plugin.
-PERF_REPORT_FILE = None
 
 # Report file for Cedar.
 CEDAR_REPORT_FILE = None
@@ -644,12 +659,16 @@ DEFAULT_UNIT_TEST_LIST = "build/unittests.txt"
 DEFAULT_INTEGRATION_TEST_LIST = "build/integration_tests.txt"
 DEFAULT_LIBFUZZER_TEST_LIST = "build/libfuzzer_tests.txt"
 DEFAULT_PRETTY_PRINTER_TEST_LIST = "build/pretty_printer_tests.txt"
-
+SPLIT_UNITTESTS_LISTS = [
+    f"build/{test_group}_quarter_unittests.txt"
+    for test_group in ['first', 'second', 'third', 'fourth']
+]
 # External files or executables, used as suite selectors, that are created during the build and
 # therefore might not be available when creating a test membership map.
 EXTERNAL_SUITE_SELECTORS = (DEFAULT_BENCHMARK_TEST_LIST, DEFAULT_UNIT_TEST_LIST,
                             DEFAULT_INTEGRATION_TEST_LIST, DEFAULT_DBTEST_EXECUTABLE,
-                            DEFAULT_LIBFUZZER_TEST_LIST, DEFAULT_PRETTY_PRINTER_TEST_LIST)
+                            DEFAULT_LIBFUZZER_TEST_LIST, DEFAULT_PRETTY_PRINTER_TEST_LIST,
+                            *SPLIT_UNITTESTS_LISTS)
 
 # Where to look for logging and suite configuration files
 CONFIG_DIR = None

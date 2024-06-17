@@ -53,18 +53,19 @@
 namespace mongo {
 namespace {
 
+const HostAndPort kConfigHost{"configHost1"};
+ConnectionString kConfigCS{ConnectionString::forReplicaSet("configReplSet", {kConfigHost})};
+
 class MockShard : public Shard {
     MockShard(const MockShard&) = delete;
     MockShard& operator=(const MockShard&) = delete;
 
 public:
     explicit MockShard(const ShardId& id) : Shard(id) {}
-    ~MockShard() = default;
+    ~MockShard() override = default;
 
-    ConnectionString getConnString() const override {
-        const HostAndPort configHost{"configHost1"};
-        ConnectionString configCS{ConnectionString::forReplicaSet("configReplSet", {configHost})};
-        return configCS;
+    const ConnectionString& getConnString() const override {
+        return kConfigCS;
     }
 
     std::shared_ptr<RemoteCommandTargeter> getTargeter() const override {
@@ -88,13 +89,24 @@ public:
                                  const BSONObj& cmdObj) override {
         lastReadPref = readPref;
     }
-    Status runAggregation(
-        OperationContext* opCtx,
-        const AggregateCommandRequest& aggRequest,
-        std::function<bool(const std::vector<BSONObj>& batch,
-                           const boost::optional<BSONObj>& postBatchResumeToken)> callback) {
+    Status runAggregation(OperationContext* opCtx,
+                          const AggregateCommandRequest& aggRequest,
+                          std::function<bool(const std::vector<BSONObj>& batch,
+                                             const boost::optional<BSONObj>& postBatchResumeToken)>
+                              callback) override {
         return Status::OK();
     }
+
+    BatchedCommandResponse runBatchWriteCommand(OperationContext* opCtx,
+                                                Milliseconds maxTimeMS,
+                                                const BatchedCommandRequest& batchRequest,
+                                                const WriteConcernOptions& writeConcern,
+                                                RetryPolicy retryPolicy) override {
+        BatchedCommandResponse response;
+        response.setStatus(Status::OK());
+        return response;
+    }
+
 
     ReadPreferenceSetting lastReadPref;
 
@@ -138,7 +150,8 @@ protected:
     std::unique_ptr<ConfigShardWrapper> _configShardWrapper;
 
     void setUp() override {
-        serverGlobalParams.clusterRole = {ClusterRole::ShardServer, ClusterRole::ConfigServer};
+        serverGlobalParams.clusterRole = {
+            ClusterRole::ShardServer, ClusterRole::ConfigServer, ClusterRole::RouterServer};
 
         ShardingTestFixture::setUp();
 

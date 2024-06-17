@@ -212,10 +212,10 @@ TEST_F(ParseNsOrUUID, ParseValidColl) {
 TEST_F(ParseNsOrUUID, ParseValidCollLocalOpLogDollarMain) {
     auto cmd = BSON("query"
                     << "oplog.$main");
-    auto parsedNss =
-        CommandHelpers::parseNsOrUUID(DatabaseName::createDatabaseName_forTest(
-                                          boost::none, NamespaceString::kLocalOplogDollarMain.db()),
-                                      cmd);
+    auto parsedNss = CommandHelpers::parseNsOrUUID(
+        DatabaseName::createDatabaseName_forTest(
+            boost::none, NamespaceString::kLocalOplogDollarMain.db(omitTenant)),
+        cmd);
     ASSERT_EQ(parsedNss.nss(), NamespaceString::kLocalOplogDollarMain);
 }
 
@@ -250,10 +250,10 @@ public:
             auto* opCtx = opCtxHolder.get();
             _managerState->setAuthzVersion(opCtx, AuthorizationManager::schemaVersion26Final);
         }
-        auto uniqueAuthzManager = std::make_unique<AuthorizationManagerImpl>(
-            getServiceContext(), std::move(localManagerState));
+        auto uniqueAuthzManager =
+            std::make_unique<AuthorizationManagerImpl>(getService(), std::move(localManagerState));
         _authzManager = uniqueAuthzManager.get();
-        AuthorizationManager::set(getServiceContext(), std::move(uniqueAuthzManager));
+        AuthorizationManager::set(getService(), std::move(uniqueAuthzManager));
         _authzManager->setAuthEnabled(true);
 
         _session = _transportLayer.createSession();
@@ -633,19 +633,6 @@ public:
     }
 };
 
-using ShardCommandRegistryTest = CommandRegistryTest<ServerRoleIndex::shard>;
-
-TEST_F(ShardCommandRegistryTest, ServicesInit) {
-    auto sc = getGlobalServiceContext();
-    ASSERT(sc->getService(ClusterRole::ShardServer));
-    ASSERT(!sc->getService(ClusterRole::RouterServer));
-}
-
-TEST_F(ShardCommandRegistryTest, ExecutePlanForService) {
-    auto result = testExecutePlanForService(ClusterRole::ShardServer);
-    ASSERT_EQ(result.commandTypes, result.fullSet);
-}
-
 using RouterCommandRegistryTest = CommandRegistryTest<ServerRoleIndex::router>;
 
 TEST_F(RouterCommandRegistryTest, ServicesInit) {
@@ -659,7 +646,7 @@ TEST_F(RouterCommandRegistryTest, ExecutePlanForService) {
     ASSERT_EQ(result.commandTypes, result.fullSet);
 }
 
-using ShardRouterCommandRegistryTest = CommandRegistryTest<ServerRoleIndex::shardRouter>;
+using ShardRouterCommandRegistryTest = CommandRegistryTest<ServerRoleIndex::shard>;
 
 TEST_F(ShardRouterCommandRegistryTest, ServicesInit) {
     auto sc = getGlobalServiceContext();

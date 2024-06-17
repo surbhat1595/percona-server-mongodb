@@ -42,35 +42,32 @@ const clearCollection = function() {
     assert.contains(bucketsColl.getName(), testDB.getCollectionNames());
 
     expectedStats.bucketCount = 0;
-    if (!initialized) {
-        if (!alwaysUseCompressedBuckets) {
-            expectedStats.numCompressedBuckets = 0;
-            expectedStats.numSubObjCompressionRestart = 0;
-        }
-        expectedStats.numBucketInserts = 0;
-        expectedStats.numBucketUpdates = 0;
-        expectedStats.numBucketsOpenedDueToMetadata = 0;
-        expectedStats.numBucketsClosedDueToCount = 0;
-        expectedStats.numBucketsClosedDueToSize = 0;
-        expectedStats.numBucketsClosedDueToTimeForward = 0;
-        expectedStats.numBucketsClosedDueToTimeBackward = 0;
-        expectedStats.numBucketsClosedDueToMemoryThreshold = 0;
-        expectedStats.numBucketsArchivedDueToMemoryThreshold = 0;
-        expectedStats.numBucketsArchivedDueToTimeBackward = 0;
-        expectedStats.numBucketsReopened = 0;
-        expectedStats.numBucketsKeptOpenDueToLargeMeasurements = 0;
-        expectedStats.numBucketsClosedDueToCachePressure = 0;
-        expectedStats.numBucketsFetched = 0;
-        expectedStats.numBucketsQueried = 0;
-        expectedStats.numBucketFetchesFailed = 0;
-        expectedStats.numBucketQueriesFailed = 0;
-        expectedStats.numBucketReopeningsFailed = 0;
-        expectedStats.numDuplicateBucketsReopened = 0;
-        expectedStats.numCommits = 0;
-        expectedStats.numWaits = 0;
-        expectedStats.numMeasurementsCommitted = 0;
-        initialized = true;
+    if (!alwaysUseCompressedBuckets) {
+        expectedStats.numCompressedBuckets = 0;
+        expectedStats.numSubObjCompressionRestart = 0;
     }
+    expectedStats.numBucketInserts = 0;
+    expectedStats.numBucketUpdates = 0;
+    expectedStats.numBucketsOpenedDueToMetadata = 0;
+    expectedStats.numBucketsClosedDueToCount = 0;
+    expectedStats.numBucketsClosedDueToSize = 0;
+    expectedStats.numBucketsClosedDueToTimeForward = 0;
+    expectedStats.numBucketsClosedDueToTimeBackward = 0;
+    expectedStats.numBucketsClosedDueToMemoryThreshold = 0;
+    expectedStats.numBucketsArchivedDueToMemoryThreshold = 0;
+    expectedStats.numBucketsArchivedDueToTimeBackward = 0;
+    expectedStats.numBucketsReopened = 0;
+    expectedStats.numBucketsKeptOpenDueToLargeMeasurements = 0;
+    expectedStats.numBucketsClosedDueToCachePressure = 0;
+    expectedStats.numBucketsFetched = 0;
+    expectedStats.numBucketsQueried = 0;
+    expectedStats.numBucketFetchesFailed = 0;
+    expectedStats.numBucketQueriesFailed = 0;
+    expectedStats.numBucketReopeningsFailed = 0;
+    expectedStats.numDuplicateBucketsReopened = 0;
+    expectedStats.numCommits = 0;
+    expectedStats.numWaits = 0;
+    expectedStats.numMeasurementsCommitted = 0;
 };
 clearCollection();
 
@@ -164,26 +161,15 @@ expectedStats.numMeasurementsCommitted += 5;
 expectedStats.avgNumMeasurementsPerCommit = 2;
 checkCollStats();
 
-// If the timeseriesAlwaysUseCompressedBuckets feature flag is enabled, when searching through
-// candidate buckets useBucket also checks if the time range for the measurement that we are
-// trying to insert matches the candidate bucket - if it does not, we do not return it. Because
-// of this extra check, we do not attempt to insert a measurement into a bucket with an
-// incompatible time range, which prevents that bucket from being rolled over - in this case,
-// from being archived due to time backward.
-// TODO SERVER-79481: Revisit this once we define an upper bound for the number of
-// multiple open buckets per metadata, at which point buckets will rollover once again.
-if (!TimeseriesTest.timeseriesAlwaysUseCompressedBucketsEnabled(testDB)) {
-    assert.commandWorked(
-        coll.insert({[timeFieldName]: ISODate("2021-01-01T01:00:00Z"), [metaFieldName]: {a: 1}},
-                    {ordered: false}));
-    expectedStats.bucketCount++;
-    expectedStats.numBucketInserts++;
-    expectedStats.numCommits++;
-    expectedStats.numBucketsArchivedDueToTimeBackward++;
-    expectedStats.numMeasurementsCommitted++;
-    expectedStats.numBucketQueriesFailed++;
-    checkCollStats();
-}
+assert.commandWorked(coll.insert(
+    {[timeFieldName]: ISODate("2021-01-01T01:00:00Z"), [metaFieldName]: {a: 1}}, {ordered: false}));
+expectedStats.bucketCount++;
+expectedStats.numBucketInserts++;
+expectedStats.numCommits++;
+expectedStats.numBucketsArchivedDueToTimeBackward++;
+expectedStats.numMeasurementsCommitted++;
+expectedStats.numBucketQueriesFailed++;
+checkCollStats();
 
 // Assumes each bucket has a limit of 1000 measurements.
 const bucketMaxCount = 1000;
@@ -251,36 +237,26 @@ expectedStats.avgNumMeasurementsPerCommit =
 expectedStats.numBucketQueriesFailed++;
 checkCollStats();
 
-// If the timeseriesAlwaysUseCompressedBuckets feature flag is enabled, when searching through
-// candidate buckets useBucket also checks if the time range for the measurement that we are
-// trying to insert matches the candidate bucket - if it does not, we do not return it. Because
-// of this extra check, we do not attempt to insert a measurement into a bucket with an
-// incompatible time range, which prevents that bucket from being rolled over - in this case,
-// from being closed due to time forward.
-// TODO SERVER-79481: Revisit this once we define an upper bound for the number of
-// multiple open buckets per metadata, at which point buckets will rollover once again.
-if (!TimeseriesTest.timeseriesAlwaysUseCompressedBucketsEnabled(testDB)) {
-    // Assumes the measurements in each bucket span at most one hour (based on the time field).
-    // This test leaves just one measurement per bucket which will cause compression to be
-    // by-passed. The stats tracking of compressed buckets will thus also be by-passed.
-    const docTimes = [ISODate("2020-11-13T01:00:00Z"), ISODate("2020-11-13T03:00:00Z")];
-    numDocs = 2;
-    docs = [];
-    for (let i = 0; i < numDocs; i++) {
-        docs.push({[timeFieldName]: docTimes[i], [metaFieldName]: {a: 'limit_time_range'}});
-    }
-    assert.commandWorked(coll.insert(docs, {ordered: false}));
-    expectedStats.bucketCount += numDocs;
-    expectedStats.numBucketInserts += numDocs;
-    expectedStats.numBucketsOpenedDueToMetadata++;
-    expectedStats.numBucketsClosedDueToTimeForward++;
-    expectedStats.numCommits += numDocs;
-    expectedStats.numMeasurementsCommitted += numDocs;
-    expectedStats.avgNumMeasurementsPerCommit =
-        Math.floor(expectedStats.numMeasurementsCommitted / expectedStats.numCommits);
-    expectedStats.numBucketQueriesFailed += 1;
-    checkCollStats();
+// Assumes the measurements in each bucket span at most one hour (based on the time field).
+// This test leaves just one measurement per bucket which will cause compression to be
+// by-passed. The stats tracking of compressed buckets will thus also be by-passed.
+const docTimes = [ISODate("2020-11-13T01:00:00Z"), ISODate("2020-11-13T03:00:00Z")];
+numDocs = 2;
+docs = [];
+for (let i = 0; i < numDocs; i++) {
+    docs.push({[timeFieldName]: docTimes[i], [metaFieldName]: {a: 'limit_time_range'}});
 }
+assert.commandWorked(coll.insert(docs, {ordered: false}));
+expectedStats.bucketCount += numDocs;
+expectedStats.numBucketInserts += numDocs;
+expectedStats.numBucketsOpenedDueToMetadata++;
+expectedStats.numBucketsClosedDueToTimeForward++;
+expectedStats.numCommits += numDocs;
+expectedStats.numMeasurementsCommitted += numDocs;
+expectedStats.avgNumMeasurementsPerCommit =
+    Math.floor(expectedStats.numMeasurementsCommitted / expectedStats.numCommits);
+expectedStats.numBucketQueriesFailed += 1;
+checkCollStats();
 
 numDocs = 70;
 largeValue = 'a'.repeat(1024 * 1024);

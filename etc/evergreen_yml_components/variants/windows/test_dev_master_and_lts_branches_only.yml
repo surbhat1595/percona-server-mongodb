@@ -1,12 +1,13 @@
-# Windows build variants for testing development environments that should run
-# only on master and LTS release (7.0, 6.0 etc.) branch projects
+# Windows build variants for testing development environments
+#
+# After the branching variants in this file
+# should continue to run ONLY on a new LTS release (v7.0, v6.0 etc.) branch projects
+# and should NOT run on a new rapid release (v7.1, v7.2 etc.) branch projects
 
 buildvariants:
 - name: enterprise-windows-inmem
   display_name: Enterprise Windows (inMemory)
   cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
-  modules:
-  - enterprise
   run_on:
   - windows-vsCurrent-small
   expansions:
@@ -23,8 +24,9 @@ buildvariants:
       LIBPATH="c:/sasl/lib"
       -j$(bc <<< "$(grep -c '^processor' /proc/cpuinfo) / 1.5")
       --win-version-min=win10
+      --use-diagnostic-latches=on
     num_scons_link_jobs_available: 0.25
-    python: '/cygdrive/c/python/python39/python.exe'
+    python: '/cygdrive/c/python/python310/python.exe'
     test_flags: >-
       --storageEngine=inMemory
       --excludeWithAnyTags=requires_persistence,requires_journaling,incompatible_with_windows_tls
@@ -42,17 +44,17 @@ buildvariants:
   - name: audit
   - name: auth_audit_gen
   - name: causally_consistent_jscore_txns_passthrough
-  - name: .concurrency .common
+  - name: .concurrency .common !.feature_flag_guarded
     distros:
     - windows-vsCurrent-large
   - name: concurrency_replication_causal_consistency_gen
   - name: initial_sync_fuzzer_gen
   - name: .jscore .common !.decimal !.sharding
-  - name: .jstestfuzz .common !.flow_control  # Flow control jstestfuzz take longer.
+  - name: .jstestfuzz .common !.feature_flag_guarded !.flow_control  # Flow control jstestfuzz take longer.
   - name: .read_write_concern .linearize !.durable_history
   - name: replica_sets_auth_gen
   - name: replica_sets_jscore_passthrough_gen
-  - name: replica_sets_multi_stmt_txn_jscore_passthrough
+  - name: replica_sets_multi_stmt_txn_jscore_passthrough_gen
   - name: sasl
   - name: .sharding .txns
   - name: sharding_auth_audit_gen

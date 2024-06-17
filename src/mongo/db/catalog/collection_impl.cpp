@@ -185,35 +185,42 @@ bool indexTypeSupportsPathLevelMultikeyTracking(StringData accessMethod) {
     return accessMethod == IndexNames::BTREE || accessMethod == IndexNames::GEO_2DSPHERE;
 }
 
-bool doesMinMaxHaveMixedSchemaData(const BSONObj& min, const BSONObj& max) {
+StatusWith<bool> doesMinMaxHaveMixedSchemaData(const BSONObj& min, const BSONObj& max) {
     auto minIt = min.begin();
     auto minEnd = min.end();
     auto maxIt = max.begin();
     auto maxEnd = max.end();
 
     while (minIt != minEnd && maxIt != maxEnd) {
-        bool typeMatch = minIt->canonicalType() == maxIt->canonicalType();
-        if (!typeMatch) {
+        // The 'control.min' and 'control.max' fields have the same ordering.
+        if (minIt->fieldNameStringData() != maxIt->fieldNameStringData()) {
+            return Status{
+                ErrorCodes::BadValue,
+                "Encountered inconsistent field name ordering in time-series bucket min/max"};
+        }
+
+        if (minIt->canonicalType() != maxIt->canonicalType()) {
             return true;
         } else if (minIt->type() == Object) {
-            // The 'control.min' and 'control.max' fields have the same ordering.
-            invariant(minIt->fieldNameStringData() == maxIt->fieldNameStringData());
-            if (doesMinMaxHaveMixedSchemaData(minIt->Obj(), maxIt->Obj())) {
-                return true;
+            auto result = doesMinMaxHaveMixedSchemaData(minIt->Obj(), maxIt->Obj());
+            if (!result.isOK() || result.getValue()) {
+                return result;
             }
         } else if (minIt->type() == Array) {
-            if (doesMinMaxHaveMixedSchemaData(minIt->Obj(), maxIt->Obj())) {
-                return true;
+            auto result = doesMinMaxHaveMixedSchemaData(minIt->Obj(), maxIt->Obj());
+            if (!result.isOK() || result.getValue()) {
+                return result;
             }
         }
 
-        invariant(typeMatch);
         minIt++;
         maxIt++;
     }
 
-    // The 'control.min' and 'control.max' fields have the same cardinality.
-    invariant(minIt == minEnd && maxIt == maxEnd);
+    if (minIt != minEnd || maxIt != maxEnd) {
+        return Status{ErrorCodes::BadValue,
+                      "Encountered extra field(s) in time-series bucket min/max"};
+    }
 
     return false;
 }
@@ -256,13 +263,22 @@ StatusWith<std::shared_ptr<Ident>> findSharedIdentForIndex(OperationContext* opC
             str::stream() << "Index ident " << ident << " is being dropped or is already dropped."};
 }
 
-bool collUsesCappedSnapshots(const NamespaceString& nss, const CollectionOptions& options) {
-    // Only use the behavior for non-replicated capped collections (which can accept concurrent
-    // writes). This behavior relies on RecordIds being allocated in increasing order. For clustered
+namespace internal {
+bool collUsesCappedSnapshots(const CollectionOptions& options) {
+    // This behavior relies on RecordIds being allocated in increasing order. For clustered
     // collections, users define their RecordIds and are not constrained to creating them in
     // increasing order.
-    // The oplog tracks its visibility through support from the storage engine.
-    return options.capped && !nss.isReplicated() && !options.clusteredIndex && !nss.isOplog();
+    return options.capped && !options.clusteredIndex;
+}
+}  // namespace internal
+
+bool collUsesCappedSnapshots(const NamespaceString& nss, const CollectionOptions& options) {
+    return Collection::everUsesCappedSnapshots(nss) && internal::collUsesCappedSnapshots(options);
+}
+
+bool collUsesCappedSnapshots(const CollectionImpl& coll) {
+    return Collection::everUsesCappedSnapshots(coll.ns()) &&
+        internal::collUsesCappedSnapshots(coll.getCollectionOptions());
 }
 }  // namespace
 
@@ -826,7 +842,7 @@ void CollectionImpl::setTimeseriesBucketsMayHaveMixedSchemaData(OperationContext
     });
 }
 
-bool CollectionImpl::doesTimeseriesBucketsDocContainMixedSchemaData(
+StatusWith<bool> CollectionImpl::doesTimeseriesBucketsDocContainMixedSchemaData(
     const BSONObj& bucketsDoc) const {
     if (!getTimeseriesOptions()) {
         return false;
@@ -917,6 +933,22 @@ Status CollectionImpl::updateCappedSize(OperationContext* opCtx,
     return Status::OK();
 }
 
+void CollectionImpl::unsetRecordIdsReplicated(OperationContext* opCtx) {
+    uassert(8650600,
+            "This collection does not replicate record IDs",
+            _metadata->options.recordIdsReplicated);
+
+    LOGV2_DEBUG(8650601,
+                1,
+                "Unsetting 'recordIdsReplicated' catalog entry flag",
+                logAttrs(ns()),
+                logAttrs(uuid()));
+
+    _writeMetadata(opCtx, [&](BSONCollectionCatalogEntry::MetaData& md) {
+        md.options.recordIdsReplicated = false;
+    });
+}
+
 bool CollectionImpl::isChangeStreamPreAndPostImagesEnabled() const {
     return _metadata->options.changeStreamPreAndPostImagesOptions.getEnabled();
 }
@@ -932,6 +964,10 @@ void CollectionImpl::setChangeStreamPreAndPostImages(OperationContext* opCtx,
     });
 }
 
+bool CollectionImpl::areRecordIdsReplicated() const {
+    return _metadata->options.recordIdsReplicated;
+}
+
 bool CollectionImpl::isCapped() const {
     return _shared->_isCapped;
 }
@@ -945,7 +981,7 @@ long long CollectionImpl::getCappedMaxSize() const {
 }
 
 bool CollectionImpl::usesCappedSnapshots() const {
-    return collUsesCappedSnapshots(ns(), getCollectionOptions());
+    return collUsesCappedSnapshots(*this);
 }
 
 CappedVisibilityObserver* CollectionImpl::getCappedVisibilityObserver() const {

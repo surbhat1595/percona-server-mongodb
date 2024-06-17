@@ -35,6 +35,7 @@
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/timestamp.h"
+#include "mongo/db/admission/execution_admission_context.h"
 #include "mongo/db/exec/collection_scan_common.h"
 #include "mongo/db/exec/plan_stage.h"
 #include "mongo/db/exec/plan_stats.h"
@@ -121,9 +122,9 @@ private:
     void setLatestOplogEntryTimestamp(const Record& record);
 
     /**
-     * Asserts that the minimum timestamp in the query filter has not already fallen off the oplog.
+     * Set up the cursor.
      */
-    void assertTsHasNotFallenOff(const Record& record);
+    void initCursor(OperationContext* opCtx, const CollectionPtr& collPtr, bool forward);
 
     // WorkingSet is not owned by us.
     WorkingSet* _workingSet;
@@ -142,10 +143,12 @@ private:
     // on EOF we advance this timestamp to the latest timestamp in the global oplog.
     Timestamp _latestOplogEntryTimestamp;
 
-    boost::optional<ScopedAdmissionPriorityForLock> _priority;
+    boost::optional<ScopedAdmissionPriority<ExecutionAdmissionContext>> _priority;
 
     // Stats
     CollectionScanStats _specificStats;
+
+    bool _useSeek = false;
 };
 
 }  // namespace mongo

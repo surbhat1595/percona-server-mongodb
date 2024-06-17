@@ -123,9 +123,7 @@ public:
      * and cannot be deleted.
      */
     std::pair<BSONObj, bool> extractComputedProjectionsInProject(
-        const StringData& oldName,
-        const StringData& newName,
-        const std::set<StringData>& reservedNames);
+        StringData oldName, StringData newName, const std::set<StringData>& reservedNames);
 
     /**
      * Returns a pair of <BSONObj, bool>. The BSONObj contains extracted computed projections that
@@ -138,9 +136,7 @@ public:
      * extraction and can be deleted by the caller.
      */
     std::pair<BSONObj, bool> extractComputedProjectionsInAddFields(
-        const StringData& oldName,
-        const StringData& newName,
-        const std::set<StringData>& reservedNames);
+        StringData oldName, StringData newName, const std::set<StringData>& reservedNames);
 
 protected:
     // For inclusions, we can apply an optimization here by simply appending to the output document
@@ -227,7 +223,7 @@ public:
         ProjectionPolicies policies,
         std::unique_ptr<InclusionNode> root,
         boost::optional<projection_ast::ProjectionPathASTNode> proj = boost::none)
-        : ProjectionExecutor(expCtx, policies, proj), _root(std::move(root)) {}
+        : ProjectionExecutor(expCtx, policies, std::move(proj)), _root(std::move(root)) {}
 
     InclusionProjectionExecutor(
         const boost::intrusive_ptr<ExpressionContext>& expCtx,
@@ -239,7 +235,7 @@ public:
               policies,
               allowFastPath ? std::make_unique<FastPathEligibleInclusionNode>(policies)
                             : std::make_unique<InclusionNode>(policies),
-              proj) {}
+              std::move(proj)) {}
 
     TransformerType getType() const final {
         return TransformerType::kInclusionProjection;
@@ -345,9 +341,7 @@ public:
     }
 
     std::pair<BSONObj, bool> extractComputedProjections(
-        const StringData& oldName,
-        const StringData& newName,
-        const std::set<StringData>& reservedNames) final {
+        StringData oldName, StringData newName, const std::set<StringData>& reservedNames) final {
         return _root->extractComputedProjectionsInProject(oldName, newName, reservedNames);
     }
 

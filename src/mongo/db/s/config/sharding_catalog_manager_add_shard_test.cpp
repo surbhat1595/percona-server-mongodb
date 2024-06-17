@@ -289,8 +289,8 @@ protected:
 
         std::vector<DatabaseName> dbnamesOnTarget;
         for (const auto& tenantId : tenantsOnTarget) {
-            dbnamesOnTarget.push_back(
-                DatabaseName::createDatabaseName_forTest(tenantId, DatabaseName::kConfig.db()));
+            dbnamesOnTarget.push_back(DatabaseName::createDatabaseName_forTest(
+                tenantId, DatabaseName::kConfig.db(omitTenant)));
         }
 
         if (gMultitenancySupport) {
@@ -311,17 +311,20 @@ protected:
         const std::vector<boost::optional<TenantId>>& tenantsOnTarget = {boost::none}) {
         DBDirectClient client(operationContext());
         for (const auto& tenantId : tenantsOnTarget) {
-            FindCommandRequest findCmd(NamespaceString::makeClusterParametersNSS(tenantId));
-            auto cursor = client.find(std::move(findCmd));
-            std::vector<BSONObj> results;
-            while (cursor->more()) {
-                results.push_back(cursor->next());
-            }
-            ASSERT_EQ(results.size(), 1);
-            ASSERT_EQ(results[0]["_id"].String(), "testStrClusterParameter");
-            ASSERT_EQ(results[0]["strData"].String(),
-                      DatabaseName::createDatabaseName_forTest(tenantId, DatabaseName::kConfig.db())
-                          .toStringWithTenantId_forTest());
+            auth::ValidatedTenancyScopeGuard::runAsTenant(operationContext(), tenantId, [&]() {
+                FindCommandRequest findCmd(NamespaceString::makeClusterParametersNSS(tenantId));
+                auto cursor = client.find(std::move(findCmd));
+                std::vector<BSONObj> results;
+                while (cursor->more()) {
+                    results.push_back(cursor->next());
+                }
+                ASSERT_EQ(results.size(), 1);
+                ASSERT_EQ(results[0]["_id"].String(), "testStrClusterParameter");
+                ASSERT_EQ(results[0]["strData"].String(),
+                          DatabaseName::createDatabaseName_forTest(
+                              tenantId, DatabaseName::kConfig.db(omitTenant))
+                              .toStringWithTenantId_forTest());
+            });
         }
     }
 
@@ -375,18 +378,22 @@ protected:
         for (const auto& [tenantId, params] : localClusterParameters) {
             for (auto& param : params) {
                 SetClusterParameter setClusterParameterRequest(param);
-                setClusterParameterRequest.setDbName(
-                    DatabaseName::createDatabaseName_forTest(tenantId, DatabaseName::kAdmin.db()));
-                DBDirectClient client(operationContext());
-                ClusterParameterDBClientService dbService(client);
-                std::unique_ptr<ServerParameterService> parameterService =
-                    std::make_unique<ClusterParameterService>();
-                SetClusterParameterInvocation invocation{std::move(parameterService), dbService};
-                invocation.invoke(operationContext(),
-                                  setClusterParameterRequest,
-                                  boost::none,
-                                  boost::none,
-                                  ShardingCatalogClient::kLocalWriteConcern);
+                setClusterParameterRequest.setDbName(DatabaseName::createDatabaseName_forTest(
+                    tenantId, DatabaseName::kAdmin.db(omitTenant)));
+
+                auth::ValidatedTenancyScopeGuard::runAsTenant(operationContext(), tenantId, [&]() {
+                    DBDirectClient client(operationContext());
+                    ClusterParameterDBClientService dbService(client);
+                    std::unique_ptr<ServerParameterService> parameterService =
+                        std::make_unique<ClusterParameterService>();
+                    SetClusterParameterInvocation invocation{std::move(parameterService),
+                                                             dbService};
+                    invocation.invoke(operationContext(),
+                                      setClusterParameterRequest,
+                                      boost::none,
+                                      boost::none,
+                                      ShardingCatalogClient::kLocalWriteConcern);
+                });
             }
         }
     }
@@ -425,6 +432,8 @@ protected:
     void expectFindClusterParameterDocs(const HostAndPort& target,
                                         std::vector<DatabaseName> dbnamesOnTarget) {
         int n = dbnamesOnTarget.size();
+        auto serializationCtx = SerializationContext::stateCommandReply();
+        serializationCtx.setPrefixState(false);
         while (n-- > 0) {
             onCommandForAddShard([&](const RemoteCommandRequest& request) {
                 ASSERT_EQ(request.target, target);
@@ -444,7 +453,8 @@ protected:
                         {BSON("_id"
                               << "testStrClusterParameter"
                               << "strData" << request.dbname.toStringWithTenantId_forTest())});
-                return cursorRes.toBSON(CursorResponse::ResponseType::InitialResponse);
+                return cursorRes.toBSON(CursorResponse::ResponseType::InitialResponse,
+                                        serializationCtx);
             });
         }
     }
@@ -482,7 +492,10 @@ protected:
             createAddShardCmd(operationContext(), expectedShardName),
             ShardingCatalogClient::kMajorityWriteConcern);
 
-        const auto opMsgRequest = OpMsgRequest::fromDBAndBody(DatabaseName::kAdmin, upsertCmdObj);
+        const auto opMsgRequest = OpMsgRequestBuilder::create(
+            auth::ValidatedTenancyScope::kNotRequired /* admin is not per-tenant. */,
+            DatabaseName::kAdmin,
+            upsertCmdObj);
         expectUpdatesReturnSuccess(expectedHost,
                                    NamespaceString(NamespaceString::kServerConfigurationNamespace),
                                    UpdateOp::parse(opMsgRequest));
@@ -497,7 +510,10 @@ protected:
             createAddShardCmd(operationContext(), expectedShardName),
             ShardingCatalogClient::kMajorityWriteConcern);
 
-        const auto opMsgRequest = OpMsgRequest::fromDBAndBody(DatabaseName::kAdmin, upsertCmdObj);
+        const auto opMsgRequest = OpMsgRequestBuilder::create(
+            auth::ValidatedTenancyScope::kNotRequired /* admin is not per-tenant. */,
+            DatabaseName::kAdmin,
+            upsertCmdObj);
         expectUpdatesReturnFailure(expectedHost,
                                    NamespaceString(NamespaceString::kServerConfigurationNamespace),
                                    UpdateOp::parse(opMsgRequest),
@@ -517,8 +533,7 @@ protected:
             // Check that the db name in the request matches the expected db name.
             ASSERT_EQUALS(expectedNss.dbName(), request.dbname);
 
-            const auto addShardOpMsgRequest =
-                OpMsgRequest::fromDBAndBody(request.dbname, request.cmdObj);
+            const auto addShardOpMsgRequest = static_cast<OpMsgRequest>(request);
 
             auto addShardCmd =
                 AddShard::parse(IDLParserContext(AddShard::kCommandName), addShardOpMsgRequest);
@@ -526,9 +541,9 @@ protected:
             const auto& updateOpField = add_shard_util::createShardIdentityUpsertForAddShard(
                 addShardCmd, ShardingCatalogClient::kMajorityWriteConcern);
 
-            const auto updateOpMsgRequest =
-                OpMsgRequest::fromDBAndBody(request.dbname, updateOpField);
-
+            const auto opMsg = static_cast<OpMsgRequest>(request);
+            const auto updateOpMsgRequest = OpMsgRequestBuilder::create(
+                opMsg.validatedTenancyScope, request.dbname, updateOpField);
             const auto updateOp = UpdateOp::parse(updateOpMsgRequest);
 
             ASSERT_EQUALS(expectedNss, expectedUpdateOp.getNamespace());
@@ -571,7 +586,7 @@ protected:
             // Check that the db name in the request matches the expected db name.
             ASSERT_EQUALS(expectedNss.dbName(), request.dbname);
 
-            const auto opMsgRequest = OpMsgRequest::fromDBAndBody(request.dbname, request.cmdObj);
+            const auto opMsgRequest = static_cast<OpMsgRequest>(request);
             const auto updateOp = UpdateOp::parse(opMsgRequest);
             ASSERT_EQUALS(expectedNss, expectedUpdateOp.getNamespace());
 

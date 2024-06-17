@@ -162,7 +162,7 @@ boost::intrusive_ptr<DocumentSourceSort> createNewSortWithMemoryUsage(
  */
 bool checkMetadataSortReorder(
     const SortPattern& sortPattern,
-    const StringData& metaFieldStr,
+    StringData metaFieldStr,
     const boost::optional<std::string&> lastpointTimeField = boost::none) {
     auto timeFound = false;
     for (const auto& sortKey : sortPattern) {
@@ -280,7 +280,7 @@ boost::intrusive_ptr<DocumentSourceGroup> createBucketGroupForReorder(
     auto newGroup = DocumentSourceGroup::create(expCtx, groupByExpr, std::move(accumulators));
 
     // The $first accumulator is compatible with SBE.
-    newGroup->setSbeCompatibility(SbeCompatibility::fullyCompatible);
+    newGroup->setSbeCompatibility(SbeCompatibility::noRequirements);
 
     return newGroup;
 }
@@ -412,7 +412,7 @@ boost::intrusive_ptr<Expression> rewriteMetaFieldPaths(
     //
     // Clone by serializing and reparsing. There does not seem to be a more idiomatic way to do this
     // at the moment.
-    auto serialized = expr->serialize(SerializationOptions{});
+    auto serialized = expr->serialize();
     auto obj = BSON("f" << serialized);
     auto clonedExpr =
         Expression::parseOperand(pExpCtx.get(), obj.firstElement(), pExpCtx->variablesParseState);
@@ -489,7 +489,7 @@ std::unique_ptr<AccumulationExpression> rewriteCountGroupAccm(
                 timeseries::kBucketControlVersionFieldName.toString(),
             pExpCtx->variablesParseState),
         ExpressionConstant::create(pExpCtx,
-                                   Value(timeseries::kTimeseriesControlCompressedVersion)));
+                                   Value(timeseries::kTimeseriesControlCompressedSortedVersion)));
 
     auto thenExpr = ExpressionFieldPath::createPathFromString(
         pExpCtx, controlCountField, pExpCtx->variablesParseState);
@@ -1059,7 +1059,7 @@ void DocumentSourceInternalUnpackBucket::setEventFilter(BSONObj eventFilterBson,
     // compatible and check after parsing if the '_eventFilter' made the unpack stage
     // incompatible.
     auto originalSbeCompatibility = pExpCtx->sbeCompatibility;
-    pExpCtx->sbeCompatibility = SbeCompatibility::fullyCompatible;
+    pExpCtx->sbeCompatibility = SbeCompatibility::noRequirements;
 
     _eventFilter = uassertStatusOK(MatchExpressionParser::parse(
         _eventFilterBson, pExpCtx, ExtensionsCallbackNoop(), Pipeline::kAllowedMatcherFeatures));
@@ -1169,7 +1169,7 @@ DocumentSourceInternalUnpackBucket::rewriteGroupStage(Pipeline::SourceContainer:
     // the exprs created by the rewrite mark it as incompatible, so that we can transfer the flag
     // onto the group.
     const SbeCompatibility origSbeCompat = pExpCtx->sbeCompatibility;
-    pExpCtx->sbeCompatibility = SbeCompatibility::fullyCompatible;
+    pExpCtx->sbeCompatibility = SbeCompatibility::noRequirements;
 
     // We destruct 'this' object when we replace it with the new group, so the guard has to capture
     // the context's intrusive pointer by value.
@@ -1436,7 +1436,7 @@ tryCreateBucketLevelSortGroup(boost::intrusive_ptr<ExpressionContext> expCtx,
         DocumentSourceGroup::create(expCtx, groupStage->getIdExpression(), {newAccState});
 
     // The bucket-level group uses $first/$last accumulators that are supported by SBE.
-    newGroupStage->setSbeCompatibility(SbeCompatibility::fullyCompatible);
+    newGroupStage->setSbeCompatibility(SbeCompatibility::noRequirements);
     return {newSortStage, newGroupStage};
 }
 }  // namespace
@@ -1649,6 +1649,41 @@ void DocumentSourceInternalUnpackBucket::addVariableRefs(std::set<Variables::Id>
     }
 }
 
+namespace {
+// For now, we only support adjacent $sort + $group for the top-k sort optimization.
+std::pair<DocumentSourceSort*, DocumentSourceGroup*> getSortAndGroup(
+    Pipeline::SourceContainer::iterator itr, Pipeline::SourceContainer* container) {
+    if (std::next(itr) == container->end() || std::next(std::next(itr)) == container->end()) {
+        return {nullptr, nullptr};
+    }
+
+    auto prospectiveSortItr = std::next(itr);
+    auto prospectiveSort = dynamic_cast<DocumentSourceSort*>(prospectiveSortItr->get());
+    if (!prospectiveSort) {
+        return {nullptr, nullptr};
+    }
+
+    auto prospectiveGroupItr = std::next(prospectiveSortItr);
+    auto prospectiveGroup = dynamic_cast<DocumentSourceGroup*>(prospectiveGroupItr->get());
+    if (!prospectiveGroup) {
+        return {prospectiveSort, nullptr};
+    }
+
+    return {prospectiveSort, prospectiveGroup};
+}
+}  // namespace
+
+bool DocumentSourceInternalUnpackBucket::tryToAbsorbTopKSortIntoGroup(
+    Pipeline::SourceContainer::iterator itr, Pipeline::SourceContainer* container) {
+    auto [prospectiveSort, prospectiveGroup] = getSortAndGroup(itr, container);
+    if (!prospectiveSort || !prospectiveGroup) {
+        return false;
+    }
+
+    return prospectiveGroup->tryToAbsorbTopKSort(
+        prospectiveSort, /*prospectiveSortItr=*/std::next(itr), container);
+}
+
 Pipeline::SourceContainer::iterator DocumentSourceInternalUnpackBucket::doOptimizeAt(
     Pipeline::SourceContainer::iterator itr, Pipeline::SourceContainer* container) {
     invariant(*itr == this);
@@ -1694,6 +1729,10 @@ Pipeline::SourceContainer::iterator DocumentSourceInternalUnpackBucket::doOptimi
                 }
             }
         }
+    }
+
+    if (tryToAbsorbTopKSortIntoGroup(itr, container)) {
+        return itr;
     }
 
     // Attempt to push geoNear on the metaField past $_internalUnpackBucket.
@@ -1931,7 +1970,7 @@ bool DocumentSourceInternalUnpackBucket::isSbeCompatible() {
                         "If _eventFilter is set, we must have determined if it is compatible with "
                         "SBE or not.",
                         _isEventFilterSbeCompatible);
-                if (_isEventFilterSbeCompatible.get() < SbeCompatibility::fullyCompatible) {
+                if (_isEventFilterSbeCompatible.get() < SbeCompatibility::noRequirements) {
                     return false;
                 }
             }

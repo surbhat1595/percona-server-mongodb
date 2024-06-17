@@ -48,7 +48,6 @@
 #include "mongo/db/query/query_settings/query_settings_gen.h"
 #include "mongo/db/service_context.h"
 #include "mongo/idl/idl_parser.h"
-#include "mongo/util/assert_util.h"
 #include "mongo/util/decorable.h"
 
 namespace mongo::query_settings {
@@ -59,7 +58,7 @@ const auto getQuerySettingsManager =
 
 class QuerySettingsServerStatusSection final : public ServerStatusSection {
 public:
-    QuerySettingsServerStatusSection() : ServerStatusSection("querySettings") {}
+    using ServerStatusSection::ServerStatusSection;
 
     bool includeByDefault() const override {
         // Only include if Query Settings are enabled.
@@ -72,48 +71,37 @@ public:
     BSONObj generateSection(OperationContext* opCtx,
                             const BSONElement& configElement) const override {
         stdx::lock_guard<Latch> lk(_mutex);
-        return BSON("count" << _count << "size" << _size);
+        return BSON("count" << _count << "size" << _size << "rejectCount"
+                            << _numSettingsWithReject);
     }
 
-    void record(int count, int size) {
+    void record(int count, int size, int numSettingsWithReject) {
         stdx::lock_guard<Latch> lk(_mutex);
         _count = count;
         _size = size;
+        _numSettingsWithReject = numSettingsWithReject;
     }
 
 private:
     int _count = 0;
     int _size = 0;
+    int _numSettingsWithReject = 0;
     mutable Mutex _mutex = MONGO_MAKE_LATCH("QuerySettingsServerStatusSection::_mutex");
-} querySettingsServerStatusSection;
+};
 
-NamespaceString extractNamespaceString(const QueryInstance& representativeQuery,
-                                       const boost::optional<TenantId>& tenantId) {
-    static auto const kSerializationContext =
-        SerializationContext{SerializationContext::Source::Command,
-                             SerializationContext::CallerType::Request,
-                             SerializationContext::Prefix::Default,
-                             true /* nonPrefixedTenantId */};
-    bool isCollectionless = representativeQuery.firstElement().type() != BSONType::String;
-    auto coll = isCollectionless ? "$cmd.aggregate" : representativeQuery.firstElement().String();
-    auto db = representativeQuery.getField("$db"_sd).String();
-    return NamespaceStringUtil::deserialize(tenantId, db, coll, kSerializationContext);
-}
+auto& querySettingsServerStatusSection =
+    *ServerStatusSectionBuilder<QuerySettingsServerStatusSection>("querySettings");
 
 auto computeTenantConfiguration(std::vector<QueryShapeConfiguration>&& settingsArray,
                                 const boost::optional<TenantId>& tenantId) {
-    stdx::unordered_map<NamespaceString, QueryShapeConfigurationsMap> nssToQueryConfigurationsMap;
+    QueryShapeConfigurationsMap queryShapeConfigurationMap;
     for (auto&& queryShapeConfiguration : settingsArray) {
-        auto nss =
-            extractNamespaceString(queryShapeConfiguration.getRepresentativeQuery(), tenantId);
-        auto insertResultPair =
-            nssToQueryConfigurationsMap.try_emplace(nss, QueryShapeConfigurationsMap{});
-        auto& queryShapeConfigurationsMap = insertResultPair.first->second;
-        queryShapeConfigurationsMap.insert({queryShapeConfiguration.getQueryShapeHash(),
-                                            {queryShapeConfiguration.getSettings(),
-                                             queryShapeConfiguration.getRepresentativeQuery()}});
+        queryShapeConfigurationMap.insert({queryShapeConfiguration.getQueryShapeHash(),
+                                           {queryShapeConfiguration.getSettings(),
+                                            queryShapeConfiguration.getRepresentativeQuery()}});
     }
-    return nssToQueryConfigurationsMap;
+    return stdx::unordered_map<NamespaceString, QueryShapeConfigurationsMap>(
+        {{NamespaceString(), queryShapeConfigurationMap}});
 }
 }  // namespace
 
@@ -130,7 +118,7 @@ void QuerySettingsManager::create(
     getQuerySettingsManager(service).emplace(service, clusterParameterRefreshFn);
 }
 
-boost::optional<std::pair<QuerySettings, QueryInstance>>
+boost::optional<std::pair<QuerySettings, boost::optional<QueryInstance>>>
 QuerySettingsManager::getQuerySettingsForQueryShapeHash(
     OperationContext* opCtx,
     const query_shape::QueryShapeHash& queryShapeHash,
@@ -196,7 +184,8 @@ std::vector<QueryShapeConfiguration> QuerySettingsManager::getAllQueryShapeConfi
     for (const auto& it :
          versionedQueryShapeConfigurationsIt->second.nssToQueryShapeConfigurationsMap) {
         for (const auto& [queryShapeHash, value] : it.second) {
-            configurations.emplace_back(queryShapeHash, value.first, value.second);
+            auto& newConfiguration = configurations.emplace_back(queryShapeHash, value.first);
+            newConfiguration.setRepresentativeQuery(value.second);
         }
     }
     return configurations;
@@ -256,10 +245,22 @@ Status QuerySettingsClusterParameter::set(const BSONElement& newValueElement,
                                           const boost::optional<TenantId>& tenantId) {
     auto& querySettingsManager = QuerySettingsManager::get(getGlobalServiceContext());
     auto newSettings = QuerySettingsClusterParameterValue::parse(
-        IDLParserContext("querySettingsParameterValue"), newValueElement.Obj());
+        IDLParserContext("querySettingsParameterValue",
+                         false /* apiStrict */,
+                         boost::none /* vts */,
+                         tenantId,
+                         SerializationContext::stateDefault()),
+        newValueElement.Obj());
+    size_t rejectCount = 0;
+    for (const auto& config : newSettings.getSettingsArray()) {
+        if (config.getSettings().getReject()) {
+            ++rejectCount;
+        }
+    }
     querySettingsServerStatusSection.record(
         /* count */ static_cast<int>(newSettings.getSettingsArray().size()),
-        /* size */ static_cast<int>(newValueElement.valuesize()));
+        /* size */ static_cast<int>(newValueElement.valuesize()),
+        /* numSettingsWithReject */ static_cast<int>(rejectCount));
     querySettingsManager.setQueryShapeConfigurations(Client::getCurrent()->getOperationContext(),
                                                      std::move(newSettings.getSettingsArray()),
                                                      newSettings.getClusterParameterTime(),

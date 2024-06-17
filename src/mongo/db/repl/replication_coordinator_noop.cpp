@@ -137,8 +137,7 @@ bool ReplicationCoordinatorNoOp::buildsIndexes() {
     MONGO_UNREACHABLE;
 }
 
-OpTimeAndWallTime ReplicationCoordinatorNoOp::getMyLastAppliedOpTimeAndWallTime(
-    bool rollbackSafe) const {
+OpTimeAndWallTime ReplicationCoordinatorNoOp::getMyLastAppliedOpTimeAndWallTime() const {
     MONGO_UNREACHABLE;
 }
 
@@ -253,6 +252,12 @@ Status ReplicationCoordinatorNoOp::waitUntilOpTimeForRead(OperationContext*,
 
 Status ReplicationCoordinatorNoOp::waitUntilOpTimeForReadUntil(OperationContext*,
                                                                const ReadConcernArgs&,
+                                                               boost::optional<Date_t>) {
+    MONGO_UNREACHABLE;
+}
+
+Status ReplicationCoordinatorNoOp::waitUntilOpTimeWrittenUntil(OperationContext*,
+                                                               LogicalTime,
                                                                boost::optional<Date_t>) {
     MONGO_UNREACHABLE;
 }
@@ -506,7 +511,7 @@ Status ReplicationCoordinatorNoOp::processReplSetRequestVotes(OperationContext*,
     MONGO_UNREACHABLE;
 }
 
-void ReplicationCoordinatorNoOp::prepareReplMetadata(const BSONObj&,
+void ReplicationCoordinatorNoOp::prepareReplMetadata(const CommonRequestArgs&,
                                                      const OpTime&,
                                                      BSONObjBuilder*) const {
     MONGO_UNREACHABLE;
@@ -644,7 +649,8 @@ OpTime ReplicationCoordinatorNoOp::getMyLastWrittenOpTime() const {
     MONGO_UNREACHABLE;
 }
 
-OpTimeAndWallTime ReplicationCoordinatorNoOp::getMyLastWrittenOpTimeAndWallTime() const {
+OpTimeAndWallTime ReplicationCoordinatorNoOp::getMyLastWrittenOpTimeAndWallTime(
+    bool rollbackSafe) const {
     MONGO_UNREACHABLE;
 }
 

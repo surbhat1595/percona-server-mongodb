@@ -1,5 +1,8 @@
-# Windows build variants for testing development environments that should run on master,
-# rapid release (7.1, 7.2 etc.) and LTS release (7.0, 6.0 etc.) branch projects
+# Windows build variants for testing development environments
+#
+# After the branching variants in this file
+# should continue to run on a new rapid release (v7.1, v7.2 etc.)
+# and LTS release (v7.0, v6.0 etc.) branch projects
 
 variables:
 # THIS HAS COPIES IN:
@@ -15,8 +18,8 @@ variables:
     # This is added because of EVG-18211.
     # Without this we are adding extra dependencies on evergreen and it is causing strain
     omit_generated_tasks: true
-  - name: generate_buildid_to_debug_symbols_mapping
-    variant: windows-compile-required
+  # - name: generate_buildid_to_debug_symbols_mapping
+  #   variant: windows-compile-required
 
 # THIS HAS COPIES IN:
 # - etc/evergreen_yml_components/variants/windows/test_dev_master_branch_only.yml
@@ -27,7 +30,7 @@ variables:
   burn_in_tests_build_variant: enterprise-windows-all-feature-flags-required
   exe: ".exe"
   content_type: application/zip
-  python: '/cygdrive/c/python/python39/python.exe'
+  python: '/cygdrive/c/python/python310/python.exe'
   ext: zip
   multiversion_platform: windows
   multiversion_edition: enterprise
@@ -45,11 +48,10 @@ variables:
 
 buildvariants:
 - name: &windows-compile-required windows-compile-required
-  display_name: "! Windows Compile"
+  display_name: "! Windows Enterprise Compile"
+  tags: ["bazel_check"]
   run_on:
   - windows-vsCurrent-xxlarge
-  modules:
-  - enterprise
   activate: true  # These compile variants run on every commit to reduce latency of the auto-reverter.
   expansions:
     exe: ".exe"
@@ -68,7 +70,7 @@ buildvariants:
       --win-version-min=win10
       --use-diagnostic-latches=on
     num_scons_link_jobs_available: 0.3
-    python: '/cygdrive/c/python/python39/python.exe'
+    python: '/cygdrive/c/python/python310/python.exe'
     scons_cache_scope: shared
     compile_variant: *windows-compile-required
   tasks:
@@ -77,18 +79,14 @@ buildvariants:
   - name: compile_test_parallel_unittest_stream_TG
   - name: compile_test_parallel_dbtest_stream_TG
   - name: compile_build_tools_next_TG
-  - name: server_discovery_and_monitoring_json_test_TG
-  - name: server_selection_json_test_TG
-  - name: .crypt
-  - name: generate_buildid_to_debug_symbols_mapping
+  - name: .release_critical .requires_compile_variant !.incompatible_development_variant !.incompatible_windows !.stitch
+  - name: .default .requires_compile_variant !.incompatible_development_variant
 
 - &enterprise-windows-template
   <<: *windows_compile_variant_dependency
   name: &enterprise-windows-suggested enterprise-windows-suggested
   display_name: "* Enterprise Windows"
   cron: "0 */4 * * *" # From the ${project_required_suggested_cron} parameter
-  modules:
-  - enterprise
   run_on:
   - windows-vsCurrent-small
   expansions:
@@ -109,8 +107,7 @@ buildvariants:
   - name: jsCore_auth
   - name: jsCore_ese
   - name: jsCore_txns_large_txns_format
-  - name: .jstestfuzz .common
-  - name: noPassthrough_gen
+  - name: .jstestfuzz .common !.feature_flag_guarded
   - name: noPassthroughWithMongod_gen
   - name: .replica_sets .common
   - name: .replica_sets .multi_oplog !.gcm

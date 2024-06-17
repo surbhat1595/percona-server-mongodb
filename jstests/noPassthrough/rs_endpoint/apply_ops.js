@@ -2,13 +2,14 @@
  * Tests that applyOps commands work correctly when the replica set endpoint is used.
  *
  * @tags: [
- *   requires_fcv_73,
- *   featureFlagEmbeddedRouter,
+ *   requires_fcv_80,
+ *   featureFlagRouterPort,
  *   featureFlagSecurityToken,
- *   requires_persistence
+ *   requires_persistence,
  * ]
  */
 
+import {runCommandWithSecurityToken} from "jstests/libs/multitenancy_utils.js";
 import {extractUUIDFromObject} from "jstests/libs/uuid_util.js";
 import {
     getReplicaSetURL,
@@ -65,12 +66,22 @@ function runTests(shard0Primary, tearDownFunc, isMultitenant) {
     jsTest.log("Running tests for " + shard0Primary.host +
                " while the cluster contains two shards (one config shard and one regular shard)");
 
-    const shard0URL = getReplicaSetURL(shard0Primary);
-    // TODO (SERVER-83380): Connect to the router port on a shardsvr mongod instead.
-    const mongos = MongoRunner.runMongos({configdb: shard0URL});
+    const {router, mongos} = (() => {
+        if (shard0Primary.routerHost) {
+            const router = new Mongo(shard0Primary.routerHost);
+            return {
+                router
+            }
+        }
+        const shard0URL = getReplicaSetURL(shard0Primary);
+        const mongos = MongoRunner.runMongos({configdb: shard0URL});
+        return {router: mongos, mongos};
+    })();
+    jsTest.log("Using " + tojsononeline({router, mongos}));
+
     // applyOps command is not supported on a router.
     assert.commandFailedWithCode(
-        mongos.adminCommand(
+        router.adminCommand(
             {applyOps: [{op: "c", ns: dbName + ".$cmd", o: {drop: collName}}], writeConcern}),
         ErrorCodes.CommandNotFound);
 
@@ -95,7 +106,7 @@ function runTests(shard0Primary, tearDownFunc, isMultitenant) {
     // so the config server doesn't know about the presence of the test collection on shard1 so
     // the shard can be removed shard1 without draining those documents.
     assert.soon(() => {
-        const res = assert.commandWorked(mongos.adminCommand({removeShard: shard1Name}));
+        const res = assert.commandWorked(router.adminCommand({removeShard: shard1Name}));
         return res.state == "completed";
     });
 
@@ -116,12 +127,12 @@ function runTests(shard0Primary, tearDownFunc, isMultitenant) {
     // that already exists in the cluster (the removeShard command would fail with an
     // OperationFailed error as verified below).
     assert.commandFailedWithCode(
-        mongos.adminCommand({addShard: shard1Rst.getURL(), name: shard1Name}),
+        router.adminCommand({addShard: shard1Rst.getURL(), name: shard1Name}),
         ErrorCodes.OperationFailed);
     assert.commandWorked(shard1Primary.adminCommand(
         {applyOps: [{op: "c", ns: dbName + ".$cmd", o: {drop: collName}}], writeConcern}));
-    assert.commandWorked(mongos.adminCommand({addShard: shard1Rst.getURL(), name: shard1Name}));
-    assert.commandWorked(mongos.adminCommand({transitionToDedicatedConfigServer: 1}));
+    assert.commandWorked(router.adminCommand({addShard: shard1Rst.getURL(), name: shard1Name}));
+    assert.commandWorked(router.adminCommand({transitionToDedicatedConfigServer: 1}));
 
     jsTest.log("Running tests for " + shard0Primary.host +
                " while the cluster contains one shard (regular shard)");
@@ -137,7 +148,9 @@ function runTests(shard0Primary, tearDownFunc, isMultitenant) {
 
     tearDownFunc();
     shard1Rst.stopSet();
-    MongoRunner.stopMongos(mongos);
+    if (mongos) {
+        MongoRunner.stopMongos(mongos);
+    }
 }
 
 {
@@ -185,8 +198,9 @@ function runTests(shard0Primary, tearDownFunc, isMultitenant) {
     });
     const tearDownFunc = () => {
         // Do not check metadata consistency since unsharded collections are created on non-primary
-        // shards for testing purposes.
+        // shards through apply-ops for testing purposes.
         TestData.skipCheckMetadataConsistency = true;
+        TestData.skipCheckOrphans = true;
         st.stop();
         TestData.skipCheckMetadataConsistency = false;
     };
@@ -196,7 +210,7 @@ function runTests(shard0Primary, tearDownFunc, isMultitenant) {
 
 {
     jsTest.log("Running tests for a serverless replica set bootstrapped as a single-shard cluster");
-    // For serverless, command against user collections require the "$tenant" field and auth.
+    // For serverless, command against user collections require the unsigned token and auth.
     const keyFile = "jstests/libs/key1";
     const tenantId = ObjectId();
     const vtsKey = "secret";
@@ -228,13 +242,17 @@ function runTests(shard0Primary, tearDownFunc, isMultitenant) {
     assert.commandWorked(adminDB.runCommand(makeCreateUserCmdObj(adminUser)));
 
     adminDB.auth(adminUser.userName, adminUser.password);
-    const testUser =
-        {userName: "testUser", password: "testUserPwd", roles: ["readWriteAnyDatabase"], tenantId};
-    testUser.securityToken =
-        _createSecurityToken({user: testUser.userName, db: authDbName, tenant: tenantId}, vtsKey);
-    assert.commandWorked(adminDB.runCommand(makeCreateUserCmdObj(testUser)));
+    const testUser = {
+        userName: "testUser",
+        password: "testUserPwd",
+        roles: ["readWriteAnyDatabase"]
+    };
+    const unsignedToken = _createTenantToken({tenant: tenantId});
+    assert.commandWorked(
+        runCommandWithSecurityToken(unsignedToken, adminDB, makeCreateUserCmdObj(testUser)));
     adminDB.logout();
 
-    primary._setSecurityToken(testUser.securityToken);
+    primary._setSecurityToken(
+        _createSecurityToken({user: testUser.userName, db: authDbName, tenant: tenantId}, vtsKey));
     runTests(primary /* shard0Primary */, tearDownFunc, true /* isMultitenant */);
 }

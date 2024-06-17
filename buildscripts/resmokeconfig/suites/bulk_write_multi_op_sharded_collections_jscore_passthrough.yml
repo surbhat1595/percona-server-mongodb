@@ -30,7 +30,6 @@ selector:
   - jstests/core/**/top.js  # top.
   # The following tests fail because mongos behaves differently from mongod when testing certain
   # functionality. The differences are in a comment next to the failing test.
-  - jstests/core/**/explain_missing_database.js  # Behavior with no db different on mongos, SERVER-18047.
   - jstests/core/**/geo_2d_explain.js  # executionSuccess in different spot in explain().
   - jstests/core/**/geo_s2explain.js  # inputStage in different spot in explain().
   - jstests/core/**/geo_s2sparse.js  # keysPerIndex in different spot in validate().
@@ -181,6 +180,9 @@ selector:
 
   # Requires specific commands to be run to trigger failpoint (i.e. requires insert, we run bulkWrite).
   - jstests/core/failcommand_failpoint.js
+
+  # Sets cluster parameters, which do writes with timestamps that will vary b/w clusters.
+  - jstests/core/cluster_parameter_commands.js
 
   exclude_with_any_tags:
   - assumes_standalone_mongod

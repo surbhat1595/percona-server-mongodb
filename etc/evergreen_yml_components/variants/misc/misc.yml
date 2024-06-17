@@ -1,5 +1,8 @@
-# Miscellaneous build variants that should run on master, rapid release (7.1, 7.2 etc.)
-# and LTS release (7.0, 6.0 etc.) branch projects
+# Miscellaneous build variants
+#
+# After the branching variants in this file
+# should continue to run on a new rapid release (v7.1, v7.2 etc.)
+# and LTS release (v7.0, v6.0 etc.) branch projects
 
 buildvariants:
 - name: run-all-affected-jstests
@@ -13,6 +16,7 @@ buildvariants:
     burn_in_tag_include_all_required_and_suggested: true
     burn_in_tag_exclude_build_variants: >-
       macos-debug-suggested
+      enterprise-rhel-80-64-bit-dynamic-embedded-router
     burn_in_tag_include_build_variants: >-
       enterprise-rhel-80-64-bit-inmem
       enterprise-rhel-80-64-bit-multiversion
@@ -35,8 +39,6 @@ buildvariants:
   - name: burn_in_tags_gen
 
 - name: &copybara-sync-between-repos copybara-sync-between-repos
-  modules:
-  - enterprise
   display_name: "* Copybara Sync Between Repos"
   activate: true
   run_on:
@@ -49,8 +51,6 @@ buildvariants:
 - name: enterprise-windows-ninja
   display_name: "Ninja Build: Enterprise Windows"
   cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
-  modules:
-  - enterprise
   expansions:
     compile_flags: >-
       --ssl
@@ -71,8 +71,6 @@ buildvariants:
 - name: macos-enterprise-ninja
   display_name: "Ninja Build: macOS Enterprise"
   cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
-  modules:
-  - enterprise
   run_on:
   - macos-1100
   expansions:
@@ -86,8 +84,6 @@ buildvariants:
 - name: macos-ninja-build-profiles
   display_name: "Ninja Build Profiles: macOS"
   cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
-  modules:
-  - enterprise
   run_on:
   - macos-1100
   expansions:
@@ -102,8 +98,6 @@ buildvariants:
 - name: macos-arm-ninja-build-profiles
   display_name: "Ninja Build Profiles: macOS ARM"
   cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
-  modules:
-  - enterprise
   run_on:
   - macos-1100-arm64
   expansions:
@@ -118,8 +112,6 @@ buildvariants:
 - name: windows-ninja-build-profiles
   display_name: "Ninja Build Profiles: Windows"
   cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
-  modules:
-  - enterprise
   expansions:
     compile_flags: >-
       --ssl
@@ -145,8 +137,6 @@ buildvariants:
 - name: ubuntu1804-ninja-build-profiles
   display_name: "Ninja Build Profiles: Ubuntu 18.04"
   cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
-  modules:
-  - enterprise
   run_on:
   - ubuntu1804-small
   stepback: false
@@ -175,8 +165,6 @@ buildvariants:
 - name: enterprise-rhel-80-64-bit-dynamic-ninja
   display_name: "Ninja Build: Enterprise RHEL 8.0"
   cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
-  modules:
-  - enterprise
   run_on:
   - rhel80-small
   expansions:

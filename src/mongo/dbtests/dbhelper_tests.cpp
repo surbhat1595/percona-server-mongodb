@@ -174,7 +174,7 @@ public:
         }
 
         BSONObj result;
-        Helpers::findById(opCtx1.get(), nss, idQuery, result, nullptr, nullptr);
+        Helpers::findById(opCtx1.get(), nss, idQuery, result);
         ASSERT_BSONOBJ_EQ(result, doc);
 
         // Assert that the same doc still exists after findByIdAndNoopUpdate
@@ -243,11 +243,11 @@ private:
 
         // Assert that the doc still exists in the collection.
         BSONObj res1;
-        Helpers::findById(opCtx1, nss, idQuery, res1, nullptr, nullptr);
+        Helpers::findById(opCtx1, nss, idQuery, res1);
         ASSERT_BSONOBJ_EQ(res1, doc);
 
         BSONObj res2;
-        Helpers::findById(opCtx2, nss, idQuery, res2, nullptr, nullptr);
+        Helpers::findById(opCtx2, nss, idQuery, res2);
         ASSERT_BSONOBJ_EQ(res2, doc);
 
         // Assert that findByIdAndNoopUpdate did not generate an oplog entry.
@@ -296,11 +296,11 @@ private:
 
         // Assert that the first storage transaction succeeded and that the doc is removed.
         BSONObj res1;
-        Helpers::findById(opCtx1, nss, idQuery, res1, nullptr, nullptr);
+        Helpers::findById(opCtx1, nss, idQuery, res1);
         ASSERT_BSONOBJ_EQ(res1, BSONObj());
 
         BSONObj res2;
-        Helpers::findById(opCtx2, nss, idQuery, res2, nullptr, nullptr);
+        Helpers::findById(opCtx2, nss, idQuery, res2);
         ASSERT_BSONOBJ_EQ(res2, BSONObj());
     }
 
@@ -310,7 +310,7 @@ private:
 class All : public unittest::OldStyleSuiteSpecification {
 public:
     All() : OldStyleSuiteSpecification("dbhelpers") {}
-    void setupTests() {
+    void setupTests() override {
         add<RemoveRange>();
         add<FindAndNoopUpdateTest>();
     }

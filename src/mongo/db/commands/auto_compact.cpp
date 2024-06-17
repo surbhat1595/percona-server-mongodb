@@ -40,6 +40,7 @@
 #include "mongo/db/commands/compact_gen.h"
 #include "mongo/db/concurrency/d_concurrency.h"
 #include "mongo/db/repl/replication_coordinator.h"
+#include "mongo/db/server_feature_flags_gen.h"
 #include "mongo/logv2/log.h"
 #include "mongo/logv2/log_attr.h"
 #include "mongo/logv2/log_component.h"
@@ -98,6 +99,8 @@ public:
                "{ autoCompact : <bool>, [force:<bool>], [freeSpaceTargetMB:<int64_t>], "
                "[runOnce:<bool>] }\n"
                "  force - allows to run on a replica set primary\n"
+               "  freeSpaceTargetMB - minimum amount of space recoverable for compaction to "
+               "proceed\n"
                "  runOnce - executes compaction on the database only once\n";
     }
 };
@@ -111,7 +114,15 @@ Status autoCompact(OperationContext* opCtx,
 
     auto* storageEngine = opCtx->getServiceContext()->getStorageEngine();
 
-    Lock::GlobalLock lk(opCtx, MODE_IX);
+    // Holding the global lock to prevent racing with storage shutdown. However, no need to hold the
+    // RSTL nor acquire a flow control ticket. This doesn't care about the replica state of the node
+    // and the operation is not replicated.
+    Lock::GlobalLock lk{
+        opCtx,
+        MODE_IS,
+        Date_t::max(),
+        Lock::InterruptBehavior::kThrow,
+        Lock::GlobalLockSkipOptions{.skipFlowControlTicket = true, .skipRSTLLock = true}};
     std::shared_ptr<const CollectionCatalog> catalog = CollectionCatalog::get(opCtx);
     std::vector<StringData> excludedIdents;
 
@@ -136,18 +147,12 @@ Status autoCompact(OperationContext* opCtx,
             excludedIdents.push_back(collection->getSharedIdent()->getIdent());
     }
 
-    StorageEngine::AutoCompactOptions options{
-        enable, runOnce, freeSpaceTargetMB, std::move(excludedIdents)};
+    AutoCompactOptions options{enable, runOnce, freeSpaceTargetMB, std::move(excludedIdents)};
 
     Status status = storageEngine->autoCompact(opCtx, options);
     if (!status.isOK())
         return status;
-
-    if (enable)
-        LOGV2(8012100, "AutoCompact enabled");
-    else
-        LOGV2(8012101, "AutoCompact disabled");
-
+    LOGV2(8012100, "AutoCompact", "enabled"_attr = enable);
     return status;
 }
 

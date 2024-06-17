@@ -184,17 +184,17 @@ public:
     template <typename Container>
     InMemIterator(const Container& input) : _data(input.begin(), input.end()) {}
 
-    InMemIterator(std::deque<Data> data) : _data(std::move(data)) {}
+    InMemIterator(std::vector<Data> data) : _data(std::move(data)) {}
 
-    void openSource() {}
-    void closeSource() {}
+    void openSource() override {}
+    void closeSource() override {}
 
-    bool more() {
-        return !_data.empty();
+    bool more() override {
+        return _index < _data.size();
     }
-    Data next() {
-        Data out = std::move(_data.front());
-        _data.pop_front();
+    Data next() override {
+        Data out = std::move(_data[_index]);
+        _index++;
         return out;
     }
 
@@ -211,13 +211,14 @@ public:
     }
 
 private:
-    std::deque<Data> _data;
+    std::vector<Data> _data;
+    uint32_t _index{0};
 };
 
 /**
  * This class is used to return the in-memory state from the sorter in read-only mode.
  * This is used by streams checkpoint use case mainly to save in-memory state on persistent
- * storage."
+ * storage.
  */
 template <typename Key, typename Value, typename Container>
 class InMemReadOnlyIterator : public SortIteratorInterface<Key, Value> {
@@ -290,9 +291,9 @@ public:
           _afterReadChecksumCalculator(checksumVersion),
           _originalChecksum(checksum) {}
 
-    void openSource() {}
+    void openSource() override {}
 
-    void closeSource() {
+    void closeSource() override {
         // If the file iterator reads through all data objects, we can ensure non-corrupt data
         // by comparing the newly calculated checksum with the original checksum from the data
         // written to disk. Some iterators do not read back all data from the file, which prohibits
@@ -307,14 +308,14 @@ public:
         }
     }
 
-    bool more() {
+    bool more() override {
         invariant(!_startOfNewData);
         if (!_done)
             _fillBufferIfNeeded();  // may change _done
         return !_done;
     }
 
-    Data next() {
+    Data next() override {
         Key deserializedKey = nextWithDeferredValue();
         Value deserializedValue = getDeferredValue();
         return Data(std::move(deserializedKey), std::move(deserializedValue));
@@ -354,7 +355,7 @@ public:
         tasserted(ErrorCodes::NotImplemented, "current() not implemented for FileIterator");
     }
 
-    SorterRange getRange() const {
+    SorterRange getRange() const override {
         SorterRange range{
             _fileStartOffset, _fileEndOffset, static_cast<int64_t>(_originalChecksum)};
         if (_afterReadChecksumCalculator.version() != SorterChecksumVersion::v1) {
@@ -526,13 +527,13 @@ public:
         _positioned = true;
     }
 
-    ~MergeIterator() {
+    ~MergeIterator() override {
         _current.reset();
         _heap.clear();
     }
 
-    void openSource() {}
-    void closeSource() {}
+    void openSource() override {}
+    void closeSource() override {}
 
     void addSource(std::shared_ptr<Input> iter) {
         iter->openSource();
@@ -551,7 +552,7 @@ public:
         }
     }
 
-    bool more() {
+    bool more() override {
         if (_remaining > 0 && (_positioned || !_heap.empty() || _current->more()))
             return true;
 
@@ -570,7 +571,7 @@ public:
         return _current->current();
     }
 
-    Data next() {
+    Data next() override {
         invariant(_remaining);
 
         _remaining--;
@@ -866,7 +867,7 @@ public:
         });
     }
 
-    Iterator* done() {
+    Iterator* done() override {
         invariant(!std::exchange(_done, true));
 
         if (this->_iters.empty()) {
@@ -889,7 +890,7 @@ public:
 
         _paused = true;
         if (this->_iters.empty()) {
-            return new InMemReadOnlyIterator<Key, Value, std::deque<Data>>(_data);
+            return new InMemReadOnlyIterator<Key, Value, std::vector<Data>>(_data);
         }
         tassert(8248300, "Spilled sort cannot be paused", this->_iters.empty());
         return nullptr;
@@ -914,7 +915,7 @@ private:
 
     void sort() {
         STLComparator less(this->_comp);
-        std::stable_sort(_data.begin(), _data.end(), less);
+        std::sort(_data.begin(), _data.end(), less);
         this->_stats.incrementNumSorted(_data.size());
         auto& memPool = this->_memPool;
         if (memPool) {
@@ -926,7 +927,7 @@ private:
         }
     }
 
-    void spill() {
+    void spill() override {
         if (_data.empty())
             return;
 
@@ -944,9 +945,13 @@ private:
         sort();
 
         SortedFileWriter<Key, Value> writer(this->_opts, this->_file, this->_settings);
-        for (; !_data.empty(); _data.pop_front()) {
-            writer.addAlreadySorted(_data.front().first, _data.front().second);
+        for (auto& data : _data) {
+            writer.addAlreadySorted(data.first, data.second);
         }
+        _data.clear();
+        // _data may have grown very large. Even though it's clear()ed, we need to
+        // free the excess memory.
+        _data.shrink_to_fit();
         Iterator* iteratorPtr = writer.done();
 
         this->_iters.push_back(std::shared_ptr<Iterator>(iteratorPtr));
@@ -964,7 +969,7 @@ private:
     }
 
     bool _done = false;
-    std::deque<Data> _data;  // Data that has not been spilled.
+    std::vector<Data> _data;  // Data that has not been spilled.
     bool _paused = false;
 };
 
@@ -1011,7 +1016,7 @@ public:
         });
     }
 
-    Iterator* done() {
+    Iterator* done() override {
         if (_haveData) {
             if (this->_opts.moveSortedDataIntoIterator) {
                 return new InMemIterator<Key, Value>(std::move(_best));
@@ -1034,7 +1039,7 @@ public:
     void resume() override {}
 
 private:
-    void spill() {
+    void spill() override {
         invariant(false, "LimitOneSorter does not spill to disk");
     }
 
@@ -1137,7 +1142,7 @@ public:
         });
     }
 
-    Iterator* done() {
+    Iterator* done() override {
         if (this->_iters.empty()) {
             sort();
             if (this->_opts.moveSortedDataIntoIterator) {
@@ -1189,7 +1194,7 @@ private:
         if (_data.size() == this->_opts.limit) {
             std::sort_heap(_data.begin(), _data.end(), less);
         } else {
-            std::stable_sort(_data.begin(), _data.end(), less);
+            std::sort(_data.begin(), _data.end(), less);
         }
 
         this->_stats.incrementBytesSorted(this->_stats.memUsage());
@@ -1273,7 +1278,7 @@ private:
         }
     }
 
-    void spill() {
+    void spill() override {
         invariant(!_done);
 
         if (_data.empty())
@@ -1298,8 +1303,10 @@ private:
             writer.addAlreadySorted(_data[i].first, _data[i].second);
         }
 
-        // clear _data and release backing array's memory
-        std::vector<Data>().swap(_data);
+        _data.clear();
+        // _data may have grown very large. Even though it's clear()ed, we need to
+        // free the excess memory.
+        _data.shrink_to_fit();
 
         Iterator* iteratorPtr = writer.done();
         this->_iters.push_back(std::shared_ptr<Iterator>(iteratorPtr));

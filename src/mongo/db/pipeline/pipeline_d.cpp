@@ -116,12 +116,13 @@
 #include "mongo/db/query/plan_executor_factory.h"
 #include "mongo/db/query/plan_executor_impl.h"
 #include "mongo/db/query/plan_yield_policy.h"
+#include "mongo/db/query/plan_yield_policy_impl.h"
 #include "mongo/db/query/plan_yield_policy_remote_cursor.h"
 #include "mongo/db/query/projection.h"
 #include "mongo/db/query/projection_parser.h"
 #include "mongo/db/query/projection_policies.h"
-#include "mongo/db/query/query_decorations.h"
 #include "mongo/db/query/query_feature_flags_gen.h"
+#include "mongo/db/query/query_knob_configuration.h"
 #include "mongo/db/query/query_knobs_gen.h"
 #include "mongo/db/query/query_planner_params.h"
 #include "mongo/db/query/query_request_helper.h"
@@ -565,14 +566,16 @@ StatusWith<unique_ptr<PlanExecutor, PlanExecutor::Deleter>> PipelineD::createRan
         trialStage = static_cast<TrialStage*>(root.get());
     }
 
-    auto execStatus = plan_executor_factory::make(expCtx,
-                                                  std::move(ws),
-                                                  std::move(root),
-                                                  &coll,
-                                                  PlanYieldPolicy::YieldPolicy::YIELD_AUTO,
-                                                  QueryPlannerParams::RETURN_OWNED_DATA);
-    if (!execStatus.isOK()) {
-        return execStatus.getStatus();
+    constexpr auto yieldPolicy = PlanYieldPolicy::YieldPolicy::YIELD_AUTO;
+    if (trialStage) {
+        auto classicTrialPolicy = makeClassicYieldPolicy(expCtx->opCtx,
+                                                         coll->ns(),
+                                                         static_cast<PlanStage*>(trialStage),
+                                                         yieldPolicy,
+                                                         VariantCollectionPtrOrAcquisition{&coll});
+        if (auto status = trialStage->pickBestPlan(classicTrialPolicy.get()); !status.isOK()) {
+            return status;
+        }
     }
 
     // For sharded collections, the root of the plan tree is a TrialStage that may have chosen
@@ -604,7 +607,13 @@ StatusWith<unique_ptr<PlanExecutor, PlanExecutor::Deleter>> PipelineD::createRan
         }
     }
 
-    return std::move(execStatus.getValue());
+    return plan_executor_factory::make(expCtx,
+                                       std::move(ws),
+                                       std::move(root),
+                                       &coll,
+                                       yieldPolicy,
+                                       QueryPlannerParams::RETURN_OWNED_DATA,
+                                       coll->ns());
 }
 
 PipelineD::BuildQueryExecutorResult PipelineD::buildInnerQueryExecutorSample(
@@ -965,7 +974,7 @@ StatusWith<std::unique_ptr<CanonicalQuery>> createCanonicalQuery(
     // Reset the 'sbeCompatible' flag before canonicalizing the 'findCommand' to potentially
     // allow SBE to execute the portion of the query that's pushed down, even if the portion of
     // the query that is not pushed down contains expressions not supported by SBE.
-    expCtx->sbeCompatibility = SbeCompatibility::fullyCompatible;
+    expCtx->sbeCompatibility = SbeCompatibility::noRequirements;
 
     StatusWith<std::unique_ptr<CanonicalQuery>> cq = CanonicalQuery::make(
         {.expCtx = expCtx,
@@ -1006,7 +1015,8 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> prepareExecutor
     const MatchExpressionParser::AllowedFeatureSet& matcherFeatures,
     bool* shouldProduceEmptyDocs,
     bool timeseriesBoundedSortOptimization,
-    QueryPlannerParams plannerOpts = QueryPlannerParams{}) {
+    std::size_t plannerOpts = QueryPlannerParams::DEFAULT,
+    boost::optional<TraversalPreference> traversalPreference = boost::none) {
 
     // See if could use DISTINCT_SCAN with the pipeline (SERVER-9507). We must do this check before
     // creating the CQ which might modify the pipeline.
@@ -1034,7 +1044,7 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> prepareExecutor
     std::unique_ptr<CanonicalQuery> cq = std::move(cqWithStatus.getValue());
 
     if (!*shouldProduceEmptyDocs) {
-        plannerOpts.options |= QueryPlannerParams::RETURN_OWNED_DATA;
+        plannerOpts |= QueryPlannerParams::RETURN_OWNED_DATA;
     }
 
     // If this pipeline is a change stream, then the cursor must use the simple collation, so we
@@ -1062,9 +1072,9 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> prepareExecutor
         //    means that for {a: [1, 2]} two distinct values would be returned, but for group keys
         //    arrays shouldn't be traversed.
         StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> swExecutorGrouped =
-            tryGetExecutorDistinct(&collections.getMainCollection(),
-                                   plannerOpts.options | QueryPlannerParams::STRICT_DISTINCT_ONLY,
-                                   &canonicalDistinct,
+            tryGetExecutorDistinct(collections,
+                                   plannerOpts | QueryPlannerParams::STRICT_DISTINCT_ONLY,
+                                   canonicalDistinct,
                                    flipDistinctScanDirection);
 
         if (swExecutorGrouped.isOK()) {
@@ -1100,7 +1110,8 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> prepareExecutor
                                     plannerOpts,
                                     pipeline,
                                     expCtx->needsMerge,
-                                    unavailableMetadata);
+                                    unavailableMetadata,
+                                    std::move(traversalPreference));
 
     // While constructing the executor, some stages might have been lowered from the 'pipeline' into
     // the executor, so we need to recheck whether the executor's layer can still produce an empty
@@ -1377,10 +1388,10 @@ PipelineD::BuildQueryExecutorResult PipelineD::buildInnerQueryExecutorSearch(
 
     if (!expCtx->explain) {
         if (search_helpers::isSearchPipeline(pipeline)) {
-            search_helpers::establishSearchQueryCursors(
-                expCtx, searchStage, std::move(yieldPolicy));
+            search_helpers::establishSearchCursorsSBE(expCtx, searchStage, std::move(yieldPolicy));
         } else if (search_helpers::isSearchMetaPipeline(pipeline)) {
-            search_helpers::establishSearchMetaCursor(expCtx, searchStage, std::move(yieldPolicy));
+            search_helpers::establishSearchMetaCursorSBE(
+                expCtx, searchStage, std::move(yieldPolicy));
         } else {
             tasserted(7856008, "Not search pipeline in buildInnerQueryExecutorSearch");
         }
@@ -1452,9 +1463,10 @@ PipelineD::BuildQueryExecutorResult PipelineD::buildInnerQueryExecutorGeneric(
     // But in classic it may be eligible for a post-planning sort optimization. We check eligibility
     // and perform the rewrite here.
     const bool timeseriesBoundedSortOptimization = unpack && sort && (su.unpackIdx < su.sortIdx);
-    QueryPlannerParams plannerOpts;
+    std::size_t plannerOpts = QueryPlannerParams::DEFAULT;
+    boost::optional<TraversalPreference> traversalPreference = boost::none;
     if (timeseriesBoundedSortOptimization) {
-        plannerOpts.traversalPreference = createTimeSeriesTraversalPreference(unpack, sort);
+        traversalPreference = createTimeSeriesTraversalPreference(unpack, sort);
 
         // Whether to use bounded sort or not is determined _after_ the executor is created, based
         // on whether the chosen collection access stage would support it. Because bounded sort and
@@ -1477,14 +1489,14 @@ PipelineD::BuildQueryExecutorResult PipelineD::buildInnerQueryExecutorGeneric(
         pipeline->peekFront() && pipeline->peekFront()->constraints().isChangeStreamStage();
     if (isChangeStream) {
         invariant(expCtx->tailableMode == TailableModeEnum::kTailableAndAwaitData);
-        plannerOpts.options |= (QueryPlannerParams::TRACK_LATEST_OPLOG_TS |
-                                QueryPlannerParams::ASSERT_MIN_TS_HAS_NOT_FALLEN_OFF_OPLOG);
+        plannerOpts |= (QueryPlannerParams::TRACK_LATEST_OPLOG_TS |
+                        QueryPlannerParams::ASSERT_MIN_TS_HAS_NOT_FALLEN_OFF_OPLOG);
     }
 
     // The $_requestReshardingResumeToken parameter is only valid for an oplog scan.
     if (aggRequest && aggRequest->getRequestReshardingResumeToken()) {
-        plannerOpts.options |= (QueryPlannerParams::TRACK_LATEST_OPLOG_TS |
-                                QueryPlannerParams::ASSERT_MIN_TS_HAS_NOT_FALLEN_OFF_OPLOG);
+        plannerOpts |= (QueryPlannerParams::TRACK_LATEST_OPLOG_TS |
+                        QueryPlannerParams::ASSERT_MIN_TS_HAS_NOT_FALLEN_OFF_OPLOG);
     }
 
     // Create the PlanExecutor.
@@ -1499,7 +1511,8 @@ PipelineD::BuildQueryExecutorResult PipelineD::buildInnerQueryExecutorGeneric(
                                                 Pipeline::kAllowedMatcherFeatures,
                                                 &shouldProduceEmptyDocs,
                                                 timeseriesBoundedSortOptimization,
-                                                std::move(plannerOpts)));
+                                                plannerOpts,
+                                                std::move(traversalPreference)));
 
     // If this is a query on a time-series collection then it may be eligible for a post-planning
     // sort optimization. We check eligibility and perform the rewrite here.
@@ -1809,7 +1822,7 @@ bool PipelineD::isSearchPresentAndEligibleForSbe(const Pipeline* pipeline) {
     auto searchInSbeEnabled = feature_flags::gFeatureFlagSearchInSbe.isEnabled(
         serverGlobalParams.featureCompatibility.acquireFCVSnapshot());
     auto forceClassicEngine =
-        QueryKnobConfiguration::decoration(expCtx->opCtx).getInternalQueryFrameworkControlForOp() ==
+        expCtx->getQueryKnobConfiguration().getInternalQueryFrameworkControlForOp() ==
         QueryFrameworkControlEnum::kForceClassicEngine;
 
     return firstStageIsSearch && searchInSbeEnabled && !forceClassicEngine;

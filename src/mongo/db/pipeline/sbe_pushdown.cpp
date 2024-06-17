@@ -36,11 +36,13 @@
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
+#include "mongo/db/pipeline/document_source_add_fields.h"
 #include "mongo/db/pipeline/document_source_group.h"
 #include "mongo/db/pipeline/document_source_internal_projection.h"
 #include "mongo/db/pipeline/document_source_internal_replace_root.h"
 #include "mongo/db/pipeline/document_source_internal_unpack_bucket.h"
 #include "mongo/db/pipeline/document_source_lookup.h"
+#include "mongo/db/pipeline/document_source_project.h"
 #include "mongo/db/pipeline/document_source_replace_root.h"
 #include "mongo/db/pipeline/document_source_set_window_fields.h"
 #include "mongo/db/pipeline/document_source_single_document_transformation.h"
@@ -51,7 +53,6 @@
 #include "mongo/db/pipeline/search/search_helper.h"
 #include "mongo/db/query/canonical_query.h"
 #include "mongo/db/query/multiple_collection_accessor.h"
-#include "mongo/db/query/query_decorations.h"
 #include "mongo/db/query/query_feature_flags_gen.h"
 #include "mongo/db/query/query_utils.h"
 #include "mongo/util/assert_util.h"
@@ -81,7 +82,7 @@ boost::intrusive_ptr<DocumentSource> sbeCompatibleProjectionFromSingleDocumentTr
 
     const boost::intrusive_ptr<ExpressionContext>& expCtx = transformStage.getContext();
     SbeCompatibility originalSbeCompatibility =
-        std::exchange(expCtx->sbeCompatibility, SbeCompatibility::fullyCompatible);
+        std::exchange(expCtx->sbeCompatibility, SbeCompatibility::noRequirements);
     ON_BLOCK_EXIT([&] { expCtx->sbeCompatibility = originalSbeCompatibility; });
 
     boost::intrusive_ptr<DocumentSource> projectionStage =
@@ -232,7 +233,7 @@ bool pushDownPipelineStageIfCompatible(
     }
 
     return false;
-}
+}  // pushDownPipelineStageIfCompatible
 
 /**
  * Prunes $addFields from 'stagesForPushdown' if it is the last stage, subject to additional
@@ -284,17 +285,98 @@ bool pruneTrailingUnwind(std::vector<boost::intrusive_ptr<DocumentSource>>& stag
 }
 
 /**
+ * Prohibits pushing down $_internalUnpackBucket when it's not followed by a specific, allowed
+ * sequence of stages. We permit the following sequences of stages following the
+ * internalUnpackBucketStage:
+ * - $group
+ * - $match -> $group
+ * - $match -> $project
+ * - $addFields -> $match -> $group
+ */
+void removeUnpackBucketFollowedByUnsupportedStages(
+    std::vector<boost::intrusive_ptr<DocumentSource>>& stagesForPushdown) {
+    auto itr =
+        std::find_if(stagesForPushdown.begin(), stagesForPushdown.end(), [](const auto& stage) {
+            return dynamic_cast<DocumentSourceInternalUnpackBucket*>(stage.get());
+        });
+    if (itr == stagesForPushdown.end()) {
+        return;
+    }
+
+    auto unpackStage = dynamic_cast<DocumentSourceInternalUnpackBucket*>(itr->get());
+    invariant(unpackStage);
+    size_t unpackStageIdx = itr - stagesForPushdown.begin();
+
+    if (unpackStageIdx + 1 == stagesForPushdown.size()) {
+        // If this is the last stage, it must have a filter.
+        // For this stage to report itself as SBE compatible, there must also be an
+        // inclusion projection.
+        if (unpackStage->eventFilter()) {
+            return;
+        } else {
+            stagesForPushdown.pop_back();
+            return;
+        }
+    }
+
+    // Initial $match(es) will get absorbed into the $_internalUnpackbucket.
+
+    // Helper for trimming off the remaining stages.
+    auto trimFrom = [&stagesForPushdown](size_t idx) {
+        stagesForPushdown.erase(stagesForPushdown.begin() + idx, stagesForPushdown.end());
+    };
+
+    // If the next stage is a $group, we push it down and trim the rest.
+    if (dynamic_cast<DocumentSourceGroupBase*>(stagesForPushdown[unpackStageIdx + 1].get())) {
+        trimFrom(unpackStageIdx + 2);
+        return;
+    }
+
+    // If the next stage is $addFields, followed by $match, followed by $group, then we push
+    // these down and trim the rest.
+    auto internalProjectionStage = dynamic_cast<DocumentSourceInternalProjection*>(
+        stagesForPushdown[unpackStageIdx + 1].get());
+    if (unpackStageIdx + 3 < stagesForPushdown.size() && internalProjectionStage &&
+        internalProjectionStage->spec().getPolicies() == InternalProjectionPolicyEnum::kAddFields &&
+        dynamic_cast<DocumentSourceMatch*>(stagesForPushdown[unpackStageIdx + 2].get()) &&
+        dynamic_cast<DocumentSourceGroupBase*>(stagesForPushdown[unpackStageIdx + 3].get())) {
+        trimFrom(unpackStageIdx + 4);
+        return;
+    }
+
+    // If the next stage is $project and we have an event filter then this is a $match-$project
+    // query which we push down, then trim the rest.
+    if (internalProjectionStage &&
+        internalProjectionStage->projection().type() == projection_ast::ProjectType::kInclusion &&
+        unpackStage->eventFilter()) {
+        trimFrom(unpackStageIdx + 2);
+        return;
+    }
+
+    // Otherwise, we found an $_internalUnpackBucket, but the following stages are not supported,
+    // so we don't push anything into SBE.
+    stagesForPushdown.clear();
+    return;
+}
+
+/**
  * After copying as many pipeline stages as possible into the 'stagesForPushdown' pipeline, this
  * second pass takes off any stages that may not benefit from execution in SBE.
  */
 void prunePushdownStages(std::vector<boost::intrusive_ptr<DocumentSource>>& stagesForPushdown,
                          SbeCompatibility minRequiredCompatibility,
                          bool allStagesPushedDown) {
+    // First, scan the list of stages for pushdown, and remove an unpack bucket (plus anything
+    // following) if it's followed by unsupported stages.
+    if (minRequiredCompatibility > SbeCompatibility::requiresSbeFull) {
+        removeUnpackBucketFollowedByUnsupportedStages(stagesForPushdown);
+    }
+
     bool pruned = false;       // have any stages been pruned?
     bool prunedThisIteration;  // were any stages pruned in the current loop iteration?
     do {
         prunedThisIteration = false;
-        if (SbeCompatibility::flagGuarded >= minRequiredCompatibility) {
+        if (SbeCompatibility::requiresSbeFull >= minRequiredCompatibility) {
             // When 'minRequiredCompatibility' is permissive enough (because featureFlagSbeFull is
             // enabled), do not remove trailing $addFields stages.
         } else {
@@ -332,7 +414,9 @@ constexpr size_t kSbeMaxPipelineStages = 100;
  * {'internalQueryFrameworkControl': 'forceClassicEngine'}, a stage can be extracted from the
  * pipeline if and only if all the stages before it are extracted and it meets the criteria for its
  * stage type. When 'internalQueryFrameworkControl' is set to 'trySbeRestricted', only '$group',
- * '$lookup', '$_internalUnpackBucket', and search can be extracted. Criteria by stage type:
+ * '$lookup', and '$_internalUnpackBucket' can be extracted.
+ *
+ * Additional criteria by stage type:
  *
  * $group via 'DocumentSourceGroup':
  *   - The 'internalQuerySlotBasedExecutionDisableGroupPushdown' knob is false and
@@ -341,8 +425,10 @@ constexpr size_t kSbeMaxPipelineStages = 100;
  *
  * $lookup via 'DocumentSourceLookUp':
  *   - The 'internalQuerySlotBasedExecutionDisableLookupPushdown' query knob is false,
- *   - the $lookup uses only the 'localField'/'foreignField' syntax (no pipelines), and
- *   - the foreign collection is neither sharded nor a view.
+ *   - The $lookup uses only the 'localField'/'foreignField' syntax (no pipelines), and
+ *   - The foreign collection is fully local to this node and is not a view.
+ *   - There is no absorbed $unwind stage ('_unwindSrc') or 'trySbeEngine' is enabled.
+ *   - There is no absorbed $match stage ('_matchSrc').
  *
  * $project via 'DocumentSourceInternalProjection':
  *   - No additional criteria.
@@ -367,15 +453,19 @@ constexpr size_t kSbeMaxPipelineStages = 100;
  * $skip via 'DocumentSourceSkip':
  *   - No additional criteria.
  *
- * 'DocumentSourceUnpackBucket':
+ * $search and $searchMeta via 'DocumentSourceSearch':
+ *   - The 'featureFlagSearchInSbe' flag is enabled.
  *   - The 'featureFlagSbeFull' flag is enabled.
  *
- * 'DocumentSourceSearch':
- *   - The 'featureFlagSearchInSbe' flag is enabled.
+ * 'DocumentSourceUnpackBucket':
+ *   - The 'featureFlagSbeFull' flag is enabled.
  *
  * $_internalUnpackBucket via 'DocumentSourceInternalUnpackBucket':
  *   - The 'featureFlagTimeSeriesInSbe' flag is enabled and
  *   - the 'internalQuerySlotBasedExecutionDisableTimeSeriesPushdown', is _not_ enabled,
+ *
+ * $unwind stages ('DocumentSourceUnwind'):
+ *    - 'featureFlagSbeFull' is enabled.
  */
 bool findSbeCompatibleStagesForPushdown(
     const MultipleCollectionAccessor& collections,
@@ -383,8 +473,10 @@ bool findSbeCompatibleStagesForPushdown(
     bool needsMerge,
     const Pipeline* pipeline,
     std::vector<boost::intrusive_ptr<DocumentSource>>& stagesForPushdown) {
+    const auto& queryKnob = cq->getExpCtx()->getQueryKnobConfiguration();
+
     // No pushdown if we're using the classic engine.
-    if (cq->getForceClassicEngine()) {
+    if (queryKnob.isForceClassicEngineEnabled()) {
         return false;
     }
 
@@ -395,66 +487,62 @@ bool findSbeCompatibleStagesForPushdown(
         isMainCollectionSharded = mainColl.isSharded_DEPRECATED();
     }
 
-    // SERVER-78998: Refactor these checks so that they do not load their values multiple times
-    // during the same query.
     const bool sbeFullEnabled = feature_flags::gFeatureFlagSbeFull.isEnabled(
         serverGlobalParams.featureCompatibility.acquireFCVSnapshot());
+    const SbeCompatibility minRequiredCompatibility = getMinRequiredSbeCompatibility(
+        queryKnob.getInternalQueryFrameworkControlForOp(), sbeFullEnabled);
+    const bool isTimeseriesCollection = cq->nss().isTimeseriesBucketsCollection();
 
-    SbeCompatibility minRequiredCompatibility =
-        sbeFullEnabled ? SbeCompatibility::flagGuarded : SbeCompatibility::fullyCompatible;
-
-    auto& queryKnob = QueryKnobConfiguration::decoration(cq->getExpCtxRaw()->opCtx);
-
-    // We do a pushdown of all eligible stages when one of 3 conditions are met: the query knob is
-    // set to 'trySbeEngine'; featureFlagSbeFull is enabled; the given query is a search query.
-    const bool doFullPushdown =
-        queryKnob.canPushDownFullyCompatibleStages() || sbeFullEnabled || cq->isSearchQuery();
+    auto meetsRequirements = [&minRequiredCompatibility, &cq](SbeCompatibility stageCompatibility) {
+        return stageCompatibility >= minRequiredCompatibility;
+    };
 
     CompatiblePipelineStages allowedStages = {
-        .group = !queryKnob.getSbeDisableGroupPushdownForOp(),
+        .group = meetsRequirements(SbeCompatibility::noRequirements) &&
+            !queryKnob.getSbeDisableGroupPushdownForOp(),
 
-        // If lookup pushdown isn't enabled or the main collection is sharded or any of the
-        // secondary namespaces are sharded or are a view, then no $lookup stage will be eligible
-        // for pushdown.
+        // If lookup pushdown isn't enabled or the main collection isn't fully local or any of the
+        // secondary namespaces aren't fully local or are a view, then no $lookup stage will be
+        // eligible for pushdown.
         //
         // When acquiring locks for multiple collections, it is the case that we can only determine
-        // whether any secondary collection is a view or is sharded, not which ones are a view or
-        // are sharded and which ones aren't. As such, if any secondary collection is a view or is
-        // sharded, no $lookup will be eligible for pushdown.
-        .lookup = !queryKnob.getSbeDisableLookupPushdownForOp() && !isMainCollectionSharded &&
-            !collections.isAnySecondaryNamespaceAViewOrSharded(),
+        // whether any secondary collection is a view or isn't local to this node. As such, if any
+        // secondary collection is a view or isn't local, no $lookup will be eligible for pushdown.
+        .lookup = meetsRequirements(SbeCompatibility::noRequirements) &&
+            !queryKnob.getSbeDisableLookupPushdownForOp() && !isMainCollectionSharded &&
+            !collections.isAnySecondaryNamespaceAViewOrNotFullyLocal(),
 
-        .transform =
-            doFullPushdown && SbeCompatibility::fullyCompatible >= minRequiredCompatibility,
+        // We're allowed to push down transforms if trySbeEngine is on, or we're querying a time
+        // series collection. If we're querying a time series collection, an InternalUnpackBucket
+        // stage must be pushed down for any later stages to also be pushed down.
+        .transform = meetsRequirements(SbeCompatibility::requiresTrySbe) || isTimeseriesCollection,
 
-        .match = doFullPushdown && SbeCompatibility::fullyCompatible >= minRequiredCompatibility,
+        .match = meetsRequirements(SbeCompatibility::requiresTrySbe) || isTimeseriesCollection,
 
-        // TODO (SERVER-80226): SBE execution of 'unwind' stages requires 'featureFlagSbeFull' to be
-        // enabled.
-        .unwind = doFullPushdown && SbeCompatibility::flagGuarded >= minRequiredCompatibility,
+        .unwind = meetsRequirements(SbeCompatibility::requiresSbeFull),
 
         // Note: even if its sort pattern is SBE compatible, we cannot push down a $sort stage when
         // the pipeline is the shard part of a sorted-merge query on a sharded collection. It is
         // possible that the merge operation will need a $sortKey field from the sort, and SBE plans
         // do not yet support metadata fields.
-        .sort = doFullPushdown && SbeCompatibility::fullyCompatible >= minRequiredCompatibility &&
-            !needsMerge,
+        .sort = meetsRequirements(SbeCompatibility::requiresTrySbe) && !needsMerge,
 
-        .limitSkip =
-            doFullPushdown && SbeCompatibility::fullyCompatible >= minRequiredCompatibility,
+        .limitSkip = meetsRequirements(SbeCompatibility::requiresTrySbe),
 
         // TODO (SERVER-77229): SBE execution of $search requires 'featureFlagSearchInSbe' to be
         // enabled.
-        .search = feature_flags::gFeatureFlagSearchInSbe.isEnabled(
-            serverGlobalParams.featureCompatibility.acquireFCVSnapshot()),
+        .search = meetsRequirements(SbeCompatibility::requiresSbeFull) &&
+            feature_flags::gFeatureFlagSearchInSbe.isEnabled(
+                serverGlobalParams.featureCompatibility.acquireFCVSnapshot()),
 
-        .window = doFullPushdown && SbeCompatibility::fullyCompatible >= minRequiredCompatibility,
+        .window = meetsRequirements(SbeCompatibility::requiresTrySbe),
 
         // TODO (SERVER-80243): Remove 'featureFlagTimeSeriesInSbe' check.
-        .unpackBucket = feature_flags::gFeatureFlagTimeSeriesInSbe.isEnabled(
-                            serverGlobalParams.featureCompatibility.acquireFCVSnapshot()) &&
+        .unpackBucket = meetsRequirements(SbeCompatibility::noRequirements) &&
+            feature_flags::gFeatureFlagTimeSeriesInSbe.isEnabled(
+                serverGlobalParams.featureCompatibility.acquireFCVSnapshot()) &&
             !queryKnob.getSbeDisableTimeSeriesForOp() &&
-            cq->getExpCtx()->sbePipelineCompatibility == SbeCompatibility::fullyCompatible,
+            cq->getExpCtx()->sbePipelineCompatibility == SbeCompatibility::noRequirements,
     };
 
     bool allStagesPushedDown = true;
@@ -515,5 +603,15 @@ void attachPipelineStages(const MultipleCollectionAccessor& collections,
         collections, canonicalQuery, needsMerge, pipeline, stagesForPushdown);
     canonicalQuery->setCqPipeline(std::move(stagesForPushdown), allStagesPushedDown);
 };
+
+SbeCompatibility getMinRequiredSbeCompatibility(QueryFrameworkControlEnum currentQueryKnobFramework,
+                                                bool sbeFullEnabled) {
+    if (sbeFullEnabled) {
+        return SbeCompatibility::requiresSbeFull;
+    } else if (currentQueryKnobFramework == QueryFrameworkControlEnum::kTrySbeEngine) {
+        return SbeCompatibility::requiresTrySbe;
+    }
+    return SbeCompatibility::noRequirements;
+}
 
 }  // namespace mongo

@@ -12,8 +12,6 @@
 //   does_not_support_stepdowns,
 //   # Plan cache state is node-local and will not get migrated alongside tenant data.
 //   tenant_migration_incompatible,
-//   # TODO SERVER-67607: Test plan cache with CQF enabled.
-//   cqf_experimental_incompatible,
 // ]
 import {assertArrayEq} from "jstests/aggregation/extras/utils.js";
 import {getPlanCacheKeyFromShape} from "jstests/libs/analyze_plan.js";

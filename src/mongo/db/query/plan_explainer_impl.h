@@ -38,7 +38,7 @@
 #include "mongo/db/index/multikey_paths.h"
 #include "mongo/db/query/explain_options.h"
 #include "mongo/db/query/plan_cache_debug_info.h"
-#include "mongo/db/query/plan_enumerator_explain_info.h"
+#include "mongo/db/query/plan_enumerator/plan_enumerator_explain_info.h"
 #include "mongo/db/query/plan_explainer.h"
 #include "mongo/db/query/plan_summary_stats.h"
 #include "mongo/db/query/query_solution.h"
@@ -64,6 +64,7 @@ public:
     std::string getPlanSummary() const final;
     void getSummaryStats(PlanSummaryStats* statsOut) const final;
     PlanStatsDetails getWinningPlanStats(ExplainOptions::Verbosity verbosity) const final;
+    BSONObj getOptimizerDebugInfo() const final;
     PlanStatsDetails getWinningPlanTrialStats() const final;
     std::vector<PlanStatsDetails> getRejectedPlansStats(
         ExplainOptions::Verbosity verbosity) const final;
@@ -86,6 +87,15 @@ PlanStage* getStageByType(PlanStage* root, StageType type);
  */
 std::vector<PlanExplainer::PlanStatsDetails> getCachedPlanStats(
     const plan_cache_debug_info::DebugInfo& debugInfo, ExplainOptions::Verbosity verbosity);
+
+
+/**
+ * Collects and aggregates execution stats summary (totalKeysExamined and totalDocsExamined) by
+ * traversing the stats tree. Skips the top-level MultiPlanStage when it is at the top of the plan,
+ * and extracts stats from its child according to 'planIdx'.
+ */
+PlanSummaryStats collectExecutionStatsSummary(const PlanStageStats* stats,
+                                              boost::optional<size_t> planIdx);
 
 /**
  * Adds the path-level multikey information to the explain output in a field called "multiKeyPaths".

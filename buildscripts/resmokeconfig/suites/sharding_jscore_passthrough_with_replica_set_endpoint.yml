@@ -9,6 +9,7 @@ test_kind: js_test
 selector:
   roots:
   - jstests/core/**/*.js
+  - jstests/core_sharding/**/*.js
   - jstests/fle2/**/*.js
   - src/mongo/db/modules/*/jstests/fle2/**/*.js
   exclude_files:
@@ -32,7 +33,6 @@ selector:
   - jstests/core/**/top.js  # top.
   # The following tests fail because mongos behaves differently from mongod when testing certain
   # functionality. The differences are in a comment next to the failing test.
-  - jstests/core/**/explain_missing_database.js  # Behavior with no db different on mongos.
   - jstests/core/**/geo_2d_explain.js  # executionSuccess in different spot in explain().
   - jstests/core/**/geo_s2explain.js  # inputStage in different spot in explain().
   - jstests/core/**/geo_s2sparse.js  # keysPerIndex in different spot in validate().
@@ -43,23 +43,18 @@ selector:
   - jstests/core/**/explain_upsert.js
 
   # The tests below are disabled because of embedded router role and replica set endpoint.
-  # TODO (SERVER-79353): Support role-aware serverStatus on mongod with router role.
+  # TODO (SERVER-87512): Support role-aware serverStatus on mongod with router role.
   - jstests/core/write/find_and_modify/find_and_modify_metrics.js
   - jstests/core/write/update/update_metrics.js
-  # TODO (SERVER-81359): Support role-aware currentOp on mongod with router role.
-  - jstests/core/administrative/current_op/currentop_cursors.js
-  - jstests/core/administrative/current_op/currentop_shell.js
-  - jstests/core/query/awaitdata_getmore_cmd.js
-  - jstests/core/query/count/count_plan_summary.js
-  - jstests/core/query/mr/mr_killop.js
-  # TODO (SERVER-84183): Support FLE on mongod with router role.
-  - src/mongo/db/modules/enterprise/jstests/fle2/**/*.js
   # TODO (SERVER-75855): Support running the find command via mongos by specifying a UUID
   # (instead of a collection name).
   - jstests/core/commands_with_uuid.js
   # TODO (SERVER-84091): cloneCollectionAsCapped command stops working after a replica set
   # is bootstrapped as a sharded cluster.
   - jstests/core/collation.js
+  # Test expects changes in metrics (rejected command count), but these are
+  # per-ClusterRole. This suite changes which role's metrics are updated.
+  - jstests/core/query/query_settings/query_settings_reject_application.js
 
   exclude_with_any_tags:
   - assumes_standalone_mongod
@@ -101,9 +96,8 @@ executor:
     mongod_options:
       set_parameters:
         enableTestCommands: 1
-        featureFlagEmbeddedRouter: 1
-        featureFlagReplicaSetEndpoint: 1
-    # TODO (SERVER-84184): Test multi-node shards with embedded router.
-    num_rs_nodes_per_shard: 1
+        featureFlagRouterPort: true
+        featureFlagReplicaSetEndpoint: true
+    num_rs_nodes_per_shard: 2
     embedded_router: 1
     replica_set_endpoint: 1

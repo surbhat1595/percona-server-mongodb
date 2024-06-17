@@ -3,17 +3,27 @@
  * behavior of subpipelines dispatched as part of these stages.
  *
  * Requires 7.3 to avoid multiversion problems because we updated targeting logic.
- * @tags: [requires_majority_read_concern, requires_fcv_73]
+ * @tags: [
+ *   requires_majority_read_concern,
+ *   requires_fcv_73,
+ *   # TODO (SERVER-85629): Re-enable this test once redness is resolved in multiversion suites.
+ *   DISABLED_TEMPORARILY_DUE_TO_FCV_UPGRADE,
+ *   requires_fcv_80
+ * ]
  */
 
 import {arrayEq} from "jstests/aggregation/extras/utils.js";
 import {configureFailPoint} from "jstests/libs/fail_point_util.js";
+import {FeatureFlagUtil} from "jstests/libs/feature_flag_util.js";
 import {enableLocalReadLogs, getLocalReadCount} from "jstests/libs/local_reads.js";
 import {funWithArgs} from "jstests/libs/parallel_shell_helpers.js";
 import {
     profilerHasAtLeastOneMatchingEntryOrThrow,
     profilerHasZeroMatchingEntriesOrThrow
 } from "jstests/libs/profiler.js";
+import {
+    moveDatabaseAndUnshardedColls
+} from "jstests/sharding/libs/move_database_and_unsharded_coll_helper.js";
 
 const st = new ShardingTest({
     name: jsTestName(),
@@ -121,7 +131,8 @@ function assertProfilerEntriesMatch(expected, comment, pipeline) {
                     {"command.aggregate": {$eq: foreignNs}},
                     {"command.aggregate": {$eq: foreign.getName()}}
                 ],
-                "command.comment": comment
+                "command.comment": comment,
+                "errName": {$ne: "StaleConfig"}
             };
             if (expected.subPipelineRemote[i]) {
                 profilerHasAtLeastOneMatchingEntryOrThrow({
@@ -191,10 +202,10 @@ function assertAggResultAndRouting(pipeline, expectedResults, opts, expected) {
 // $unionWith tests
 //
 
-// Ensure the $unionWith stage is executed on the primary to reduce flakiness.
+// Ensure the $unionWith stage is executed on the same shard to reduce flakiness.
 let pipeline = [
     {$unionWith: {coll: foreign.getName(), pipeline: [{$match: {b: {$gte: 0}}}]}},
-    {$_internalSplitPipeline: {mergeType: "primaryShard"}}
+    {$_internalSplitPipeline: {mergeType: {"specificShard": st.shard0.shardName}}}
 ];
 let expectedRes = [
     {_id: -2, a: -2},
@@ -308,11 +319,11 @@ assertAggResultAndRouting(pipeline, expectedRes, {comment: "graphLookup_to_shard
 st.shardColl(local, {_id: 1}, {_id: 0}, {_id: 0});
 
 assertAggResultAndRouting(pipeline, expectedRes, {comment: "graphLookup_to_unsharded"}, {
-    toplevelExec: [true, false],
+    toplevelExec: [true, true],
     // The shard executing the $graphLookup can read locally from the foreign collection,
     // since it is unsharded.
     subPipelineLocal: [true, false],
-    subPipelineRemote: [false, false]
+    subPipelineRemote: [true, false]
 });
 
 // Test $graphLookup when the foreign namespace is a view of a sharded collection.
@@ -321,10 +332,7 @@ st.shardColl(foreign, {_id: 1}, {_id: 0}, {_id: 0});
 
 pipeline[0].$graphLookup.from = "viewOfSharded";
 assertAggResultAndRouting(pipeline, expectedRes, {comment: "graphLookup_to_view_of_sharded"}, {
-    // TODO SERVER-83902: Only shard0 will execute the $graphLookup because we will not see that the
-    // 'from' collection is a sharded view. When views are tracked in the sharding catalog, we
-    // should be able to target both shards.
-    toplevelExec: [true, false],
+    toplevelExec: [true, true],
     subPipelineLocal: [false, false],
     // The node executing the $graphLookup will perform a scatter-gather query and open a cursor on
     // every shard that contains the foreign collection.
@@ -336,12 +344,11 @@ st.shardColl(local, {_id: 1}, {_id: 0}, {_id: 0});
 
 pipeline[0].$graphLookup.from = "viewOfUnsharded";
 assertAggResultAndRouting(pipeline, expectedRes, {comment: "graphLookup_to_view_of_unsharded"}, {
-    // TODO SERVER-83902: Only shard0 will execute the $graphLookup because we will not see that the
-    // 'from' collection is a sharded view. When views are tracked in the sharding catalog, we
-    // should be able to target both shards.
-    toplevelExec: [true, false],
+    toplevelExec: [true, true],
+    // The shard executing the $graphLookup can read locally from the foreign collection, since it
+    // is unsharded. The other node sends the subpipelines over the network.
     subPipelineLocal: [true, false],
-    subPipelineRemote: [false, false]
+    subPipelineRemote: [true, false]
 });
 
 // Test $graphLookup when the foreign collection does not exist.
@@ -355,8 +362,7 @@ expectedRes = [
     {_id: 2, a: 3, bs: []}
 ];
 assertAggResultAndRouting(pipeline, expectedRes, {comment: "graphLookup_foreign_does_not_exist"}, {
-    // Only execute on shard0 because the 'from' collection does not exist.
-    toplevelExec: [true, false],
+    toplevelExec: [true, true],
     // If the primary node tries to execute a subpipeline first, then it believes it has stale info
     // about the foreign coll and needs to target shards to properly resolve it. Afterwards, it can
     // do local reads. As before, the other node sends its subpipelines over the network. This
@@ -457,50 +463,62 @@ assertAggResultAndRouting(pipeline, expectedRes, {comment: "lookup_to_view_of_un
     subPipelineRemote: [false, false],
 });
 
-// Test $lookup when it is routed to a secondary which is not yet aware of the foreign collection.
-st.shardColl(local, {_id: 1}, {_id: 0}, {_id: 0});
+// TODO SERVER-77915 remove this test case since the unsharded collection are now tracked and cannot
+// be unknown by a the secondary node: The secondary node in the below test case has staleDbVersion.
+// This leads the pipeline targeter to run a remote request and refresh. Now that collections are
+// tracked, the aggregation is sent using ShardVersion, which is never stale due to an
+// AutoGetCollection in the pipeline execution path that causes always to refresh if not installed.
+const isTrackUnshardedUponCreationEnabled = FeatureFlagUtil.isPresentAndEnabled(
+    st.s.getDB('admin'), "TrackUnshardedCollectionsUponCreation");
+if (!isTrackUnshardedUponCreationEnabled) {
+    // Test $lookup when it is routed to a secondary which is not yet aware of the foreign
+    // collection.
+    st.shardColl(local, {_id: 1}, {_id: 0}, {_id: 0});
 
-pipeline[0].$lookup.from = foreign.getName();
-assertAggResultAndRouting(
-    pipeline,
-    expectedRes,
-    {
-        comment: "lookup_on_stale_secondary",
-        $readPreference: {mode: 'secondary'},
-        readConcern: {level: 'majority'}
-    },
-    {
-        executeOnSecondaries: true,
-        // The $lookup cannot be executed in parallel because the foreign collection is unsharded.
-        toplevelExec: [true, false],
-        subPipelineLocal: [true, false],
-        subPipelineRemote: [true, false],
-    });
+    pipeline[0].$lookup.from = foreign.getName();
+    assertAggResultAndRouting(pipeline,
+                              expectedRes,
+                              {
+                                  comment: "lookup_on_stale_secondary",
+                                  $readPreference: {mode: 'secondary'},
+                                  readConcern: {level: 'majority'}
+                              },
+                              {
+                                  executeOnSecondaries: true,
+                                  // The $lookup cannot be executed in parallel because the foreign
+                                  // collection is unsharded.
+                                  toplevelExec: [true, false],
+                                  subPipelineLocal: [true, false],
+                                  subPipelineRemote: [true, false],
+                              });
+}
 
 // Test $lookup when it is routed to a secondary which is aware of the foreign collection.
 st.shardColl(local, {_id: 1}, {_id: 0}, {_id: 0});
+pipeline[0].$lookup.from = foreign.getName();
 
 // Ensure the secondary knows about the foreign collection.
 assert.eq(foreign.aggregate([], {$readPreference: {mode: 'secondary'}}).itcount(), 0);
-assertAggResultAndRouting(
-    pipeline,
-    expectedRes,
-    {
-        comment: "lookup_on_secondary",
-        $readPreference: {mode: 'secondary'},
-        readConcern: {level: 'majority'}
-    },
-    {
-        executeOnSecondaries: true,
-        // The $lookup cannot be executed in parallel because the foreign collection is unsharded.
-        toplevelExec: [true, false],
-        subPipelineLocal: [true, false],
-        subPipelineRemote: [false, false],
-    });
+assertAggResultAndRouting(pipeline,
+                          expectedRes,
+                          {
+                              comment: "lookup_on_secondary",
+                              $readPreference: {mode: 'secondary'},
+                              readConcern: {level: 'majority'}
+                          },
+                          {
+                              executeOnSecondaries: true,
+                              // The $lookup cannot be executed in parallel because the foreign
+                              // collection is unsharded.
+                              toplevelExec: [true, false],
+                              subPipelineLocal: [true, false],
+                              subPipelineRemote: [false, false],
+                          });
 
 // Test $lookup when it is routed to a secondary which thinks the foreign collection is unsharded,
 // but it is stale.
 st.shardColl(local, {_id: 1}, {_id: 0}, {_id: 0});
+pipeline[0].$lookup.from = foreign.getName();
 
 // Ensure the secondaries know about the local collection.
 assert.eq(local.aggregate([], {$readPreference: {mode: 'secondary'}}).itcount(), 0);
@@ -655,7 +673,8 @@ awaitShell = startParallelShell(
 // When we hit this failpoint, the nested $lookup will have just completed its first subpipeline.
 // Move the primary to the other shard to verify that $lookup execution changes correctly mid-query.
 failPoint.wait();
-assert.commandWorked(st.s0.adminCommand({movePrimary: dbName, to: st.shard1.shardName}));
+moveDatabaseAndUnshardedColls(
+    st.s0.getDB(dbName), st.shard1.shardName, false /* moveShardedData */);
 
 // Let the aggregate complete.
 failPoint.off();

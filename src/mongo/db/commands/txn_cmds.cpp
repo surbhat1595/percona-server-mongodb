@@ -60,6 +60,7 @@
 #include "mongo/platform/compiler.h"
 #include "mongo/rpc/op_msg.h"
 #include "mongo/s/sharding_state.h"
+#include "mongo/s/transaction_router.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/decorable.h"
 #include "mongo/util/fail_point.h"

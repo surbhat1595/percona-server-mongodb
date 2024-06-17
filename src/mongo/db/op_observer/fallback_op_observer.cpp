@@ -70,13 +70,14 @@ void FallbackOpObserver::onInserts(OperationContext* opCtx,
                                    const CollectionPtr& coll,
                                    std::vector<InsertStatement>::const_iterator first,
                                    std::vector<InsertStatement>::const_iterator last,
+                                   const std::vector<RecordId>& recordIds,
                                    std::vector<bool> fromMigrate,
                                    bool defaultFromMigrate,
                                    OpStateAccumulator* opAccumulator) {
     auto txnParticipant = TransactionParticipant::get(opCtx);
     const bool inMultiDocumentTransaction =
         txnParticipant && opCtx->writesAreReplicated() && txnParticipant.transactionIsOpen();
-    if (inMultiDocumentTransaction && !opCtx->getWriteUnitOfWork()) {
+    if (inMultiDocumentTransaction && !shard_role_details::getWriteUnitOfWork(opCtx)) {
         return;
     }
 

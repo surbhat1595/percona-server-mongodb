@@ -175,7 +175,7 @@ bool Client::hasAnyActiveCurrentOp() const {
 }
 
 void Client::setKilled() noexcept {
-    stdx::lock_guard<Client> lk(*this);
+    ClientLock lk(this);
     _killed.store(true);
     if (_opCtx) {
         getServiceContext()->killOperation(lk, _opCtx, ErrorCodes::ClientMarkedKilled);
@@ -242,6 +242,18 @@ void Client::mutateTags(const std::function<TagMask(TagMask)>& mutateFunc) {
 
 Client::TagMask Client::getTags() const {
     return _tags.load();
+}
+
+int Client::getLocalPort() const {
+    if (_service->role().hasExclusively(ClusterRole::RouterServer) &&
+        serverGlobalParams.routerPort) {
+        if (_opCtx && _opCtx->routedByReplicaSetEndpoint()) {
+            // This is a client connected to the replica set endpoint so return the shard/main port.
+            return serverGlobalParams.port;
+        }
+        return serverGlobalParams.routerPort.value();
+    }
+    return serverGlobalParams.port;
 }
 
 void Client::_setOperationContext(OperationContext* opCtx) {

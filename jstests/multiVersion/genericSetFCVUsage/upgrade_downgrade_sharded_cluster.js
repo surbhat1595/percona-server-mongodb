@@ -77,6 +77,7 @@ function checkReshardingActiveIndex() {
     // Since downgrading does not restore the index, we don't check for the index's presence
     // until we force a step-up (re-initializing the coordinator)
 
+    st.configRS.awaitReplication();
     assert.commandWorked(st.configRS.getSecondary().adminCommand({replSetStepUp: 1}));
     st.configRS.waitForPrimaryOnlyServices(st.configRS.getPrimary());
     activeIndex = getActiveIndex(st.configRS.getPrimary());
@@ -96,6 +97,7 @@ function checkReshardingActiveIndex() {
 // TODO (SERVER-83264): Remove once 8.0 becomes last LTS.
 function checkConfigSettingsSchema() {
     const configSettingsCollection = st.s.getDB("config").getCollection("settings");
+
     if (FeatureFlagUtil.isPresentAndEnabled(st.configRS.getPrimary(), "BalancerSettingsSchema")) {
         // chunksize schema should be enforced on both fcvs
         assert.commandWorked(configSettingsCollection.update(
@@ -116,27 +118,34 @@ function checkConfigSettingsSchema() {
         // After downgrade, there should be no enforcement on the balancer settings.
         assert.commandWorked(configSettingsCollection.update(
             {_id: "balancer"}, {$set: {stopped: "bad"}}, {upsert: true}));
+
+        // Set a valid value so the rest of the test finishes successfully.
+        assert.commandWorked(configSettingsCollection.update(
+            {_id: "balancer"}, {$set: {stopped: true}}, {upsert: true}));
     }
 }
 
 function checkClusterBeforeUpgrade(fcv) {
+    // checkConfigSettingsSchema may not detect failures if there's a step-up. Keep as first check.
+    checkConfigSettingsSchema();
     checkConfigAndShardsFCV(fcv);
     checkReshardingActiveIndex();
-    checkConfigSettingsSchema();
 }
 
 function checkClusterAfterBinaryUpgrade() {
 }
 
 function checkClusterAfterFCVUpgrade(fcv) {
+    // checkConfigSettingsSchema may not detect failures if there's a step-up. Keep as first check.
+    checkConfigSettingsSchema();
     checkConfigAndShardsFCV(fcv);
     checkReshardingActiveIndex();
-    checkConfigSettingsSchema();
 }
 
 function checkClusterAfterFCVDowngrade() {
-    checkReshardingActiveIndex();
+    // checkConfigSettingsSchema may not detect failures if there's a step-up. Keep as first check.
     checkConfigSettingsSchema();
+    checkReshardingActiveIndex();
 }
 
 function checkClusterAfterBinaryDowngrade(fcv) {

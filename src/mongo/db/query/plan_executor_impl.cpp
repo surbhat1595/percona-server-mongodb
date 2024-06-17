@@ -94,37 +94,6 @@ const OperationContext::Decoration<boost::optional<repl::OpTime>> clientsLastKno
 // namespace.
 MONGO_FAIL_POINT_DEFINE(planExecutorHangBeforeShouldWaitForInserts);
 
-namespace {
-
-/**
- * Constructs a PlanYieldPolicy based on 'policy'.
- */
-std::unique_ptr<PlanYieldPolicy> makeYieldPolicy(
-    PlanExecutorImpl* exec,
-    PlanYieldPolicy::YieldPolicy policy,
-    std::variant<const Yieldable*, PlanYieldPolicy::YieldThroughAcquisitions> yieldable) {
-    switch (policy) {
-        case PlanYieldPolicy::YieldPolicy::YIELD_AUTO:
-        case PlanYieldPolicy::YieldPolicy::YIELD_MANUAL:
-        case PlanYieldPolicy::YieldPolicy::WRITE_CONFLICT_RETRY_ONLY:
-        case PlanYieldPolicy::YieldPolicy::INTERRUPT_ONLY: {
-            return std::make_unique<PlanYieldPolicyImpl>(
-                exec, policy, yieldable, std::make_unique<YieldPolicyCallbacksImpl>(exec->nss()));
-        }
-        case PlanYieldPolicy::YieldPolicy::ALWAYS_TIME_OUT: {
-            return std::make_unique<AlwaysTimeOutYieldPolicy>(
-                exec->getOpCtx(), exec->getOpCtx()->getServiceContext()->getFastClockSource());
-        }
-        case PlanYieldPolicy::YieldPolicy::ALWAYS_MARK_KILLED: {
-            return std::make_unique<AlwaysPlanKilledYieldPolicy>(
-                exec->getOpCtx(), exec->getOpCtx()->getServiceContext()->getFastClockSource());
-        }
-        default:
-            MONGO_UNREACHABLE;
-    }
-}
-}  // namespace
-
 PlanExecutorImpl::PlanExecutorImpl(OperationContext* opCtx,
                                    unique_ptr<WorkingSet> ws,
                                    unique_ptr<PlanStage> rt,
@@ -165,26 +134,12 @@ PlanExecutorImpl::PlanExecutorImpl(OperationContext* opCtx,
         }
     }
 
-    // There's no point in yielding if the collection doesn't exist.
-    const std::variant<const Yieldable*, PlanYieldPolicy::YieldThroughAcquisitions> yieldable =
-        visit(OverloadedVisitor{[](const CollectionPtr* coll) {
-                                    return std::variant<const Yieldable*,
-                                                        PlanYieldPolicy::YieldThroughAcquisitions>(
-                                        *coll ? coll : nullptr);
-                                },
-                                [](const CollectionAcquisition& coll) {
-                                    return std::variant<const Yieldable*,
-                                                        PlanYieldPolicy::YieldThroughAcquisitions>(
-                                        PlanYieldPolicy::YieldThroughAcquisitions{});
-                                }},
-              collection.get());
-
-    _yieldPolicy = makeYieldPolicy(this,
-                                   collectionExists ? yieldPolicy
-                                                    : PlanYieldPolicy::YieldPolicy::INTERRUPT_ONLY,
-                                   yieldable);
-
-    uassertStatusOK(_pickBestPlan());
+    _yieldPolicy = makeClassicYieldPolicy(
+        _opCtx,
+        _nss,
+        this,
+        collectionExists ? yieldPolicy : PlanYieldPolicy::YieldPolicy::INTERRUPT_ONLY,
+        collection);
 
     if (_qs) {
         _planExplainer->setQuerySolution(_qs.get());
@@ -205,46 +160,6 @@ PlanExecutorImpl::PlanExecutorImpl(OperationContext* opCtx,
     if (auto collectionScan = getStageByType(_root.get(), STAGE_COLLSCAN)) {
         _collScanStage = static_cast<CollectionScan*>(collectionScan);
     }
-}
-
-Status PlanExecutorImpl::_pickBestPlan() {
-    invariant(_currentState == kUsable);
-
-    // First check if we need to do subplanning.
-    PlanStage* foundStage = getStageByType(_root.get(), STAGE_SUBPLAN);
-    if (foundStage) {
-        SubplanStage* subplan = static_cast<SubplanStage*>(foundStage);
-        return subplan->pickBestPlan(_yieldPolicy.get());
-    }
-
-    // If we didn't have to do subplanning, we might still have to do regular
-    // multi plan selection...
-    foundStage = getStageByType(_root.get(), STAGE_MULTI_PLAN);
-    if (foundStage) {
-        MultiPlanStage* mps = static_cast<MultiPlanStage*>(foundStage);
-        return mps->pickBestPlan(_yieldPolicy.get());
-    }
-
-    // ...or, we might have to run a plan from the cache for a trial period, falling back on
-    // regular planning if the cached plan performs poorly.
-    foundStage = getStageByType(_root.get(), STAGE_CACHED_PLAN);
-    if (foundStage) {
-        CachedPlanStage* cachedPlan = static_cast<CachedPlanStage*>(foundStage);
-        return cachedPlan->pickBestPlan(_yieldPolicy.get());
-    }
-
-    // Finally, we might have an explicit TrialPhase. This specifies exactly two candidate
-    // plans, one of which is to be evaluated. If it fails the trial, then the backup plan is
-    // adopted.
-    foundStage = getStageByType(_root.get(), STAGE_TRIAL);
-    if (foundStage) {
-        TrialStage* trialStage = static_cast<TrialStage*>(foundStage);
-        return trialStage->pickBestPlan(_yieldPolicy.get());
-    }
-
-    // Either we chose a plan, or no plan selection was required. In both cases,
-    // our work has been successfully completed.
-    return Status::OK();
 }
 
 PlanExecutorImpl::~PlanExecutorImpl() {

@@ -87,7 +87,7 @@ class ShardingDDLCoordinator
 public:
     explicit ShardingDDLCoordinator(ShardingDDLCoordinatorService* service, const BSONObj& coorDoc);
 
-    ~ShardingDDLCoordinator();
+    ~ShardingDDLCoordinator() override;
 
     /**
      * Whether this coordinator is allowed to start when user write blocking is enabled, even if the
@@ -205,7 +205,7 @@ protected:
 
 private:
     SemiFuture<void> run(std::shared_ptr<executor::ScopedTaskExecutor> executor,
-                         const CancellationToken& token) noexcept override final;
+                         const CancellationToken& token) noexcept final;
 
     virtual ExecutorFuture<void> _runImpl(std::shared_ptr<executor::ScopedTaskExecutor> executor,
                                           const CancellationToken& token) noexcept = 0;
@@ -215,7 +215,7 @@ private:
         const CancellationToken& token,
         const Status& status) noexcept;
 
-    void interrupt(Status status) override final;
+    void interrupt(Status status) final;
 
     bool _removeDocument(OperationContext* opCtx);
 
@@ -248,7 +248,7 @@ private:
     std::unique_ptr<Locker> _locker;
 
     std::stack<DDLLockManager::ScopedBaseDDLLock> _scopedLocks;
-    std::unique_ptr<ShardingDDLCoordinatorExternalState> _externalState;
+    std::shared_ptr<ShardingDDLCoordinatorExternalState> _externalState;
 
     friend class ShardingDDLCoordinatorTest;
 };
@@ -323,6 +323,23 @@ protected:
         bob.append("command", cmdInfoBuilder.obj());
 
         return bob;
+    }
+
+    /**
+     * Returns all shards, including the config server. Config servers are special because they
+     * are more likely to be removed as a shard and added back again later. This is mainly used
+     * for ensuring that the config server release the critical sections/locks created by the
+     * ddl operation.
+     */
+    std::vector<ShardId> getAllShardsAndConfigServerIds(OperationContext* opCtx) {
+        auto shardIds = Grid::get(opCtx)->shardRegistry()->getAllShardIds(opCtx);
+
+        auto iter = std::find(shardIds.begin(), shardIds.end(), ShardId::kConfigServerId);
+        if (iter == shardIds.end()) {
+            shardIds.emplace_back(ShardId::kConfigServerId);
+        }
+
+        return shardIds;
     }
 
     const std::string _coordinatorName;
@@ -452,7 +469,7 @@ protected:
         return getCurrentSession();
     }
 
-    virtual boost::optional<Status> getAbortReason() const override {
+    boost::optional<Status> getAbortReason() const override {
         const auto& status = _doc.getAbortReason();
         invariant(!status || !status->isOK(), "when persisted, status must be an error");
         return status;

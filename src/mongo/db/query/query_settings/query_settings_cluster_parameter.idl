@@ -59,3 +59,5 @@ server_parameters:
       override_set: true
     condition:
       feature_flag: feature_flags::gFeatureFlagQuerySettings
+    redact: false
+    omit_in_ftdc: true

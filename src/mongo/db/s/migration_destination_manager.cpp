@@ -163,10 +163,11 @@ BSONObj makeLocalReadConcernWithAfterClusterTime(Timestamp afterClusterTime) {
 void checkOutSessionAndVerifyTxnState(OperationContext* opCtx) {
     auto mongoDSessionCatalog = MongoDSessionCatalog::get(opCtx);
     mongoDSessionCatalog->checkOutUnscopedSession(opCtx);
-    TransactionParticipant::get(opCtx).beginOrContinue(opCtx,
-                                                       {*opCtx->getTxnNumber()},
-                                                       boost::none /* autocommit */,
-                                                       boost::none /* startTransaction */);
+    TransactionParticipant::get(opCtx).beginOrContinue(
+        opCtx,
+        {*opCtx->getTxnNumber()},
+        boost::none /* autocommit */,
+        TransactionParticipant::TransactionActions::kNone);
 }
 
 template <typename Callable>
@@ -659,7 +660,7 @@ repl::OpTime MigrationDestinationManager::fetchAndApplyBatch(
                 }
             }
         } catch (...) {
-            stdx::lock_guard<Client> lk(*opCtx->getClient());
+            ClientLock lk(opCtx->getClient());
             opCtx->getServiceContext()->killOperation(lk, opCtx, ErrorCodes::Error(51008));
             LOGV2(21999, "Batch application failed", "error"_attr = redact(exceptionToStatus()));
         }
@@ -848,7 +849,7 @@ Status MigrationDestinationManager::exitCriticalSection(OperationContext* opCtx,
 
 MigrationDestinationManager::IndexesAndIdIndex MigrationDestinationManager::getCollectionIndexes(
     OperationContext* opCtx,
-    const NamespaceStringOrUUID& nssOrUUID,
+    const NamespaceString& nss,
     const ShardId& fromShardId,
     const boost::optional<CollectionRoutingInfo>& cri,
     boost::optional<Timestamp> afterClusterTime) {
@@ -863,8 +864,7 @@ MigrationDestinationManager::IndexesAndIdIndex MigrationDestinationManager::getC
     // Do not hold any locks while issuing remote calls.
     invariant(!shard_role_details::getLocker(opCtx)->isLocked());
 
-    auto cmd = nssOrUUID.isNamespaceString() ? BSON("listIndexes" << nssOrUUID.nss().coll())
-                                             : BSON("listIndexes" << nssOrUUID.uuid());
+    auto cmd = BSON("listIndexes" << nss.coll());
     if (cri) {
         cmd = appendShardVersion(cmd, cri->getShardVersion(fromShardId));
     }
@@ -876,7 +876,7 @@ MigrationDestinationManager::IndexesAndIdIndex MigrationDestinationManager::getC
     auto indexes = uassertStatusOK(
         fromShard->runExhaustiveCursorCommand(opCtx,
                                               ReadPreferenceSetting(ReadPreference::PrimaryOnly),
-                                              nssOrUUID.dbName(),
+                                              nss.dbName(),
                                               cmd,
                                               Milliseconds(-1)));
     for (auto&& spec : indexes.docs) {
@@ -896,11 +896,22 @@ MigrationDestinationManager::IndexesAndIdIndex MigrationDestinationManager::getC
     return {donorIndexSpecs, donorIdIndexSpec};
 }
 
+
+MigrationDestinationManager::CollectionOptionsAndUUID
+MigrationDestinationManager::getCollectionOptions(OperationContext* opCtx,
+                                                  const NamespaceStringOrUUID& nssOrUUID,
+                                                  boost::optional<Timestamp> afterClusterTime) {
+    const auto dbInfo =
+        uassertStatusOK(Grid::get(opCtx)->catalogCache()->getDatabase(opCtx, nssOrUUID.dbName()));
+    return getCollectionOptions(
+        opCtx, nssOrUUID, dbInfo->getPrimary(), dbInfo->getVersion(), afterClusterTime);
+}
+
 MigrationDestinationManager::CollectionOptionsAndUUID
 MigrationDestinationManager::getCollectionOptions(OperationContext* opCtx,
                                                   const NamespaceStringOrUUID& nssOrUUID,
                                                   const ShardId& fromShardId,
-                                                  const boost::optional<ChunkManager>& cm,
+                                                  const boost::optional<DatabaseVersion>& dbVersion,
                                                   boost::optional<Timestamp> afterClusterTime) {
     auto fromShard =
         uassertStatusOK(Grid::get(opCtx)->shardRegistry()->getShard(opCtx, fromShardId));
@@ -910,9 +921,11 @@ MigrationDestinationManager::getCollectionOptions(OperationContext* opCtx,
     auto cmd = nssOrUUID.isNamespaceString()
         ? BSON("listCollections" << 1 << "filter" << BSON("name" << nssOrUUID.nss().coll()))
         : BSON("listCollections" << 1 << "filter" << BSON("info.uuid" << nssOrUUID.uuid()));
-    if (cm) {
-        cmd = appendDbVersionIfPresent(cmd, cm->dbVersion());
+
+    if (dbVersion) {
+        cmd = appendDbVersionIfPresent(cmd, *dbVersion);
     }
+
     if (afterClusterTime) {
         cmd = cmd.addFields(makeLocalReadConcernWithAfterClusterTime(*afterClusterTime));
     }
@@ -1168,7 +1181,7 @@ void MigrationDestinationManager::_migrateThread(CancellationToken cancellationT
             CancelableOperationContext(client->makeOperationContext(), cancellationToken, executor);
         auto opCtx = uniqueOpCtx.get();
 
-        if (AuthorizationManager::get(opCtx->getServiceContext())->isAuthEnabled()) {
+        if (AuthorizationManager::get(opCtx->getService())->isAuthEnabled()) {
             AuthorizationSession::get(opCtx->getClient())->grantInternalAuthorization(opCtx);
         }
 
@@ -1202,7 +1215,7 @@ void MigrationDestinationManager::_migrateThread(CancellationToken cancellationT
             txnParticipant.beginOrContinue(opCtx,
                                            {*opCtx->getTxnNumber()},
                                            boost::none /* autocommit */,
-                                           boost::none /* startTransaction */);
+                                           TransactionParticipant::TransactionActions::kNone);
             _migrateDriver(opCtx, skipToCritSecTaken || recovering);
         } catch (...) {
             _setStateFail(str::stream() << "migrate failed: " << redact(exceptionToStatus()));

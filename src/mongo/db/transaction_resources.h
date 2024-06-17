@@ -89,13 +89,15 @@ struct AcquisitionPrerequisites {
                              repl::ReadConcernArgs readConcern,
                              PlacementConcernVariant placementConcern,
                              OperationType operationType,
-                             ViewMode viewMode)
+                             ViewMode viewMode,
+                             Date_t lockAcquisitionDeadline = Date_t::max())
         : nss(std::move(nss)),
           uuid(std::move(uuid)),
           readConcern(std::move(readConcern)),
           placementConcern(std::move(placementConcern)),
           operationType(operationType),
-          viewMode(viewMode) {}
+          viewMode(viewMode),
+          lockAcquisitionDeadline(lockAcquisitionDeadline) {}
 
     NamespaceString nss;
     boost::optional<UUID> uuid;
@@ -104,6 +106,7 @@ struct AcquisitionPrerequisites {
     PlacementConcernVariant placementConcern;
     OperationType operationType;
     ViewMode viewMode;
+    Date_t lockAcquisitionDeadline;
 };
 
 namespace shard_role_details {
@@ -266,7 +269,6 @@ inline void replaceRecoveryUnit(OperationContext* opCtx) {
  */
 std::unique_ptr<RecoveryUnit> releaseAndReplaceRecoveryUnit(OperationContext* opCtx);
 
-
 /**
  * Associates the OperatingContext with a different RecoveryUnit for getMore or
  * subtransactions, see RecoveryUnitSwap. The new state is passed and the old state is
@@ -276,6 +278,10 @@ std::unique_ptr<RecoveryUnit> releaseAndReplaceRecoveryUnit(OperationContext* op
 WriteUnitOfWork::RecoveryUnitState setRecoveryUnit(OperationContext* opCtx,
                                                    std::unique_ptr<RecoveryUnit> unit,
                                                    WriteUnitOfWork::RecoveryUnitState state);
+
+WriteUnitOfWork* getWriteUnitOfWork(OperationContext* opCtx);
+
+void setWriteUnitOfWork(OperationContext* opCtx, std::unique_ptr<WriteUnitOfWork> writeUnitOfWork);
 
 /**
  * This class is a container for all the collection resources which are currently acquired by a
@@ -378,9 +384,12 @@ struct TransactionResources {
     ////////////////////////////////////////////////////////////////////////////////////////
     // Per-collection resources
 
+    using AcquiredCollections = std::list<AcquiredCollection>;
+    using AcquiredViews = std::list<AcquiredView>;
+
     // Set of all collections which are currently acquired
-    std::list<AcquiredCollection> acquiredCollections;
-    std::list<AcquiredView> acquiredViews;
+    AcquiredCollections acquiredCollections;
+    AcquiredViews acquiredViews;
 
     // Reference counters used for controlling how many references there are to the
     // TransactionResources object.

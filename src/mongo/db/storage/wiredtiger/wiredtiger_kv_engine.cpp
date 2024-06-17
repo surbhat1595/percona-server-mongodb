@@ -41,6 +41,7 @@
 #include "mongo/db/catalog/collection_options_gen.h"
 #include "mongo/db/index_names.h"
 #include "mongo/db/repl/member_state.h"
+#include "mongo/db/server_feature_flags_gen.h"
 #include "mongo/db/server_parameter.h"
 #include "mongo/db/storage/backup_block.h"
 #include "mongo/db/storage/wiredtiger/wiredtiger_oplog_manager.h"
@@ -131,7 +132,6 @@
 #include "mongo/db/storage/storage_options.h"
 #include "mongo/db/storage/storage_parameters_gen.h"
 #include "mongo/db/storage/storage_repair_observer.h"
-#include "mongo/db/storage/ticketholder_manager.h"
 #include "mongo/db/storage/wiredtiger/encryption_keydb.h"
 #include "mongo/db/storage/wiredtiger/wiredtiger_backup_cursor_hooks.h"
 #include "mongo/db/storage/wiredtiger/wiredtiger_column_store.h"
@@ -298,11 +298,11 @@ public:
     explicit WiredTigerSessionSweeper(WiredTigerSessionCache* sessionCache)
         : BackgroundJob(false /* deleteSelf */), _sessionCache(sessionCache) {}
 
-    virtual string name() const {
+    string name() const override {
         return "WTIdleSessionSweeper";
     }
 
-    virtual void run() {
+    void run() override {
         ThreadClient tc(name(), getGlobalServiceContext()->getService(ClusterRole::ShardServer));
 
         // TODO(SERVER-74657): Please revisit if this thread could be made killable.
@@ -773,7 +773,9 @@ WiredTigerKVEngine::WiredTigerKVEngine(
       _oplogManager(std::make_unique<WiredTigerOplogManager>()),
       _canonicalName(canonicalName),
       _path(path),
-      _sizeStorerSyncTracker(cs, 100000, Seconds(60)),
+      _sizeStorerSyncTracker(cs,
+                             gWiredTigerSizeStorerPeriodicSyncHits,
+                             Milliseconds{gWiredTigerSizeStorerPeriodicSyncPeriodMillis}),
       _ephemeral(ephemeral),
       _inRepairMode(repair),
       _cacheSizeMB(cacheSizeMB) {
@@ -913,6 +915,11 @@ WiredTigerKVEngine::WiredTigerKVEngine(
         ss << "timing_stress_for_test=[history_store_checkpoint_delay,checkpoint_slow],";
     }
 
+    if (gFeatureFlagPrefetch.isEnabled(
+            serverGlobalParams.featureCompatibility.acquireFCVSnapshot())) {
+        ss << "prefetch=(available=true,default=false),";
+    }
+
     ss << WiredTigerCustomizationHooks::get(getGlobalServiceContext())
               ->getTableCreateConfig("system");
     ss << WiredTigerExtensions::get(getGlobalServiceContext())->getOpenExtensionsConfig();
@@ -1046,35 +1053,66 @@ WiredTigerKVEngine::~WiredTigerKVEngine() {
     _encryptionKeyDB.reset(nullptr);
 }
 
-void WiredTigerKVEngine::notifyStartupComplete(OperationContext* opCtx) {
+void WiredTigerKVEngine::notifyStorageStartupRecoveryComplete() {
     unpinOldestTimestamp(kPinOldestTimestampAtStartupName);
-    WiredTigerUtil::notifyStartupComplete();
+    WiredTigerUtil::notifyStorageStartupRecoveryComplete();
+}
+
+void WiredTigerKVEngine::notifyReplStartupRecoveryComplete(OperationContext* opCtx) {
+    // The assertion below verifies that our oldest timestamp is not ahead of a non-zero stable
+    // timestamp upon exiting startup recovery. This is because it is not safe to begin taking
+    // stable checkpoints while the oldest timestamp is ahead of the stable timestamp.
+    //
+    // If we recover from an unstable checkpoint, such as in the startup recovery for restore case
+    // after we have finished oplog replay, we will start up with a null stable timestamp. As a
+    // result, we can safely advance the oldest timestamp.
+    //
+    // If we recover with a stable checkpoint, the stable timestamp will be set to the previous
+    // value. In this case, we expect the oldest timestamp to be advanced in lockstep with the
+    // stable timestamp during any recovery process, and so the oldest timestamp should never exceed
+    // the stable timestamp.
+    const Timestamp oldest = getOldestTimestamp();
+    const Timestamp stable = getStableTimestamp();
+    uassert(8470600,
+            str::stream() << "Oldest timestamp " << oldest
+                          << " is ahead of non-zero stable timestamp " << stable,
+            (stable.isNull() || oldest.isNull() || oldest <= stable));
 
     if (!gEnableAutoCompaction)
         return;
 
-    // Background compaction should not be executed if:
-    // - checkpoints are disabled or,
-    // - user writes are not allowed.
-    uassert(8373400,
-            "The autoCompact command should not be executed",
-            opCtx->getServiceContext()->userWritesAllowed() && storageGlobalParams.syncdelay > 0);
+    if (!TestingProctor::instance().isEnabled()) {
+        LOGV2_FATAL_NOTRACE(8730900, "enableAutoCompaction is a test-only parameter");
+    }
 
-    StorageEngine::AutoCompactOptions options{/*enable=*/true,
-                                              /*runOnce=*/false,
-                                              /*freeSpaceTargetMB=*/boost::none,
-                                              /*excludedIdents*/ std::vector<StringData>()};
+    // TODO SERVER-84357: exclude the oplog table.
+    AutoCompactOptions options{/*enable=*/true,
+                               /*runOnce=*/false,
+                               /*freeSpaceTargetMB=*/boost::none,
+                               /*excludedIdents*/ std::vector<StringData>()};
 
-    Lock::GlobalLock lk(opCtx, MODE_IX);
+    // Holding the global lock to prevent racing with storage shutdown. However, no need to hold the
+    // RSTL nor acquire a flow control ticket. This doesn't care about the replica state of the node
+    // and the operation is not replicated.
+    Lock::GlobalLock lk{
+        opCtx,
+        MODE_IS,
+        Date_t::max(),
+        Lock::InterruptBehavior::kThrow,
+        Lock::GlobalLockSkipOptions{.skipFlowControlTicket = true, .skipRSTLLock = true}};
+
     auto status = autoCompact(opCtx, options);
-    uassert(8373401, "Failed to execute autoCompact.", status.isOK());
-}
+    if (status.isOK()) {
+        LOGV2(8704102, "AutoCompact enabled");
+        return;
+    }
 
-void WiredTigerKVEngine::appendGlobalStats(OperationContext* opCtx, BSONObjBuilder& b) {
-    BSONObjBuilder bb(b.subobjStart("concurrentTransactions"));
-    auto ticketHolderManager = TicketHolderManager::get(opCtx->getServiceContext());
-    ticketHolderManager->appendStats(bb);
-    bb.done();
+    // Proceed with startup if background compaction fails to start. Crash for unexpected error
+    // codes.
+    if (status != ErrorCodes::IllegalOperation && status != ErrorCodes::ObjectIsBusy) {
+        invariantStatusOK(
+            status.withContext("Background compaction failed to start due to an unexpected error"));
+    }
 }
 
 void WiredTigerKVEngine::_openWiredTiger(const std::string& path, const std::string& wtOpenConfig) {
@@ -1512,15 +1550,15 @@ public:
           _path(path),
           _wtBackup(wtBackup){};
 
-    ~StreamingCursorImpl() = default;
+    ~StreamingCursorImpl() override = default;
 
-    void setCatalogEntries(
-        stdx::unordered_map<std::string, std::pair<NamespaceString, UUID>> identsToNsAndUUID) {
+    void setCatalogEntries(stdx::unordered_map<std::string, std::pair<NamespaceString, UUID>>
+                               identsToNsAndUUID) override {
         _identsToNsAndUUID = std::move(identsToNsAndUUID);
     }
 
     StatusWith<std::deque<BackupBlock>> getNextBatch(OperationContext* opCtx,
-                                                     const std::size_t batchSize) {
+                                                     const std::size_t batchSize) override {
         int wtRet = 0;
         std::deque<BackupBlock> backupBlocks;
 
@@ -3008,7 +3046,7 @@ std::unique_ptr<RecordStore> WiredTigerKVEngine::getRecordStore(OperationContext
     }
 
     std::unique_ptr<WiredTigerRecordStore> ret;
-    ret = std::make_unique<StandardWiredTigerRecordStore>(this, opCtx, params);
+    ret = std::make_unique<WiredTigerRecordStore>(this, opCtx, params);
     ret->postConstructorInit(opCtx, nss);
 
     // Sizes should always be checked when creating a collection during rollback or replication
@@ -3017,7 +3055,7 @@ std::unique_ptr<RecordStore> WiredTigerKVEngine::getRecordStore(OperationContext
     // or when collection creation is not part of a stable checkpoint.
     const auto replCoord = repl::ReplicationCoordinator::get(getGlobalServiceContext());
     const bool inRollback = replCoord && replCoord->getMemberState().rollback();
-    if (inRollback || inReplicationRecovery(getGlobalServiceContext())) {
+    if (inRollback || inReplicationRecovery(getGlobalServiceContext()).load()) {
         ret->checkSize(opCtx);
     }
 
@@ -3193,7 +3231,7 @@ std::unique_ptr<RecordStore> WiredTigerKVEngine::getTemporaryRecordStore(Operati
     params.forceUpdateWithFullDocument = false;
 
     std::unique_ptr<WiredTigerRecordStore> rs;
-    rs = std::make_unique<StandardWiredTigerRecordStore>(this, opCtx, params);
+    rs = std::make_unique<WiredTigerRecordStore>(this, opCtx, params);
     rs->postConstructorInit(opCtx, params.nss);
 
     return std::move(rs);
@@ -3813,6 +3851,9 @@ StatusWith<Timestamp> WiredTigerKVEngine::recoverToStableTimestamp(OperationCont
                        "initialDataTimestamp"_attr = initialDataTimestamp);
     int ret = 0;
 
+    // Shut down the cache before rollback and restart afterwards.
+    _sessionCache->shuttingDown();
+
     // The rollback_to_stable operation requires all open cursors to be closed or reset before the
     // call, otherwise EBUSY will be returned. Occasionally, there could be an operation that hasn't
     // been killed yet, such as the CappedInsertNotifier for a yielded oplog getMore. We will retry
@@ -3842,6 +3883,9 @@ StatusWith<Timestamp> WiredTigerKVEngine::recoverToStableTimestamp(OperationCont
     }
 
     _sizeStorer = std::make_unique<WiredTigerSizeStorer>(_conn, _sizeStorerUri);
+
+    // SERVER-85167: restart the cache after resetting the size storer.
+    _sessionCache->restart();
 
     return {stableTimestamp};
 }
@@ -4179,17 +4223,12 @@ void WiredTigerKVEngine::sizeStorerPeriodicFlush() {
     }
 }
 
-Status WiredTigerKVEngine::autoCompact(OperationContext* opCtx,
-                                       const StorageEngine::AutoCompactOptions& options) {
-    dassert(shard_role_details::getLocker(opCtx)->isWriteLocked());
+Status WiredTigerKVEngine::autoCompact(OperationContext* opCtx, const AutoCompactOptions& options) {
+    dassert(shard_role_details::getLocker(opCtx)->isLocked());
 
-    WiredTigerSessionCache* cache = WiredTigerRecoveryUnit::get(opCtx)->getSessionCache();
-    if (cache->isEphemeral()) {
-        return Status::OK();
-    }
-
-    WT_SESSION* s = WiredTigerRecoveryUnit::get(opCtx)->getSession()->getSession();
-    shard_role_details::getRecoveryUnit(opCtx)->abandonSnapshot();
+    auto status = WiredTigerUtil::canRunAutoCompact(opCtx, isEphemeral());
+    if (!status.isOK())
+        return status;
 
     StringBuilder config;
     if (options.enable) {
@@ -4201,7 +4240,7 @@ Status WiredTigerKVEngine::autoCompact(OperationContext* opCtx,
             // Create WiredTiger URIs from the idents.
             config << ",exclude=[";
             for (const auto& ident : options.excludedIdents) {
-                config << "\"" << _uri(ident) + ".wt\",";
+                config << "\"" << _uri(ident) << ".wt\",";
             }
             config << "]";
         }
@@ -4212,17 +4251,15 @@ Status WiredTigerKVEngine::autoCompact(OperationContext* opCtx,
         config << "background=false";
     }
 
+    WT_SESSION* s = WiredTigerRecoveryUnit::get(opCtx)->getSessionNoTxn()->getSession();
     int ret = s->compact(s, nullptr, config.str().c_str());
-
-    if (ret == EBUSY) {
-        StringBuilder msg;
-        msg << "Auto compact failed to " << (options.enable ? "start" : "stop")
-            << ", resource busy";
-        return Status(ErrorCodes::ObjectIsBusy, msg.str());
-    }
-    uassertStatusOK(wtRCToStatus(ret, s));
-
-    return Status::OK();
+    status = wtRCToStatus(ret, s, "WiredTigerKVEngine::autoCompact()");
+    if (!status.isOK())
+        LOGV2_ERROR(8704101,
+                    "WiredTigerKVEngine::autoCompact() failed",
+                    "config"_attr = config.str(),
+                    "error"_attr = status);
+    return status;
 }
 
 }  // namespace mongo

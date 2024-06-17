@@ -29,6 +29,7 @@
 
 #include "mongo/db/query/query_shape/shape_helpers.h"
 
+#include "mongo/db/query/query_request_helper.h"
 #include "mongo/db/query/query_shape/query_shape_gen.h"
 
 namespace mongo::shape_helpers {
@@ -50,7 +51,9 @@ BSONObj shapifyFlatObj(BSONObj obj, const SerializationOptions& opts, bool value
             } else if (elem.type() == BSONType::Object) {
                 opts.appendLiteral(&bob, hintSpecialField, elem.Obj());
             } else {
-                uasserted(ErrorCodes::FailedToParse, "$hint must be a string or an object");
+                // SERVER-85500: $hint syntax will not be validated if the collection does not
+                // exist, so we should accept a value that is neither string nor object here.
+                opts.appendLiteral(&bob, hintSpecialField, elem);
             }
             continue;
         }
@@ -81,10 +84,8 @@ BSONObj extractMinOrMaxShape(BSONObj obj, const SerializationOptions& opts) {
 void appendNamespaceShape(BSONObjBuilder& bob,
                           const NamespaceString& nss,
                           const SerializationOptions& opts) {
-    if (nss.tenantId()) {
-        bob.append("tenantId", opts.serializeIdentifier(nss.tenantId().value().toString()));
-    }
-    // We do not want to include the tenantId as prefix of 'db' because the tenantid is added above.
+    // We do not want to include the tenantId as prefix of 'db' because the tenant id is not
+    // included into query shape.
     bob.append("db", opts.serializeIdentifier(nss.dbName().serializeWithoutTenantPrefix_UNSAFE()));
     bob.append("coll", opts.serializeIdentifier(nss.coll()));
 }

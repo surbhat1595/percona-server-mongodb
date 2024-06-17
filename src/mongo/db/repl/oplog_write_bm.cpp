@@ -86,14 +86,13 @@
 #include "mongo/db/repl/storage_interface.h"
 #include "mongo/db/repl/storage_interface_impl.h"
 #include "mongo/db/s/collection_sharding_state.h"
-#include "mongo/db/s/collection_sharding_state_factory_standalone.h"
+#include "mongo/db/s/collection_sharding_state_factory_shard.h"
 #include "mongo/db/server_options.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/service_entry_point_mongod.h"
 #include "mongo/db/session/session_catalog.h"
 #include "mongo/db/session/session_catalog_mongod.h"
 #include "mongo/db/session_manager_mongod.h"
-#include "mongo/db/storage/execution_control/concurrency_adjustment_parameters_gen.h"
 #include "mongo/db/storage/recovery_unit.h"
 #include "mongo/db/storage/recovery_unit_noop.h"
 #include "mongo/db/storage/storage_engine_init.h"
@@ -122,11 +121,10 @@
 namespace mongo {
 namespace {
 
+constexpr std::size_t kOplogBufferSize = 256 * 1024 * 1024;
 class TestServiceContext {
 public:
     TestServiceContext(int numThreads) {
-        // Disable execution control.
-        gStorageEngineConcurrencyAdjustmentAlgorithm = "fixedConcurrentTransactions";
 
         // Disable server info logging so that the benchmark output is cleaner.
         logv2::LogManager::global().getGlobalSettings().setMinimumLoggedSeverity(
@@ -202,12 +200,14 @@ public:
         _svcCtx->setOpObserver(std::move(registry));
         ShardingState::create(_svcCtx);
         CollectionShardingStateFactory::set(
-            _svcCtx, std::make_unique<CollectionShardingStateFactoryStandalone>(_svcCtx));
+            _svcCtx, std::make_unique<CollectionShardingStateFactoryShard>(_svcCtx));
 
         MongoDSessionCatalog::set(
             _svcCtx,
             std::make_unique<MongoDSessionCatalog>(
                 std::make_unique<MongoDSessionCatalogTransactionInterfaceImpl>()));
+
+        _oplogBuffer = std::make_unique<repl::OplogBufferBlockingQueue>(kOplogBufferSize);
 
         repl::replWriterThreadCount = numThreads;  // Repl worker thread count
         repl::replWriterMinThreadCount = numThreads;
@@ -216,10 +216,11 @@ public:
 
         repl::OplogApplier::Options oplogApplierOptions(
             repl::OplogApplication::Mode::kSecondary,
-            false /*allowNamespaceNotFoundErrorsOnCrudOps*/,
-            false /*skipWritesToOplog*/);  // Write oplog
+            false /* allowNamespaceNotFoundErrorsOnCrudOps */,
+            false /* skipWritesToOplog */,
+            false /* skipWritesToChangeCollection */);
         _oplogApplier = std::make_unique<repl::OplogApplierImpl>(nullptr,
-                                                                 &_oplogBuffer,
+                                                                 _oplogBuffer.get(),
                                                                  &repl::noopOplogApplierObserver,
                                                                  _replCoord,
                                                                  &_consistencyMarkers,
@@ -227,7 +228,7 @@ public:
                                                                  oplogApplierOptions,
                                                                  _oplogApplierThreadPool.get());
 
-        _svcCtx->notifyStartupComplete();
+        _svcCtx->notifyStorageStartupRecoveryComplete();
     }
 
     ~TestServiceContext() {
@@ -312,7 +313,7 @@ private:
     repl::StorageInterface* _storageInterface;
 
     // This class also owns objects necessary for `_oplogApplier`.
-    repl::OplogBufferBlockingQueue _oplogBuffer;
+    std::unique_ptr<repl::OplogBufferBlockingQueue> _oplogBuffer;
     repl::ReplicationConsistencyMarkersMock _consistencyMarkers;
     std::unique_ptr<ThreadPool> _oplogApplierThreadPool;
     boost::optional<unittest::TempDir> _tempDir;
@@ -388,7 +389,8 @@ public:
     void writeOplog(OperationContext* opCtx, size_t numEntriesPerBatch, size_t numBytesPerBatch) {
         while (!_testSvcCtx->getOplogApplier()->getBuffer()->isEmpty()) {
             auto oplogBatch = invariantStatusOK(_testSvcCtx->getOplogApplier()->getNextApplierBatch(
-                opCtx, {numBytesPerBatch, numEntriesPerBatch}));
+                                                    opCtx, {numBytesPerBatch, numEntriesPerBatch}))
+                                  .releaseBatch();
 
             AutoGetDb autoDb(opCtx, _foobarNs.dbName(), MODE_X);
 

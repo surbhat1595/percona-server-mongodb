@@ -89,6 +89,7 @@ namespace mongo {
 namespace {
 
 constexpr char SKIP_TEMP_COLLECTION[] = "skipTempCollections";
+constexpr char EXCLUDE_RECORDIDS[] = "excludeRecordIds";
 
 std::shared_ptr<const CollectionCatalog> getConsistentCatalogAndSnapshot(OperationContext* opCtx) {
     // Loop until we get a consistent catalog and snapshot. This is only used for the lock-free
@@ -104,11 +105,34 @@ std::shared_ptr<const CollectionCatalog> getConsistentCatalogAndSnapshot(Operati
     }
 }
 
+// Includes Records and their RecordIds explicitly in the hash.
+void hashRecordsAndRecordIds(const CollectionPtr& collection, PlanExecutor* exec, md5_state_t* st) {
+    // Clustered collections implicitly replicate RecordIds. Clustered collections are also the only
+    // collections which have RecordIds that aren't of type "Long". This method assumes RecordIds
+    // are of type "Long" to optimize their translation into the hash.
+    invariant(!collection->isClustered());
+
+    BSONObj c;
+    RecordId rid;
+    while (exec->getNext(&c, &rid) == PlanExecutor::ADVANCED) {
+        md5_append(st, (const md5_byte_t*)c.objdata(), c.objsize());
+        const auto ridInt = rid.getLong();
+        md5_append(st, (const md5_byte_t*)&ridInt, sizeof(ridInt));
+    }
+}
+
+void hashRecordsOnly(PlanExecutor* exec, md5_state_t* st) {
+    BSONObj c;
+    while (exec->getNext(&c, nullptr) == PlanExecutor::ADVANCED) {
+        md5_append(st, (const md5_byte_t*)c.objdata(), c.objsize());
+    }
+}
+
 class DBHashCmd : public BasicCommand {
 public:
     DBHashCmd() : BasicCommand("dbHash", "dbhash") {}
 
-    virtual bool supportsWriteConcern(const BSONObj& cmd) const override {
+    bool supportsWriteConcern(const BSONObj& cmd) const override {
         return false;
     }
 
@@ -183,6 +207,12 @@ public:
             cmdObj.hasField(SKIP_TEMP_COLLECTION) && cmdObj[SKIP_TEMP_COLLECTION].trueValue();
         if (skipTempCollections) {
             LOGV2(6859700, "Skipping hash computation for temporary collections");
+        }
+
+        const bool excludeRecordIds =
+            cmdObj.hasField(EXCLUDE_RECORDIDS) && cmdObj[EXCLUDE_RECORDIDS].trueValue();
+        if (excludeRecordIds) {
+            LOGV2(6859701, "Exclude recordIds in dbHash for recordIdsReplicated collections");
         }
 
         uassert(ErrorCodes::InvalidNamespace,
@@ -278,7 +308,7 @@ public:
             autoDb.emplace(opCtx, dbName, MODE_S);
         }
 
-        result.append("host", prettyHostName());
+        result.append("host", prettyHostName(opCtx->getClient()->getLocalPort()));
 
         md5_state_t globalState;
         md5_init(&globalState);
@@ -324,7 +354,7 @@ public:
             collectionToUUIDMap.emplace(collNss.coll().toString(), collection->uuid());
 
             // Compute the hash for this collection.
-            std::string hash = _hashCollection(opCtx, CollectionPtr(collection));
+            std::string hash = _hashCollection(opCtx, CollectionPtr(collection), excludeRecordIds);
 
             collectionToHashMap[collNss.coll().toString()] = hash;
 
@@ -416,11 +446,22 @@ public:
     }
 
 private:
-    std::string _hashCollection(OperationContext* opCtx, const CollectionPtr& collection) {
+    std::string _hashCollection(OperationContext* opCtx,
+                                const CollectionPtr& collection,
+                                bool excludeRecordIds) {
         auto desc = collection->getIndexCatalog()->findIdIndex(opCtx);
 
         std::unique_ptr<PlanExecutor, PlanExecutor::Deleter> exec;
-        if (desc) {
+
+        // Replicated RecordIds circumvent the need to perform an _id lookup because natural
+        // scan order is preserved across nodes. If to exclude recordIds, existing _id scan should
+        // be kept too. This way a customer will get the same hash with excludeRecordIds option as
+        // the one before upgrade.
+        bool includeRids = collection->areRecordIdsReplicated() && !excludeRecordIds;
+
+        // TODO SERVER-86692: This logic can be simplified once all capped, clustered, and
+        // replicated recordId collections always use a collection scan.
+        if (desc && !includeRids) {
             exec = InternalPlanner::indexScan(opCtx,
                                               &collection,
                                               desc,
@@ -430,7 +471,7 @@ private:
                                               PlanYieldPolicy::YieldPolicy::INTERRUPT_ONLY,
                                               InternalPlanner::FORWARD,
                                               InternalPlanner::IXSCAN_FETCH);
-        } else if (collection->isCapped() || collection->isClustered()) {
+        } else if (collection->isCapped() || collection->isClustered() || includeRids) {
             exec = InternalPlanner::collectionScan(
                 opCtx, &collection, PlanYieldPolicy::YieldPolicy::INTERRUPT_ONLY);
         } else {
@@ -442,10 +483,16 @@ private:
         md5_init(&st);
 
         try {
-            BSONObj c;
             MONGO_verify(nullptr != exec.get());
-            while (exec->getNext(&c, nullptr) == PlanExecutor::ADVANCED) {
-                md5_append(&st, (const md5_byte_t*)c.objdata(), c.objsize());
+
+            // It's unnecessary to explicitly include the RecordIds of a clustered collection in the
+            // hash. In a clustered collection, each RecordId is generated by the _id, which is
+            // already hashed as a part of the Record.
+            const bool explicitlyHashRecordIds = includeRids && !collection->isClustered();
+            if (explicitlyHashRecordIds) {
+                hashRecordsAndRecordIds(collection, exec.get(), &st);
+            } else {
+                hashRecordsOnly(exec.get(), &st);
             }
         } catch (DBException& exception) {
             LOGV2_WARNING(

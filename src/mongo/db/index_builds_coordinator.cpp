@@ -46,6 +46,7 @@
 // IWYU pragma: no_include "boost/system/detail/error_code.hpp"
 
 #include "mongo/base/error_codes.h"
+#include "mongo/db/admission/execution_admission_context.h"
 #include "mongo/db/catalog/collection_catalog.h"
 #include "mongo/db/catalog/collection_yield_restore.h"
 #include "mongo/db/catalog/commit_quorum_options.h"
@@ -140,16 +141,49 @@ MONGO_FAIL_POINT_DEFINE(hangOnStepUpAsyncTaskBeforeCheckingCommitQuorum);
 
 extern FailPoint skipWriteConflictRetries;
 
-IndexBuildsCoordinator::IndexBuildsSSS::IndexBuildsSSS()
-    : ServerStatusSection("indexBuilds"),
-      registered(0),
-      scanCollection(0),
-      drainSideWritesTable(0),
-      drainSideWritesTablePreCommit(0),
-      waitForCommitQuorum(0),
-      drainSideWritesTableOnCommit(0),
-      processConstraintsViolatonTableOnCommit(0),
-      commit(0) {}
+class IndexBuildsSSS : public ServerStatusSection {
+public:
+    using ServerStatusSection::ServerStatusSection;
+
+    bool includeByDefault() const final {
+        return true;
+    }
+
+    BSONObj generateSection(OperationContext* opCtx, const BSONElement& configElement) const final {
+        BSONObjBuilder indexBuilds;
+
+        indexBuilds.append("total", registered.loadRelaxed());
+        indexBuilds.append("killedDueToInsufficientDiskSpace",
+                           killedDueToInsufficientDiskSpace.loadRelaxed());
+        indexBuilds.append("failedDueToDataCorruption", failedDueToDataCorruption.loadRelaxed());
+
+        BSONObjBuilder phases{indexBuilds.subobjStart("phases")};
+        phases.append("scanCollection", scanCollection.loadRelaxed());
+        phases.append("drainSideWritesTable", drainSideWritesTable.loadRelaxed());
+        phases.append("drainSideWritesTablePreCommit", drainSideWritesTablePreCommit.loadRelaxed());
+        phases.append("waitForCommitQuorum", waitForCommitQuorum.loadRelaxed());
+        phases.append("drainSideWritesTableOnCommit", drainSideWritesTableOnCommit.loadRelaxed());
+        phases.append("processConstraintsViolatonTableOnCommit",
+                      processConstraintsViolatonTableOnCommit.loadRelaxed());
+        phases.append("commit", commit.loadRelaxed());
+        phases.done();
+
+        return indexBuilds.obj();
+    }
+
+    AtomicWord<int> registered{0};
+    AtomicWord<int> killedDueToInsufficientDiskSpace{0};
+    AtomicWord<int> failedDueToDataCorruption{0};
+    AtomicWord<int> scanCollection{0};
+    AtomicWord<int> drainSideWritesTable{0};
+    AtomicWord<int> drainSideWritesTablePreCommit{0};
+    AtomicWord<int> waitForCommitQuorum{0};
+    AtomicWord<int> drainSideWritesTableOnCommit{0};
+    AtomicWord<int> processConstraintsViolatonTableOnCommit{0};
+    AtomicWord<int> commit{0};
+};
+
+auto& indexBuildsSSS = *ServerStatusSectionBuilder<IndexBuildsSSS>("indexBuilds").forShard();
 
 namespace {
 
@@ -218,7 +252,7 @@ bool shouldBuildIndexesOnEmptyCollectionSinglePhased(OperationContext* opCtx,
 
     // This check happens before spawning the index build thread. So it does not race with the
     // replication recovery flag being modified.
-    if (inReplicationRecovery(opCtx->getServiceContext())) {
+    if (inReplicationRecovery(opCtx->getServiceContext()).load()) {
         return false;
     }
 
@@ -463,7 +497,7 @@ bool isIndexBuildResumable(OperationContext* opCtx,
     // startup recovery, the last optime here derived from the local oplog may not be a valid
     // optime to wait on for the majority commit point since the rest of the replica set may
     // be on a different branch of history.
-    if (inReplicationRecovery(opCtx->getServiceContext())) {
+    if (inReplicationRecovery(opCtx->getServiceContext()).load()) {
         LOGV2(5039100,
               "Index build: in replication recovery. Not waiting for last optime before "
               "interceptors to be majority committed",
@@ -1098,6 +1132,14 @@ void IndexBuildsCoordinator::applyStartIndexBuild(OperationContext* opCtx,
 
     IndexBuildsCoordinator::IndexBuildOptions indexBuildOptions;
     indexBuildOptions.applicationMode = applicationMode;
+    if (repl::feature_flags::gReduceMajorityWriteLatency.isEnabled(
+            serverGlobalParams.featureCompatibility.acquireFCVSnapshot())) {
+        // When gReduceMajorityWriteLatency is enabled, the oplog can be written far ahead of oplog
+        // application. In this case, top of oplog will include this applyIndexBuild oplog itself so
+        // we will fall into deadlock if we wait the committedSnapshot to pass the top of oplog. So,
+        // we wait for the opTime of the applyIndexBuild oplog entry.
+        indexBuildOptions.startIndexBuildOpTime = oplogEntry.opTime;
+    }
 
     // If this is an initial syncing node, drop any conflicting ready index specs prior to
     // proceeding with building them.
@@ -2555,7 +2597,9 @@ IndexBuildsCoordinator::PostSetupAction IndexBuildsCoordinator::_setUpIndexBuild
             // contained a write to this collection. We need to be holding the collection lock in X
             // mode so that we ensure that there are not any uncommitted transactions on this
             // collection.
-            replState->setLastOpTimeBeforeInterceptors(getLatestOplogOpTime(opCtx));
+            auto lastOpTimeBeforeInterceptors =
+                indexBuildOptions.startIndexBuildOpTime.value_or(getLatestOplogOpTime(opCtx));
+            replState->setLastOpTimeBeforeInterceptors(lastOpTimeBeforeInterceptors);
         }
     } catch (DBException& ex) {
         // It is fine to let the build continue even if we are interrupted, interrupt check before
@@ -2649,7 +2693,8 @@ void IndexBuildsCoordinator::_runIndexBuild(
         if (!oldLockerDebugInfo.empty()) {
             ss << "; " << oldLockerDebugInfo;
         }
-        locker->setDebugInfo(ss);
+        std::string debugStr = ss;
+        locker->setDebugInfo(std::move(debugStr));
     }
 
     auto status = [&]() {
@@ -2661,7 +2706,7 @@ void IndexBuildsCoordinator::_runIndexBuild(
         return Status::OK();
     }();
 
-    locker->setDebugInfo(oldLockerDebugInfo);
+    locker->setDebugInfo(std::move(oldLockerDebugInfo));
 
     // Ensure the index build is unregistered from the Coordinator and the Promise is set with
     // the build's result so that callers are notified of the outcome.
@@ -3144,8 +3189,8 @@ void IndexBuildsCoordinator::_scanCollectionAndInsertSortedKeysIntoIndex(
     // impact on user operations. Other steps of the index builds such as the draining phase have
     // normal priority because index builds are required to eventually catch-up with concurrent
     // writers. Otherwise we risk never finishing the index build.
-    ScopedAdmissionPriorityForLock priority(shard_role_details::getLocker(opCtx),
-                                            AdmissionContext::Priority::kLow);
+    ScopedAdmissionPriority<ExecutionAdmissionContext> priority(opCtx,
+                                                                AdmissionContext::Priority::kLow);
     {
         indexBuildsSSS.scanCollection.addAndFetch(1);
 
@@ -3186,8 +3231,8 @@ void IndexBuildsCoordinator::_insertSortedKeysIntoIndexForResume(
     // impact on user operations. Other steps of the index builds such as the draining phase have
     // normal priority because index builds are required to eventually catch-up with concurrent
     // writers. Otherwise we risk never finishing the index build.
-    ScopedAdmissionPriorityForLock priority(shard_role_details::getLocker(opCtx),
-                                            AdmissionContext::Priority::kLow);
+    ScopedAdmissionPriority<ExecutionAdmissionContext> priority(opCtx,
+                                                                AdmissionContext::Priority::kLow);
     {
         const NamespaceStringOrUUID dbAndUUID(replState->dbName, replState->collectionUUID);
         AutoGetCollection collLock(opCtx, dbAndUUID, MODE_IX);
@@ -3644,6 +3689,10 @@ std::vector<BSONObj> IndexBuildsCoordinator::prepareSpecListForCreate(
     }
 
     return resultSpecs;
+}
+
+void IndexBuildsCoordinator::_incWaitForCommitQuorum() {
+    indexBuildsSSS.waitForCommitQuorum.addAndFetch(1);
 }
 
 }  // namespace mongo

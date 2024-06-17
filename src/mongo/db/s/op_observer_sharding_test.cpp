@@ -102,7 +102,7 @@ void setCollectionFilteringMetadata(OperationContext* opCtx, CollectionMetadata 
 
 class DocumentKeyStateTest : public ShardServerTestFixture {
 protected:
-    virtual void setUp() override {
+    void setUp() override {
         ShardServerTestFixture::setUp();
 
         OperationShardingState::ScopedAllowImplicitCollectionCreate_UNSAFE unsafeCreateCollection(
@@ -300,6 +300,7 @@ TEST_F(DocumentKeyStateTest, CheckDBVersion) {
                              *autoColl,
                              toInsert.begin(),
                              toInsert.end(),
+                             /*recordIds*/ {},
                              /*fromMigrate=*/std::vector<bool>(toInsert.size(), fromMigrate),
                              /*defaultFromMigrate=*/fromMigrate);
     };

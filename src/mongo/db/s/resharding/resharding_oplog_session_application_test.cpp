@@ -104,26 +104,23 @@ public:
         ServiceContextMongoDTest::setUp();
 
         auto serviceContext = getServiceContext();
-        {
-            auto opCtx = makeOperationContext();
-            auto replCoord = std::make_unique<repl::ReplicationCoordinatorMock>(serviceContext);
-            ASSERT_OK(replCoord->setFollowerMode(repl::MemberState::RS_PRIMARY));
-            repl::ReplicationCoordinator::set(serviceContext, std::move(replCoord));
 
-            repl::createOplog(opCtx.get());
+        auto opCtx = makeOperationContext();
+        auto replCoord = std::make_unique<repl::ReplicationCoordinatorMock>(serviceContext);
+        ASSERT_OK(replCoord->setFollowerMode(repl::MemberState::RS_PRIMARY));
+        repl::ReplicationCoordinator::set(serviceContext, std::move(replCoord));
 
-            auto storageImpl = std::make_unique<repl::StorageInterfaceImpl>();
-            repl::StorageInterface::set(serviceContext, std::move(storageImpl));
+        repl::createOplog(opCtx.get());
 
-            MongoDSessionCatalog::set(
-                serviceContext,
-                std::make_unique<MongoDSessionCatalog>(
-                    std::make_unique<MongoDSessionCatalogTransactionInterfaceImpl>()));
-            auto mongoDSessionCatalog = MongoDSessionCatalog::get(opCtx.get());
-            mongoDSessionCatalog->onStepUp(opCtx.get());
-        }
+        auto storageImpl = std::make_unique<repl::StorageInterfaceImpl>();
+        repl::StorageInterface::set(serviceContext, std::move(storageImpl));
 
-        serverGlobalParams.clusterRole = ClusterRole::ShardServer;
+        MongoDSessionCatalog::set(
+            serviceContext,
+            std::make_unique<MongoDSessionCatalog>(
+                std::make_unique<MongoDSessionCatalogTransactionInterfaceImpl>()));
+        auto mongoDSessionCatalog = MongoDSessionCatalog::get(opCtx.get());
+        mongoDSessionCatalog->onStepUp(opCtx.get());
     }
 
     repl::OpTime insertSessionRecord(OperationContext* opCtx,
@@ -136,8 +133,10 @@ public:
         auto mongoDSessionCatalog = MongoDSessionCatalog::get(opCtx);
         auto ocs = mongoDSessionCatalog->checkOutSession(opCtx);
         auto txnParticipant = TransactionParticipant::get(opCtx);
-        txnParticipant.beginOrContinue(
-            opCtx, {txnNumber}, boost::none /* autocommit */, boost::none /* startTransaction */);
+        txnParticipant.beginOrContinue(opCtx,
+                                       {txnNumber},
+                                       boost::none /* autocommit */,
+                                       TransactionParticipant::TransactionActions::kNone);
 
         auto opTime = [opCtx] {
             WriteUnitOfWork wuow(opCtx);
@@ -170,8 +169,10 @@ public:
         auto mongoDSessionCatalog = MongoDSessionCatalog::get(opCtx);
         auto ocs = mongoDSessionCatalog->checkOutSession(opCtx);
         auto txnParticipant = TransactionParticipant::get(opCtx);
-        txnParticipant.beginOrContinue(
-            opCtx, {txnNumber}, false /* autocommit */, true /* startTransaction */);
+        txnParticipant.beginOrContinue(opCtx,
+                                       {txnNumber},
+                                       false /* autocommit */,
+                                       TransactionParticipant::TransactionActions::kStart);
 
         txnParticipant.unstashTransactionResources(opCtx, "insert");
         txnParticipant.stashTransactionResources(opCtx);
@@ -187,8 +188,10 @@ public:
         auto mongoDSessionCatalog = MongoDSessionCatalog::get(opCtx);
         auto ocs = mongoDSessionCatalog->checkOutSession(opCtx);
         auto txnParticipant = TransactionParticipant::get(opCtx);
-        txnParticipant.beginOrContinue(
-            opCtx, {txnNumber}, false /* autocommit */, true /* startTransaction */);
+        txnParticipant.beginOrContinue(opCtx,
+                                       {txnNumber},
+                                       false /* autocommit */,
+                                       TransactionParticipant::TransactionActions::kStart);
 
         txnParticipant.unstashTransactionResources(opCtx, "prepareTransaction");
 
@@ -220,8 +223,10 @@ public:
         auto mongoDSessionCatalog = MongoDSessionCatalog::get(opCtx);
         auto ocs = mongoDSessionCatalog->checkOutSession(opCtx);
         auto txnParticipant = TransactionParticipant::get(opCtx);
-        txnParticipant.beginOrContinue(
-            opCtx, {txnNumber}, false /* autocommit */, boost::none /* startTransaction */);
+        txnParticipant.beginOrContinue(opCtx,
+                                       {txnNumber},
+                                       false /* autocommit */,
+                                       TransactionParticipant::TransactionActions::kContinue);
 
         txnParticipant.unstashTransactionResources(opCtx, "abortTransaction");
         txnParticipant.abortTransaction(opCtx);
@@ -392,8 +397,10 @@ public:
         auto mongoDSessionCatalog = MongoDSessionCatalog::get(opCtx);
         auto ocs = mongoDSessionCatalog->checkOutSession(opCtx);
         auto txnParticipant = TransactionParticipant::get(opCtx);
-        txnParticipant.beginOrContinue(
-            opCtx, {txnNumber}, boost::none /* autocommit */, boost::none /* startTransaction */);
+        txnParticipant.beginOrContinue(opCtx,
+                                       {txnNumber},
+                                       boost::none /* autocommit */,
+                                       TransactionParticipant::TransactionActions::kNone);
         ASSERT_TRUE(bool(txnParticipant.checkStatementExecuted(opCtx, stmtId)));
     }
 
@@ -406,6 +413,8 @@ private:
     const ShardId _donorShardId{"donor-0"};
     const NamespaceString _oplogBufferNss = NamespaceString::createNamespaceString_forTest(
         NamespaceString::kReshardingLocalOplogBufferPrefix + _donorShardId.toString());
+
+    service_context_test::ShardRoleOverride _shardRole;
 };
 
 TEST_F(ReshardingOplogSessionApplicationTest, IncomingRetryableWriteForNewSession) {

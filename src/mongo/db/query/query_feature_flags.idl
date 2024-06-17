@@ -39,7 +39,7 @@ feature_flags:
     featureFlagOptimizerPlanCache:
       description: "Enables the plan cache for the Cascades-based query optimizer"
       cpp_varname: gFeatureFlagOptimizerPlanCache
-      default: false
+      default: true
       shouldBeFCVGated: false
 
     featureFlagColumnstoreIndexes:
@@ -91,7 +91,8 @@ feature_flags:
     featureFlagQuerySettings:
       description: "Feature flag for enabling persistent query settings"
       cpp_varname: gFeatureFlagQuerySettings
-      default: false
+      default: true
+      version: 8.0
       shouldBeFCVGated: true
 
     featureFlagVectorSearchPublicPreview:
@@ -103,7 +104,7 @@ feature_flags:
     featureFlagSearchInSbe:
       description: "Feature flag to enable $search execution in SBE"
       cpp_varname: gFeatureFlagSearchInSbe
-      default: true
+      default: false
       shouldBeFCVGated: false
 
     featureFlagTimeSeriesInSbe:
@@ -112,10 +113,29 @@ feature_flags:
       default: true
       shouldBeFCVGated: false
 
+    featureFlagSbeBlockHashAgg:
+      description: "Feature flag to enable Block Hash Aggregation for TS queries SBE"
+      cpp_varname: gFeatureFlagSbeBlockHashAgg
+      default: true
+      shouldBeFCVGated: false
+
     featureFlagClassicRuntimePlanningForSbe:
       description: "Enables use of the classic engine's MultiPlanStage and SubplanStage to perform
                     plan selection for queries that use SBE. When disabled, the SBE multi-planner
                     and subplanner are used instead."
       cpp_varname: gFeatureFlagClassicRuntimePlanningForSbe
+      default: true
+      shouldBeFCVGated: false
+
+    featureFlagBinDataConvert:
+      description: "Feature flag to enable BinData support in $convert."
+      cpp_varname: gFeatureFlagBinDataConvert
+      default: true
+      version: 8.0
+      shouldBeFCVGated: true
+
+    featureFlagSearchBatchSizeTuning:
+      description: "Feature flag to enable batchSize tuning for search queries."
+      cpp_varname: gFeatureFlagSearchBatcSizeTuning
       default: false
       shouldBeFCVGated: true

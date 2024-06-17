@@ -53,6 +53,7 @@
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/oid.h"
+#include "mongo/db/admission/execution_admission_context.h"
 #include "mongo/db/auth/authorization_session.h"
 #include "mongo/db/catalog/coll_mod.h"
 #include "mongo/db/catalog/collection.h"
@@ -339,7 +340,7 @@ private:
     void onStepDown() override {}
     void onRollback() override {}
     void onBecomeArbiter() override {}
-    inline std::string getServiceName() const override final {
+    inline std::string getServiceName() const final {
         return "TTLMonitorService";
     }
 };
@@ -363,13 +364,14 @@ MONGO_FAIL_POINT_DEFINE(hangTTLMonitorBetweenPasses);
 // consist of multiple sub-passes. Each sub-pass deletes all the expired documents it can up to
 // 'ttlSubPassTargetSecs'. It is possible for a sub-pass to complete before all expired documents
 // have been removed.
-CounterMetric ttlPasses("ttl.passes");
-CounterMetric ttlSubPasses("ttl.subPasses");
-CounterMetric ttlDeletedDocuments("ttl.deletedDocuments");
+auto& ttlPasses = *MetricBuilder<Counter64>{"ttl.passes"};
+auto& ttlSubPasses = *MetricBuilder<Counter64>{"ttl.subPasses"};
+auto& ttlDeletedDocuments = *MetricBuilder<Counter64>{"ttl.deletedDocuments"};
 
 // Counts the subpasses over TTL collections where the deletes on a collection are increased from
 // 'low' to 'normal' priority.
-CounterMetric ttlCollSubpassesIncreasedPriority("ttl.collSubpassesIncreasedPriority");
+auto& ttlCollSubpassesIncreasedPriority =
+    *MetricBuilder<Counter64>{"ttl.collSubpassesIncreasedPriority"};
 
 using MtabType = TenantMigrationAccessBlocker::BlockerType;
 
@@ -544,8 +546,7 @@ bool TTLMonitor::_doTTLSubPass(
             // 'AdmissionContext::Priority::kNormal' for one index means the priority will be
             // 'normal' for all indexes.
             AdmissionContext::Priority priority = getTTLPriority(uuid, ttlPriorityMap);
-            ScopedAdmissionPriorityForLock priorityGuard(shard_role_details::getLocker(opCtx),
-                                                         priority);
+            ScopedAdmissionPriority<ExecutionAdmissionContext> priorityGuard(opCtx, priority);
 
             for (const auto& info : infos) {
                 bool moreToDelete = _doTTLIndexDelete(opCtx, &ttlCollectionCache, uuid, info);

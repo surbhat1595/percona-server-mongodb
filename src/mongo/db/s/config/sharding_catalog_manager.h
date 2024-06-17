@@ -471,8 +471,7 @@ public:
                            const DatabaseName& dbName,
                            const DatabaseVersion& expectedDbVersion,
                            const ShardId& toShardId,
-                           const SerializationContext& serializationContext,
-                           bool cloneOnlyUntrackedColls);
+                           const SerializationContext& serializationContext);
 
     //
     // Collection Operations
@@ -826,7 +825,6 @@ private:
      * Given a vector of cluster parameters in disk format, sets them locally.
      */
     void _setClusterParametersLocally(OperationContext* opCtx,
-                                      const boost::optional<TenantId>& tenantId,
                                       const std::vector<BSONObj>& parameters);
 
     /**
@@ -895,12 +893,8 @@ private:
                                    std::shared_ptr<std::vector<ChunkType>> chunksToMerge);
 
     struct SplitChunkInTransactionResult {
-        SplitChunkInTransactionResult(const ChunkVersion& currentMaxVersion_,
-                                      std::shared_ptr<std::vector<ChunkType>> newChunks_)
-            : currentMaxVersion(currentMaxVersion_), newChunks(newChunks_) {}
-
         ChunkVersion currentMaxVersion;
-        std::shared_ptr<std::vector<ChunkType>> newChunks;
+        std::vector<ChunkType> newChunks;
     };
 
     /**

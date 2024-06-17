@@ -79,6 +79,9 @@ executor:
       global_vars:
         TestData:
           runningWithBalancer: true
+          fsmPreOverridesLoadedCallback:
+            import("jstests/libs/override_methods/implicitly_retry_on_migration_in_progress.js");
+
   hooks:
   - class: CheckShardFilteringMetadata
   - class: CheckReplDBHashInBackground
@@ -111,3 +114,5 @@ executor:
     num_shards: 2
     num_mongos: 2
     use_auto_bootstrap_procedure: 1
+    enable_balancer: true
+    random_migrations: true

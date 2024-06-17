@@ -115,7 +115,7 @@ private:
         return false;
     }
 
-    std::string getServiceName() const final override {
+    std::string getServiceName() const final {
         return "ServiceA";
     }
 };
@@ -141,7 +141,7 @@ private:
         return true;
     }
 
-    std::string getServiceName() const final override {
+    std::string getServiceName() const final {
         return "ServiceB";
     }
 };
@@ -169,7 +169,7 @@ private:
         return true;
     }
 
-    std::string getServiceName() const final override {
+    std::string getServiceName() const final {
         return "ServiceC";
     }
 
@@ -257,7 +257,7 @@ private:
         return true;
     }
 
-    std::string getServiceName() const final override {
+    std::string getServiceName() const final {
         return "SlowService";
     }
 
@@ -312,6 +312,8 @@ protected:
     // Disable the QueryAnalysisWriter because the fixture doesn't construct the ServiceEntryPoint
     // or the PeriodicRunner.
     FailPointEnableBlock disableQueryAnalysisWriter{"disableQueryAnalysisWriter"};
+    // Disable direct connection checks because this fixture doesn't set up the ShardingState
+    FailPointEnableBlock _skipDirectConnectionChecks{"skipDirectConnectionChecks"};
 };
 
 

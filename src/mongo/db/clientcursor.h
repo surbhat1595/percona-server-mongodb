@@ -48,7 +48,6 @@
 #include "mongo/db/basic_types.h"
 #include "mongo/db/curop.h"
 #include "mongo/db/cursor_id.h"
-#include "mongo/db/cursor_stats.h"
 #include "mongo/db/generic_cursor_gen.h"
 #include "mongo/db/jsobj.h"
 #include "mongo/db/namespace_string.h"
@@ -391,7 +390,7 @@ private:
      * Cursors must be unpinned and deregistered from the CursorManager before they can be
      * destroyed.
      */
-    ~ClientCursor();
+    ~ClientCursor() override;
 
     /**
      * Disposes this ClientCursor's PlanExecutor. Must be called before deleting a ClientCursor to
@@ -644,5 +643,7 @@ void startClientCursorMonitor();
  * getMore requests), so these should only be called from those request paths.
  */
 void collectQueryStatsMongod(OperationContext* opCtx, ClientCursorPin& cursor);
-void collectQueryStatsMongod(OperationContext* opCtx, std::unique_ptr<query_stats::Key> key);
+void collectQueryStatsMongod(OperationContext* opCtx,
+                             const boost::intrusive_ptr<ExpressionContext>& expCtx,
+                             std::unique_ptr<query_stats::Key> key);
 }  // namespace mongo

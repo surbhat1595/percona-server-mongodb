@@ -1,7 +1,10 @@
 /**
  * Tests the basics of the "directShardConnections" serverStatus metrics.
  *
- * @tags: [requires_fcv_73]
+ * @tags: [
+ *   requires_fcv_73,
+ *   temp_disabled_embedded_router_metrics,
+ * ]
  */
 
 import {configureFailPoint} from "jstests/libs/fail_point_util.js";
@@ -99,7 +102,7 @@ assertNoDirectShardConnectionsMetrics(st.s);
 // Use assert.soon since there can be a lag for when the connection is destroyed on the server side.
 assertSoonDirectShardConnectionsMetrics(shard0Primary, currentDirectShardConnections);
 
-// TODO (SERVER-79353): Connect to shard0's primary on the router port and verify that
+// TODO (SERVER-87512): Connect to shard0's primary on the router port and verify that
 // its serverStatus metrics do not contain "directShardConnections" metrics, and that the
 // "directShardConnections" metrics on the shard port does not count this connection.
 

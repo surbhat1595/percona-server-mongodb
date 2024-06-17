@@ -115,7 +115,7 @@ let viewsCommandTests = {
     _configsvrCreateDatabase: {skip: isAnInternalCommand},
     _configsvrDropIndexCatalogEntry: {skip: isAnInternalCommand},
     _configsvrEnsureChunkVersionIsGreaterThan: {skip: isAnInternalCommand},
-    _configsvrGetHistoricalPlacement: {skip: isAnInternalCommand},  // TODO SERVER-73029 remove
+    _configsvrGetHistoricalPlacement: {skip: isAnInternalCommand},
     _configsvrMovePrimary: {skip: isAnInternalCommand},
     _configsvrMoveRange: {skip: isAnInternalCommand},
     _configsvrRefineCollectionShardKey: {skip: isAnInternalCommand},
@@ -157,18 +157,21 @@ let viewsCommandTests = {
     _recvChunkStatus: {skip: isAnInternalCommand},
     _refreshQueryAnalyzerConfiguration: {skip: isAnInternalCommand},
     _shardsvrAbortReshardCollection: {skip: isAnInternalCommand},
+    _shardsvrBeginMigrationBlockingOperation: {skip: isAnInternalCommand},
     _shardsvrChangePrimary: {skip: isAnInternalCommand},
     _shardsvrCheckMetadataConsistency: {skip: isAnInternalCommand},
     _shardsvrCheckMetadataConsistencyParticipant: {skip: isAnInternalCommand},
     _shardsvrCleanupStructuredEncryptionData: {skip: isAnInternalCommand},
     _shardsvrCloneCatalogData: {skip: isAnInternalCommand},
     _shardsvrCompactStructuredEncryptionData: {skip: isAnInternalCommand},
+    _shardsvrConvertToCapped: {skip: isAnInternalCommand},
     _shardsvrCoordinateMultiUpdate: {skip: isAnInternalCommand},
     _shardsvrDropCollection: {skip: isAnInternalCommand},
     _shardsvrDropCollectionIfUUIDNotMatchingWithWriteConcern: {skip: isUnrelated},
     _shardsvrDropCollectionParticipant: {skip: isAnInternalCommand},
     _shardsvrDropIndexCatalogEntryParticipant: {skip: isAnInternalCommand},
     _shardsvrDropIndexes: {skip: isAnInternalCommand},
+    _shardsvrEndMigrationBlockingOperation: {skip: isAnInternalCommand},
     _shardsvrInsertGlobalIndexKey: {skip: isAnInternalCommand},
     _shardsvrDeleteGlobalIndexKey: {skip: isAnInternalCommand},
     _shardsvrWriteGlobalIndexKeys: {skip: isAnInternalCommand},
@@ -206,6 +209,7 @@ let viewsCommandTests = {
     _shardsvrSetAllowMigrations: {skip: isAnInternalCommand},
     _shardsvrSetClusterParameter: {skip: isAnInternalCommand},
     _shardsvrSetUserWriteBlockMode: {skip: isAnInternalCommand},
+    _shardsvrUntrackUnsplittableCollection: {skip: isAnInternalCommand},
     _shardsvrValidateShardKeyCandidate: {skip: isAnInternalCommand},
     _shardsvrCollMod: {skip: isAnInternalCommand},
     _shardsvrCollModParticipant: {skip: isAnInternalCommand},
@@ -219,6 +223,9 @@ let viewsCommandTests = {
     streams_getStats: {skip: isAnInternalCommand},
     streams_testOnlyInsert: {skip: isAnInternalCommand},
     streams_getMetrics: {skip: isAnInternalCommand},
+    streams_updateFeatureFlags: {skip: isAnInternalCommand},
+    streams_testOnlyGetFeatureFlags: {skip: isAnInternalCommand},
+    streams_writeCheckpoint: {skip: isAnInternalCommand},
     _transferMods: {skip: isAnInternalCommand},
     _vectorClockPersist: {skip: isAnInternalCommand},
     abortMoveCollection: {skip: isUnrelated},
@@ -253,9 +260,6 @@ let viewsCommandTests = {
     },
     balancerCollectionStatus: {
         command: {balancerCollectionStatus: "test.view"},
-        setup: function(conn) {
-            assert.commandWorked(conn.adminCommand({enableSharding: "test"}));
-        },
         skipStandalone: true,
         expectFailure: true,
         isAdminCommand: true,
@@ -563,10 +567,7 @@ let viewsCommandTests = {
     },
     moveCollection: {
         command: {moveCollection: "test.view", toShard: "move_collection-rs"},
-        setup: function(conn) {
-            assert.commandWorked(conn.adminCommand({enableSharding: "test"}));
-        },
-        expectedErrorCode: [ErrorCodes.NamespaceNotFound],
+        expectedErrorCode: [ErrorCodes.NamespaceNotFound, ErrorCodes.IllegalOperation],
         skipStandalone: true,
         expectFailure: true,
         isAdminCommand: true,
@@ -641,9 +642,6 @@ let viewsCommandTests = {
     resetPlacementHistory: {skip: isUnrelated},
     reshardCollection: {
         command: {reshardCollection: "test.view", key: {_id: 1}},
-        setup: function(conn) {
-            assert.commandWorked(conn.adminCommand({enableSharding: "test"}));
-        },
         expectedErrorCode: [ErrorCodes.NamespaceNotSharded, ErrorCodes.NamespaceNotFound],
         skipStandalone: true,
         expectFailure: true,
@@ -666,9 +664,6 @@ let viewsCommandTests = {
     revokeRolesFromUser: {skip: isUnrelated},
     setAllowMigrations: {
         command: {setAllowMigrations: "test.view", allowMigrations: false},
-        setup: function(conn) {
-            assert.commandWorked(conn.adminCommand({enableSharding: "test"}));
-        },
         expectedErrorCode: ErrorCodes.NamespaceNotSharded,
         skipStandalone: true,
         expectFailure: true,
@@ -695,9 +690,6 @@ let viewsCommandTests = {
     setUserWriteBlockMode: {skip: isUnrelated},
     shardCollection: {
         command: {shardCollection: "test.view", key: {_id: 1}},
-        setup: function(conn) {
-            assert.commandWorked(conn.adminCommand({enableSharding: "test"}));
-        },
         skipStandalone: true,
         expectFailure: true,
         isAdminCommand: true,
@@ -740,6 +732,7 @@ let viewsCommandTests = {
     startRecordingTraffic: {skip: isUnrelated},
     startSession: {skip: isAnInternalCommand},
     stopRecordingTraffic: {skip: isUnrelated},
+    sysprofile: {skip: isAnInternalCommand},
     testDeprecation: {skip: isAnInternalCommand},
     testDeprecationInVersion2: {skip: isAnInternalCommand},
     testInternalTransactions: {skip: isAnInternalCommand},
@@ -754,9 +747,6 @@ let viewsCommandTests = {
     transitionToShardedCluster: {skip: isUnrelated},
     unshardCollection: {
         command: {unshardCollection: "test.view", toShard: "unshard_collection-rs"},
-        setup: function(conn) {
-            assert.commandWorked(conn.adminCommand({enableSharding: "test"}));
-        },
         expectedErrorCode: [ErrorCodes.NamespaceNotSharded, ErrorCodes.NamespaceNotFound],
         skipStandalone: true,
         expectFailure: true,

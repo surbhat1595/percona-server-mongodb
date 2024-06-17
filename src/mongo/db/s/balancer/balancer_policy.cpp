@@ -196,7 +196,7 @@ Status ZoneInfo::addRangeToZone(const ZoneRange& range) {
 
     // Check for partial overlap
     if (minIntersect != maxIntersect) {
-        invariant(minIntersect != _zoneRanges.end());
+        tassert(8245219, "minIntersect not found", minIntersect != _zoneRanges.end());
         const auto& intersectingRange =
             (SimpleBSONObjComparator::kInstance.evaluate(minIntersect->second.min < range.max))
             ? minIntersect->second
@@ -217,7 +217,9 @@ Status ZoneInfo::addRangeToZone(const ZoneRange& range) {
     if (minIntersect != _zoneRanges.end()) {
         const ZoneRange& nextRange = minIntersect->second;
         if (SimpleBSONObjComparator::kInstance.evaluate(range.max > nextRange.min)) {
-            invariant(SimpleBSONObjComparator::kInstance.evaluate(range.max < nextRange.max));
+            tassert(8245220,
+                    "Range max is greater than or equal to next range's max",
+                    SimpleBSONObjComparator::kInstance.evaluate(range.max < nextRange.max));
             return {ErrorCodes::RangeOverlapConflict,
                     str::stream() << "Zone range: " << range.toString()
                                   << " is overlapping with existing: " << nextRange.toString()};
@@ -368,15 +370,15 @@ int getRandomIndex(int max) {
 }
 
 // Returns a randomly chosen pair of source -> destination shards for testing.
-boost::optional<MigrateInfo> chooseRandomMigration(stdx::unordered_set<ShardId>* availableShards,
-                                                   const DistributionStatus& distribution) {
+boost::optional<MigrateInfo> chooseRandomMigration(
+    const stdx::unordered_set<ShardId>& availableShards, const DistributionStatus& distribution) {
 
-    if (availableShards->size() < 2) {
+    if (availableShards.size() < 2) {
         return boost::none;
     }
 
     std::vector<ShardId> shards;
-    std::copy(availableShards->begin(), availableShards->end(), std::back_inserter(shards));
+    std::copy(availableShards.begin(), availableShards.end(), std::back_inserter(shards));
     std::default_random_engine rng(time(nullptr));
     std::shuffle(shards.begin(), shards.end(), rng);
 
@@ -399,7 +401,7 @@ boost::optional<MigrateInfo> chooseRandomMigration(stdx::unordered_set<ShardId>*
     if (!donorShard) {
         return boost::none;
     }
-    invariant(recipientShard);
+    tassert(8245221, "Recipient is invalid", recipientShard);
 
     LOGV2_DEBUG(21880,
                 1,
@@ -425,6 +427,8 @@ boost::optional<MigrateInfo> chooseRandomMigration(stdx::unordered_set<ShardId>*
         return rndChunk;
     }();
 
+    tassert(8245222, "randomChunk's shard is invalid", randomChunk.getShard().isValid());
+
     return MigrateInfo{
         recipientShard.get(), distribution.nss(), randomChunk, ForceJumbo::kDoNotForce};
 }
@@ -442,14 +446,18 @@ MigrateInfosWithReason BalancerPolicy::balance(
         !distribution.nss().isConfigDB()) {
         LOGV2_DEBUG(21881, 1, "balancerShouldReturnRandomMigrations failpoint is set");
 
-        auto migration = chooseRandomMigration(availableShards, distribution);
+        auto migration = chooseRandomMigration(*availableShards, distribution);
 
         if (migration) {
             migrations.push_back(migration.get());
             firstReason = MigrationReason::chunksImbalance;
 
-            invariant(availableShards->erase(migration.get().from));
-            invariant(availableShards->erase(migration.get().to));
+            tassert(8245223,
+                    "Migration's from shard does not exist in available shards",
+                    availableShards->erase(migration.get().from));
+            tassert(8245224,
+                    "Migration's to shard does not exist in available shards",
+                    availableShards->erase(migration.get().to));
         }
 
         return std::make_pair(std::move(migrations), firstReason);
@@ -483,18 +491,19 @@ MigrateInfosWithReason BalancerPolicy::balance(
                             shardStats, collDataSizeInfo, zoneName, *availableShards);
                         if (!to.isValid()) {
                             if (migrations.empty()) {
-                                LOGV2_WARNING(
-                                    21889,
-                                    "Chunk is on a draining shard, but no appropriate "
-                                    "recipient found",
-                                    "chunk"_attr =
-                                        redact(makeChunkType(
-                                                   distribution.getChunkManager().getUUID(), chunk)
-                                                   .toString()));
+                                LOGV2_DEBUG(21889,
+                                            3,
+                                            "Chunk is on a draining shard, but no appropriate "
+                                            "recipient found",
+                                            "chunk"_attr = redact(
+                                                makeChunkType(
+                                                    distribution.getChunkManager().getUUID(), chunk)
+                                                    .toString()));
                             }
                             return true;  // continue
                         }
-                        invariant(to != stat.shardId);
+                        tassert(
+                            8245225, "Destination shard is a draining shard", to != stat.shardId);
 
                         migrations.emplace_back(
                             to,
@@ -512,8 +521,12 @@ MigrateInfosWithReason BalancerPolicy::balance(
                             firstReason = MigrationReason::drain;
                         }
 
-                        invariant(availableShards->erase(stat.shardId));
-                        invariant(availableShards->erase(to));
+                        tassert(8245226,
+                                "Migration's source shard does not exist in available shards",
+                                availableShards->erase(stat.shardId));
+                        tassert(8245227,
+                                "Migration's target shard does not exist in available shards",
+                                availableShards->erase(to));
                         return false;  // break
                     });
 
@@ -569,8 +582,9 @@ MigrateInfosWithReason BalancerPolicy::balance(
                             shardStats, collDataSizeInfo, zoneName, *availableShards);
                         if (!to.isValid()) {
                             if (migrations.empty()) {
-                                LOGV2_WARNING(
+                                LOGV2_DEBUG(
                                     21892,
+                                    3,
                                     "Chunk violates zone, but no appropriate recipient found",
                                     "chunk"_attr =
                                         redact(makeChunkType(
@@ -580,7 +594,7 @@ MigrateInfosWithReason BalancerPolicy::balance(
                             }
                             return true;  // continue
                         }
-                        invariant(to != stat.shardId);
+                        tassert(8245228, "Destination is the starting shard", to != stat.shardId);
 
                         migrations.emplace_back(to,
                                                 chunk.getShardId(),
@@ -597,8 +611,12 @@ MigrateInfosWithReason BalancerPolicy::balance(
                             firstReason = MigrationReason::zoneViolation;
                         }
 
-                        invariant(availableShards->erase(stat.shardId));
-                        invariant(availableShards->erase(to));
+                        tassert(8245229,
+                                "Migration's from shard does not exist in available shards",
+                                availableShards->erase(stat.shardId));
+                        tassert(8245230,
+                                "Migration's to shard does not exist in available shards",
+                                availableShards->erase(to));
                         return false;  // break
                     });
 
@@ -680,30 +698,6 @@ MigrateInfosWithReason BalancerPolicy::balance(
     return std::make_pair(std::move(migrations), firstReason);
 }
 
-boost::optional<MigrateInfo> BalancerPolicy::balanceSingleChunk(
-    const ChunkType& chunk,
-    const ShardStatisticsVector& shardStats,
-    const DistributionStatus& distribution,
-    const CollectionDataSizeInfoForBalancing& collDataSizeInfo) {
-    const auto& zone = distribution.getZoneInfo().getZoneForRange(chunk.getRange());
-
-    stdx::unordered_set<ShardId> availableShards;
-    std::transform(shardStats.begin(),
-                   shardStats.end(),
-                   std::inserter(availableShards, availableShards.end()),
-                   [](const ClusterStatistics::ShardStatistics& shardStatistics) -> ShardId {
-                       return shardStatistics.shardId;
-                   });
-
-    const auto [newShardId, _] = _getLeastLoadedReceiverShard(
-        shardStats, collDataSizeInfo, zone, stdx::unordered_set<ShardId>());
-    if (!newShardId.isValid() || newShardId == chunk.getShard()) {
-        return boost::optional<MigrateInfo>();
-    }
-
-    return MigrateInfo(newShardId, distribution.nss(), chunk, ForceJumbo::kDoNotForce);
-}
-
 bool BalancerPolicy::_singleZoneBalanceBasedOnDataSize(
     const ShardStatisticsVector& shardStats,
     const DistributionStatus& distribution,
@@ -779,8 +773,12 @@ bool BalancerPolicy::_singleZoneBalanceBasedOnDataSize(
                                      chunk.getLastmod(),
                                      forceJumbo,
                                      collDataSizeInfo.maxChunkSizeBytes);
-            invariant(availableShards->erase(chunk.getShardId()));
-            invariant(availableShards->erase(toShardId));
+            tassert(8245231,
+                    "Source shard does not exist in available shards",
+                    availableShards->erase(chunk.getShardId()));
+            tassert(8245232,
+                    "Target shard does not exist in available shards",
+                    availableShards->erase(toShardId));
             return false;  // break
         });
 
@@ -809,7 +807,7 @@ MigrateInfo::MigrateInfo(const ShardId& a_to,
                          const ForceJumbo a_forceJumbo,
                          boost::optional<int64_t> maxChunkSizeBytes)
     : nss(a_nss), uuid(a_chunk.getCollectionUUID()) {
-    invariant(a_to.isValid());
+    tassert(8245233, "Target shard is invalid", a_to.isValid());
 
     to = a_to;
 
@@ -837,8 +835,8 @@ MigrateInfo::MigrateInfo(const ShardId& a_to,
       version(a_version),
       forceJumbo(a_forceJumbo),
       optMaxChunkSizeBytes(maxChunkSizeBytes) {
-    invariant(a_to.isValid());
-    invariant(a_from.isValid());
+    tassert(8245234, "Target shard is invalid", a_to.isValid());
+    tassert(8245235, "Source shard is invalid", a_from.isValid());
 
     to = a_to;
     from = a_from;

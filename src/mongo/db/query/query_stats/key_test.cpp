@@ -48,7 +48,7 @@ static const NamespaceString kDefaultTestNss =
 
 struct DummyShapeSpecificComponents : public query_shape::CmdSpecificShapeComponents {
     DummyShapeSpecificComponents(){};
-    void HashValue(absl::HashState state) const {}
+    void HashValue(absl::HashState state) const override {}
     size_t size() const final {
         return sizeof(DummyShapeSpecificComponents);
     }
@@ -76,8 +76,8 @@ public:
 struct DummyKeyComponents : public SpecificKeyComponents {
     DummyKeyComponents(){};
 
-    void HashValue(absl::HashState state) const {}
-    size_t size() const {
+    void HashValue(absl::HashState state) const override {}
+    size_t size() const override {
         return sizeof(DummyKeyComponents);
     }
 };
@@ -94,11 +94,11 @@ public:
         : Key(opCtx, std::move(queryShape), hint, readConcern, maxTimeMS, collectionType) {
         components = dummyComponents;
     }
-    const SpecificKeyComponents& specificComponents() const {
+    const SpecificKeyComponents& specificComponents() const override {
         return components;
     };
     void appendCommandSpecificComponents(BSONObjBuilder& bob,
-                                         const SerializationOptions& opts) const {};
+                                         const SerializationOptions& opts) const override{};
     DummyKeyComponents components;
 };
 class UniversalKeyTest : public ServiceContextTest {};
@@ -135,7 +135,8 @@ TEST_F(UniversalKeyTest, SizeOfUniversalComponents) {
 
     const auto minimumUniversalKeyComponentSize = sizeof(std::unique_ptr<query_shape::Shape>) +
         (6 * sizeof(BSONObj)) + sizeof(std::unique_ptr<APIParameters>) + sizeof(BSONElement) +
-        sizeof(query_shape::CollectionType) + sizeof(unsigned long) + 1 /*HasField*/;
+        sizeof(query_shape::CollectionType) + sizeof(TenantId) + sizeof(unsigned long) +
+        1 /*HasField*/;
     ASSERT_GTE(sizeof(UniversalKeyComponents), minimumUniversalKeyComponentSize);
     ASSERT_LTE(sizeof(UniversalKeyComponents), minimumUniversalKeyComponentSize + 8 /*padding*/);
 

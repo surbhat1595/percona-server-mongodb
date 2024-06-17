@@ -1,17 +1,22 @@
-import atexit
-import functools
+import errno
+import getpass
+import hashlib
+from io import StringIO
 import json
 import os
+import distro
 import platform
 import queue
 import shlex
 import shutil
 import stat
 import subprocess
+import textwrap
 import threading
-import time
 from typing import List, Dict, Set, Tuple, Any
 import urllib.request
+import requests
+from retry import retry
 import sys
 
 import SCons
@@ -22,6 +27,12 @@ import mongo.generators as mongo_generators
 _SUPPORTED_PLATFORM_MATRIX = [
     "linux:arm64:gcc",
     "linux:arm64:clang",
+    "linux:amd64:gcc",
+    "linux:amd64:clang",
+    "linux:ppc64le:gcc",
+    "linux:ppc64le:clang",
+    "linux:s390x:gcc",
+    "linux:s390x:clang",
     "windows:amd64:msvc",
     "macos:amd64:clang",
     "macos:arm64:clang",
@@ -34,6 +45,38 @@ _SANITIZER_MAP = {
     "leak": "lsan",
     "thread": "tsan",
     "undefined": "ubsan",
+}
+
+_DISTRO_PATTERN_MAP = {
+    "Ubuntu 18*": "ubuntu18",
+    "Ubuntu 20*": "ubuntu20",
+    "Ubuntu 22*": "ubuntu22",
+    "Amazon Linux 2": "amazon_linux_2",
+    "Amazon Linux 2023": "amazon_linux_2023",
+    "Debian GNU/Linux 10": "debian10",
+    "Debian GNU/Linux 12": "debian12",
+    "Red Hat Enterprise Linux Server 7*": "rhel7",
+    "Red Hat Enterprise Linux 7*": "rhel7",
+    "Red Hat Enterprise Linux 8*": "rhel8",
+    "Red Hat Enterprise Linux 9*": "rhel9",
+    "SLES 15*": "suse15",
+}
+
+_S3_HASH_MAPPING = {
+    "https://mdb-build-public.s3.amazonaws.com/bazel-binaries/bazel-6.4.0-ppc64le":
+        "dd21c75817533ff601bf797e64f0eb2f7f6b813af26c829f0bda30e328caef46",
+    "https://mdb-build-public.s3.amazonaws.com/bazel-binaries/bazel-6.4.0-s390x":
+        "6d72eabc1789b041bbe4cfc033bbac4491ec9938ef6da9899c0188ecf270a7f4",
+    "https://mdb-build-public.s3.amazonaws.com/bazelisk-binaries/v1.19.0/bazelisk-darwin-amd64":
+        "f2ba5f721a995b54bab68c6b76a340719888aa740310e634771086b6d1528ecd",
+    "https://mdb-build-public.s3.amazonaws.com/bazelisk-binaries/v1.19.0/bazelisk-darwin-arm64":
+        "69fa21cd2ccffc2f0970c21aa3615484ba89e3553ecce1233a9d8ad9570d170e",
+    "https://mdb-build-public.s3.amazonaws.com/bazelisk-binaries/v1.19.0/bazelisk-linux-amd64":
+        "d28b588ac0916abd6bf02defb5433f6eddf7cba35ffa808eabb65a44aab226f7",
+    "https://mdb-build-public.s3.amazonaws.com/bazelisk-binaries/v1.19.0/bazelisk-linux-arm64":
+        "861a16ba9979613e70bd3d2f9d9ab5e3b59fe79471c5753acdc9c431ab6c9d94",
+    "https://mdb-build-public.s3.amazonaws.com/bazelisk-binaries/v1.19.0/bazelisk-windows-amd64.exe":
+        "d04555245a99dfb628e33da24e2b9198beb8f46d7e7661c313eb045f6a59f5e4",
 }
 
 
@@ -57,8 +100,14 @@ class Globals:
     # bazel command line with options, but not targets
     bazel_base_build_command: List[str] = None
 
-    # Flag to signal that the bazel build thread should die and/or is not running
-    kill_bazel_thread_flag: bool = False
+    # environment variables to set when invoking bazel
+    bazel_env_variables: Dict[str, str] = {}
+
+    # Flag to signal that scons is ready to build, but needs to wait on bazel
+    waiting_on_bazel_flag: bool = False
+
+    # a IO object to hold the bazel output in place of stdout
+    bazel_thread_terminal_output = StringIO()
 
 
 def bazel_debug(msg: str):
@@ -86,11 +135,11 @@ def convert_scons_node_to_bazel_target(scons_node: SCons.Node.FS.File) -> str:
                        source=scons_node.sources) if scons_node.has_builder() else ""
 
     # the shared archive builder hides the prefix added by their parent builder, set it manually
-    if scons_node.name.endswith(".so.a"):
+    if scons_node.name.endswith(".so.a") or scons_node.name.endswith(".dylib.a"):
         prefix = "lib"
 
     # now get just the file name without and prefix or suffix i.e.: libcommands.so -> 'commands'
-    prefix_suffix_removed = os.path.splitext(scons_node.name[len(prefix):])[0]
+    prefix_suffix_removed = scons_node.name[len(prefix):].split(".")[0]
 
     # i.e.: //src/mongo/db:commands>
     return f"//{bazel_dir}:{prefix_suffix_removed}"
@@ -102,6 +151,9 @@ def bazel_target_emitter(
     """This emitter will map any scons outputs to bazel outputs so copy can be done later."""
 
     for t in target:
+        # Bug in Windows shared library emitter returns a string rather than a node
+        if type(t) == str:
+            t = env.arg2nodes(t)[0]
 
         # normally scons emitters conveniently build-ify the target paths so it will
         # reference the output location, but we actually want the node path
@@ -130,63 +182,18 @@ def bazel_target_emitter(
 
 def bazel_builder_action(env: SCons.Environment.Environment, target: List[SCons.Node.Node],
                          source: List[SCons.Node.Node]):
-    def check_bazel_target_done(bazel_target: str) -> bool:
-        """
-        Check the done queue and pull off the desired target if it exists.
-
-        bazel_target: the target we are looking for
-        return: True to stop waiting, False if we should keep waiting
-
-        Note that this function will signal True to indicate a shutdown/failure case. SCons main build
-        thread will be waiting for this action to complete before shutting down, so we need to
-        to stop being blocked so scons will proceed to shutdown.
-        """
-
-        if bazel_target in Globals.bazel_targets_done:
-            bazel_debug(f"Removing {bazel_target} from done targets: {Globals.bazel_targets_done}")
-            Globals.bazel_targets_done.remove(bazel_target)
-            return True
-
-        # Because of the tight while loop this function is used in, we put
-        # an exit condition here.
-        if Globals.kill_bazel_thread_flag:
-            return True
-
-        return False
-
-    bazel_output = Globals.scons2bazel_targets[target[0].path.replace('\\', '/')]['bazel_output']
-    bazel_target = Globals.scons2bazel_targets[target[0].path.replace('\\', '/')]['bazel_target']
-    bazel_debug(f"Checking if {bazel_output} is done...")
-
-    # put the target into the work queue the poll until its
-    # been placed into the done queue
-    bazel_debug(f"A builder put {bazel_target} into the work queue.")
-    pred = functools.partial(check_bazel_target_done, bazel_target)
-    start_time = time.time()
-    Globals.bazel_targets_work_queue.put(bazel_target)
-
-    bazel_debug(f"Waiting to remove {bazel_target} from done targets.")
-    with Globals.bazel_target_done_CV:
-        Globals.bazel_target_done_CV.wait_for(predicate=pred)
-
-    if Globals.kill_bazel_thread_flag:
-        # scons expects actions to return non-zero value on failure
-        return 1
-
-    bazel_debug(
-        f"Bazel done with {bazel_target} in {'{0:.2f}'.format(time.time() - start_time)} seconds.")
 
     # now copy all the targets out to the scons tree, note that target is a
     # list of nodes so we need to stringify it for copyfile
     for t in target:
         s = Globals.scons2bazel_targets[t.path.replace('\\', '/')]['bazel_output']
-        bazel_debug(f"Copying {s} from bazel tree to {t} in the scons tree.")
-        shutil.copyfile(s, str(t))
+        shutil.copy(s, str(t))
+        os.chmod(str(t), os.stat(str(t)).st_mode | stat.S_IWUSR)
 
 
 BazelCopyOutputsAction = SCons.Action.FunctionAction(
     bazel_builder_action,
-    {"cmdstr": "Asking bazel to build $TARGET", "varlist": ['BAZEL_FLAGS_STR']},
+    {"cmdstr": "Copying $TARGET from bazel build directory.", "varlist": ['BAZEL_FLAGS_STR']},
 )
 
 
@@ -219,95 +226,97 @@ def ninja_bazel_builder(env: SCons.Environment.Environment, _dup_env: SCons.Envi
     }
 
 
-def bazel_batch_build_thread(log_dir: str) -> None:
-    """This thread continuelly runs bazel when ever new targets are found."""
+def bazel_build_thread_func(log_dir: str, verbose: bool) -> None:
+    """This thread runs the bazel build up front."""
 
-    # the set of targets which bazel has already built.
-    bazel_built_targets = set()
-    bazel_batch_count = 0
-
-    print_start_time = time.time()
-    start_time = time.time()
-
+    done_with_temp = False
     os.makedirs(log_dir, exist_ok=True)
 
+    if verbose:
+        extra_args = []
+    else:
+        extra_args = ["--output_filter=DONT_MATCH_ANYTHING"]
+
+    bazel_cmd = Globals.bazel_base_build_command + extra_args + ['//src/...']
+    bazel_debug(f"BAZEL_COMMAND: {' '.join(bazel_cmd)}")
+    print("Starting bazel build thread...")
+
     try:
-        while not Globals.kill_bazel_thread_flag:
+        import pty
+        parent_fd, child_fd = pty.openpty()  # provide tty
+        bazel_proc = subprocess.Popen(bazel_cmd, stdin=child_fd, stdout=child_fd,
+                                      stderr=subprocess.STDOUT,
+                                      env={**os.environ.copy(), **Globals.bazel_env_variables})
 
-            # SCons must (try to) make sure that all currently running build tasks come to compeletion,
-            # so that it can correctly transcribe the state of a given node to the SConsign file.
-            # Therefore it takes control over many signals which would end scons process (i.e. SIGINT),
-            # we need to make sure that we break out of this loop and free our CVs which the scons
-            # main build thread will be waiting on to complete, otherwise that will cause scons to
-            # wait forever.
-            if SCons.Script.Main.jobs and SCons.Script.Main.jobs.were_interrupted():
-                Globals.kill_bazel_thread_flag = True
-                bazel_debug("TaskMaster not running, shutting down bazel thread.")
-                break
-
-            if time.time() - print_start_time > 10.0:
-                print_start_time = time.time()
-                bazel_debug(
-                    f"Bazel batch thread has built {len(bazel_built_targets)} targets so far.")
-
-            targets_to_build = set()
-            while not Globals.bazel_targets_work_queue.empty():
-                # this thread should be the only thing pulling off the work queue, so if it was
-                # not empty, it must still be not empty when we perform the get. We intend
-                # for the get_nowait to raise Empty exception as a hard fail if previously
-                # stated assumption was incorrect.
-                target = Globals.bazel_targets_work_queue.get_nowait()
-                if target not in bazel_built_targets:
-                    bazel_debug(f"Bazel batch thread found {target} to build")
-                    bazel_built_targets.add(target)
-                    targets_to_build.add(target)
-
-            if targets_to_build:
-                bazel_debug(
-                    f"BAZEL_COMMAND: {Globals.bazel_base_build_command + list(targets_to_build)}")
-                start_time = time.time()
-                bazel_proc = subprocess.run(
-                    Globals.bazel_base_build_command + list(targets_to_build),
-                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
-                bazel_debug(
-                    f"Bazel build completed in {'{0:.2f}'.format(time.time() - start_time)} seconds and built {targets_to_build}."
-                )
-
-                # If we have a failure always print the bazel output, if
-                # bazel succeeded to build, only print output with bazel debug
-                # on.
-                if bazel_proc.returncode:
-                    print(bazel_proc.stdout)
+        os.close(child_fd)
+        try:
+            while True:
+                try:
+                    data = os.read(parent_fd, 512)
+                except OSError as e:
+                    if e.errno != errno.EIO:
+                        raise
+                    break  # EIO means EOF on some systems
                 else:
-                    bazel_debug(bazel_proc.stdout)
+                    if not data:  # EOF
+                        break
 
-                bazel_batch_count += 1
-                with open(os.path.join(log_dir, f"bazel_build_{bazel_batch_count}.log"), "w") as f:
-                    f.write(' '.join(Globals.bazel_base_build_command + list(targets_to_build)))
-                    f.write(bazel_proc.stdout)
+                    if Globals.waiting_on_bazel_flag:
+                        if not done_with_temp:
+                            done_with_temp = True
+                            Globals.bazel_thread_terminal_output.seek(0)
+                            sys.stdout.write(Globals.bazel_thread_terminal_output.read())
+                            Globals.bazel_thread_terminal_output = None
+                        sys.stdout.write(data.decode())
+                    else:
+                        Globals.bazel_thread_terminal_output.write(data.decode())
+        finally:
+            os.close(parent_fd)
+            if bazel_proc.poll() is None:
+                bazel_proc.kill()
+            bazel_proc.wait()
 
-                for t in targets_to_build:
-                    # Always put the targets we attempt to build into done
-                    # even if bazel failed to build. If bazel failed to build,
-                    # scons will report the particular target failed when it goes
-                    # to copy it out of the bazel tree.
-                    # NOTE: it would be nice if we had a way to bubble up the particular
-                    # bazel target log, this would require some way to
-                    # parse it from bazel logs.
-                    Globals.bazel_targets_done.add(t)
-                    bazel_debug(f"Bazel batch thread adding {t} to done queue.")
+            if bazel_proc.returncode != 0:
+                print("ERROR: Bazel build failed:")
+                stdout = ""
 
-                with Globals.bazel_target_done_CV:
-                    Globals.bazel_target_done_CV.notify_all()
+                if not done_with_temp:
+                    Globals.bazel_thread_terminal_output.seek(0)
+                    stdout += Globals.bazel_thread_terminal_output.read()
+                    Globals.bazel_thread_terminal_output = None
+                    print(stdout)
 
+                raise subprocess.CalledProcessError(bazel_proc.returncode, bazel_cmd, stdout, "")
+
+    except ImportError:
+        bazel_proc = subprocess.Popen(bazel_cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                      env={**os.environ.copy(), **Globals.bazel_env_variables})
+        while True:
+            line = bazel_proc.stdout.readline()
+            if not line:
+                break
+            if Globals.waiting_on_bazel_flag:
+                if not done_with_temp:
+                    done_with_temp = True
+                    Globals.bazel_thread_terminal_output.seek(0)
+                    sys.stdout.write(Globals.bazel_thread_terminal_output.read())
+                    Globals.bazel_thread_terminal_output = None
+                sys.stdout.write(line.decode())
             else:
-                time.sleep(1)
+                Globals.bazel_thread_terminal_output.write(line.decode())
 
-    except Exception as exc:
-        Globals.kill_bazel_thread_flag = True
-        with Globals.bazel_target_done_CV:
-            Globals.bazel_target_done_CV.notify_all()
-        raise exc
+        stdout, stderr = bazel_proc.communicate()
+
+        if bazel_proc.returncode != 0:
+            print("ERROR: Bazel build failed:")
+
+            if not done_with_temp:
+                Globals.bazel_thread_terminal_output.seek(0)
+                stdout += Globals.bazel_thread_terminal_output.read()
+                Globals.bazel_thread_terminal_output = None
+                print(stdout)
+
+            raise subprocess.CalledProcessError(bazel_proc.returncode, bazel_cmd, stdout, stderr)
 
 
 def create_bazel_builder(builder: SCons.Builder.Builder) -> SCons.Builder.Builder:
@@ -352,6 +361,91 @@ def create_idlc_builder(env: SCons.Environment.Environment) -> None:
     env['BUILDERS']['BazelIdlc'] = create_bazel_builder(env['BUILDERS']["Idlc"])
 
 
+def validate_remote_execution_certs(env: SCons.Environment.Environment) -> bool:
+    running_in_evergreen = os.environ.get("CI")
+
+    if running_in_evergreen and not os.path.exists("./engflow.cert"):
+        print(
+            "ERROR: ./engflow.cert not found, which is required to build in evergreen without BAZEL_FLAGS=--config=local set. Please reach out to #server-dev-platform for help."
+        )
+        return False
+
+    if not running_in_evergreen and not os.path.exists(
+            f"/home/{getpass.getuser()}/.engflow/creds/engflow.crt"):
+        # Temporary logic to copy over the credentials for users that ran the installation steps using the old directory (/engflow/).
+        if os.path.exists("/engflow/creds/engflow.crt") and os.path.exists(
+                "/engflow/creds/engflow.key"):
+            print(
+                "Moving EngFlow credentials from the legacy directory (/engflow/) to the new directory (~/.engflow/)."
+            )
+            try:
+                os.makedirs(f"/home/{getpass.getuser()}/.engflow/creds/", exist_ok=True)
+                shutil.move("/engflow/creds/engflow.crt",
+                            f"/home/{getpass.getuser()}/.engflow/creds/engflow.crt")
+                shutil.move("/engflow/creds/engflow.key",
+                            f"/home/{getpass.getuser()}/.engflow/creds/engflow.key")
+                with open(f"/home/{getpass.getuser()}/.bazelrc", "a") as bazelrc:
+                    bazelrc.write(
+                        f"build --tls_client_certificate=/home/{getpass.getuser()}/.engflow/creds/engflow.crt\n"
+                    )
+                    bazelrc.write(
+                        f"build --tls_client_key=/home/{getpass.getuser()}/.engflow/creds/engflow.key\n"
+                    )
+            except OSError as exc:
+                print(exc)
+                print(
+                    "Failed to update cert location, please move them manually. Otherwise you can pass 'BAZEL_FLAGS=\"--config=local\"' on the SCons command line."
+                )
+
+            return True
+
+        # Pull the external hostname of the system from aws
+        try:
+            response = requests.get(
+                "http://instance-data.ec2.internal/latest/meta-data/public-hostname")
+            status_code = response.status_code
+        except Exception as _:
+            status_code = 500
+        if status_code == 200:
+            public_hostname = response.text
+        else:
+            public_hostname = "{{REPLACE_WITH_WORKSTATION_HOST_NAME}}"
+        print(
+            f"""\nERROR: ~/.engflow/creds/engflow.crt not found. Please reach out to #server-dev-platform if you need help with the steps below.
+
+(If the below steps are not working, remote execution can be disabled by passing BAZEL_FLAGS=--config=local at the end of your scons.py invocation)
+
+Please complete the following steps to generate a certificate:
+- (If not in the Engineering org) Request access to the MANA group https://mana.corp.mongodbgov.com/resources/659ec4b9bccf3819e5608712
+- Go to https://sodalite.cluster.engflow.com/gettingstarted (Uses mongodbcorp.okta.com auth URL)
+- Login with OKTA, then click the \"GENERATE AND DOWNLOAD MTLS CERTIFICATE\" button
+  - (If logging in with OKTA doesn't work) Login with Google using your MongoDB email, then click the "GENERATE AND DOWNLOAD MTLS CERTIFICATE" button
+- On your local system (usually your MacBook), open a terminal and run:
+
+ZIP_FILE=~/Downloads/engflow-mTLS.zip
+
+curl https://raw.githubusercontent.com/mongodb/mongo/master/buildscripts/setup_engflow_creds.sh -o setup_engflow_creds.sh
+chmod +x ./setup_engflow_creds.sh
+./setup_engflow_creds.sh {getpass.getuser()} {public_hostname} $ZIP_FILE\n""")
+        return False
+
+    if not running_in_evergreen and \
+        (not os.access(f"/home/{getpass.getuser()}/.engflow/creds/engflow.crt", os.R_OK) or
+        not os.access(f"/home/{getpass.getuser()}/.engflow/creds/engflow.key", os.R_OK)):
+        print(
+            "Invalid permissions set on ~/.engflow/creds/engflow.crt or ~/.engflow/creds/engflow.key"
+        )
+        print("Please run the following command to fix the permissions:\n")
+        print(
+            f"sudo chown {getpass.getuser()}:{getpass.getuser()} /home/{getpass.getuser()}/.engflow/creds/engflow.crt /home/{getpass.getuser()}/.engflow/creds/engflow.key"
+        )
+        print(
+            f"sudo chmod 600 /home/{getpass.getuser()}/.engflow/creds/engflow.crt /home/{getpass.getuser()}/.engflow/creds/engflow.key"
+        )
+        return False
+    return True
+
+
 def generate_bazel_info_for_ninja(env: SCons.Environment.Environment) -> None:
     # create a json file which contains all the relevant info from this generation
     # that bazel will need to construct the correct command line for any given targets
@@ -384,6 +478,41 @@ def generate_bazel_info_for_ninja(env: SCons.Environment.Environment) -> None:
     env["NINJA_BAZEL_INPUTS"] = ninja_bazel_ins
 
 
+@retry(tries=5, delay=3)
+def download_path_with_retry(*args, **kwargs):
+    urllib.request.urlretrieve(*args, **kwargs)
+
+
+def sha256_file(filename: str) -> str:
+    sha256_hash = hashlib.sha256()
+    with open(filename, "rb") as f:
+        for block in iter(lambda: f.read(4096), b""):
+            sha256_hash.update(block)
+        return sha256_hash.hexdigest()
+
+
+def verify_s3_hash(s3_path: str, local_path: str) -> None:
+    if s3_path not in _S3_HASH_MAPPING:
+        raise Exception(
+            f"S3 path not found in hash mapping, unable to verify downloaded for s3 path: s3_path")
+
+    hash = sha256_file(local_path)
+    if hash != _S3_HASH_MAPPING[s3_path]:
+        raise Exception(
+            f"Hash mismatch for {s3_path}, expected {_S3_HASH_MAPPING[s3_path]} but got {hash}")
+
+
+def find_distro_match(distro_str: str) -> str:
+    for distro_pattern, simplified_name in _DISTRO_PATTERN_MAP.items():
+        if "*" in distro_pattern:
+            prefix_suffix = distro_pattern.split("*")
+            if distro_str.startswith(prefix_suffix[0]) and distro_str.endswith(prefix_suffix[1]):
+                return simplified_name
+        elif distro_str == distro_pattern:
+            return simplified_name
+    return None
+
+
 # Establishes logic for BazelLibrary build rule
 def generate(env: SCons.Environment.Environment) -> None:
 
@@ -413,34 +542,57 @@ def generate(env: SCons.Environment.Environment) -> None:
             )
 
         # === Bazelisk ===
+        bazel_bin_dir = env.GetOption("evergreen-tmp-dir") if env.GetOption(
+            "evergreen-tmp-dir") else "build"
+        if not os.path.exists(bazel_bin_dir):
+            os.makedirs(bazel_bin_dir)
 
-        # TODO(SERVER-81038): remove once bazel/bazelisk is self-hosted.
-        if not os.path.exists("bazelisk"):
-            ext = ".exe" if normalized_os == "windows" else ""
-            os_str = normalized_os.replace("macos", "darwin")
-            urllib.request.urlretrieve(
-                f"https://github.com/bazelbuild/bazelisk/releases/download/v1.17.0/bazelisk-{os_str}-{normalized_arch}{ext}",
-                "bazelisk")
-            os.chmod("bazelisk", stat.S_IXUSR)
+        # TODO(SERVER-86050): remove the branch once bazelisk is built on s390x & ppc64le
+        bazel_executable = os.path.join(bazel_bin_dir, "bazel") if normalized_arch in [
+            "ppc64le", "s390x"
+        ] else os.path.join(bazel_bin_dir, "bazelisk")
+
+        if not os.path.exists(bazel_executable):
+            print(f"Downloading {bazel_executable}...")
+            # TODO(SERVER-86050): remove the branch once bazelisk is built on s390x & ppc64le
+            if normalized_arch in ["ppc64le", "s390x"]:
+                s3_path = f"https://mdb-build-public.s3.amazonaws.com/bazel-binaries/bazel-6.4.0-{normalized_arch}"
+            else:
+                ext = ".exe" if normalized_os == "windows" else ""
+                os_str = normalized_os.replace("macos", "darwin")
+                s3_path = f"https://mdb-build-public.s3.amazonaws.com/bazelisk-binaries/v1.19.0/bazelisk-{os_str}-{normalized_arch}{ext}"
+
+            download_path_with_retry(s3_path, bazel_executable)
+            verify_s3_hash(s3_path, bazel_executable)
+
+            print(f"Downloaded {bazel_executable}")
+            # Bazel is a self-extracting zip launcher and needs read perms on the executable to read the zip from itself.
+            os.chmod(
+                bazel_executable, stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH | stat.S_IRUSR
+                | stat.S_IRGRP | stat.S_IROTH)
+        else:
+            print("Skipped downloading bazelisk", bazel_executable)
 
         # === Build settings ===
 
-        linkstatic = env.GetOption("link-model") in ["auto", "static"]
+        # We don't support DLL generation on Windows, but need shared object generation in dynamic-sdk mode
+        # on linux.
+        linkstatic = env.GetOption("link-model") in [
+            "auto", "static"
+        ] or (normalized_os == "windows" and env.GetOption("link-model") == "dynamic-sdk")
 
-        if env.GetOption("release") is not None:
-            build_mode = "release"
-        elif env.GetOption("dbg") == "on":
-            build_mode = "dbg"
-        else:
-            build_mode = f"opt_{mongo_generators.get_opt_options(env)}"  # one of "on", "size", "debug"
+        allocator = env.get('MONGO_ALLOCATOR', 'tcmalloc-google')
 
-        # Deprecate tcmalloc-experimental
-        allocator = "tcmalloc" if env.GetOption(
-            "allocator") == "tcmalloc-experimental" else env.GetOption("allocator")
+        distro_or_os = normalized_os
+        if normalized_os == "linux":
+            distro_id = find_distro_match(f"{distro.name()} {distro.version()}")
+            if distro_id is not None:
+                distro_or_os = distro_id
 
         bazel_internal_flags = [
             f'--//bazel/config:compiler_type={env.ToolchainName()}',
-            f'--//bazel/config:build_mode={build_mode}',
+            f'--//bazel/config:opt={env.GetOption("opt")}',
+            f'--//bazel/config:dbg={env.GetOption("dbg") == "on"}',
             f'--//bazel/config:separate_debug={True if env.GetOption("separate-debug") == "on" else False}',
             f'--//bazel/config:libunwind={env.GetOption("use-libunwind")}',
             f'--//bazel/config:use_gdbserver={False if env.GetOption("gdbserver") is None else True}',
@@ -458,12 +610,21 @@ def generate(env: SCons.Environment.Environment) -> None:
             f'--//bazel/config:linkstatic={linkstatic}',
             f'--//bazel/config:use_diagnostic_latches={env.GetOption("use-diagnostic-latches") == "on"}',
             f'--//bazel/config:shared_archive={env.GetOption("link-model") == "dynamic-sdk"}',
-            f'--//bazel/config:linker={"lld" if env.GetOption("linker") == "auto" else env.GetOption("linker")}',
+            f'--//bazel/config:linker={env.GetOption("linker")}',
+            f'--//bazel/config:streams_release_build={env.GetOption("streams-release-build") is not None}',
             f'--//bazel/config:build_enterprise={env.GetOption("modules") == "enterprise"}',
-            f'--platforms=//bazel/platforms:{normalized_os}_{normalized_arch}_{env.ToolchainName()}',
-            f'--host_platform=//bazel/platforms:{normalized_os}_{normalized_arch}_{env.ToolchainName()}',
+            f'--//bazel/config:visibility_support={env.GetOption("visibility-support")}',
+            f'--platforms=//bazel/platforms:{distro_or_os}_{normalized_arch}_{env.ToolchainName()}',
+            f'--host_platform=//bazel/platforms:{distro_or_os}_{normalized_arch}_{env.ToolchainName()}',
             '--compilation_mode=dbg',  # always build this compilation mode as we always build with -g
         ]
+
+        if env["DWARF_VERSION"]:
+            bazel_internal_flags.append(f"--//bazel/config:dwarf_version={env['DWARF_VERSION']}")
+
+        if normalized_os == "macos":
+            minimum_macos_version = "11.0" if normalized_arch == "arm64" else "10.14"
+            bazel_internal_flags.append(f'--macos_minimum_os={minimum_macos_version}')
 
         http_client_option = env.GetOption("enable-http-client")
         if http_client_option is not None:
@@ -479,17 +640,55 @@ def generate(env: SCons.Environment.Environment) -> None:
             formatted_options = [f'--//bazel/config:{_SANITIZER_MAP[opt]}=True' for opt in options]
             bazel_internal_flags.extend(formatted_options)
 
-        if normalized_os != "linux" or normalized_arch not in ["arm64", 'amd64']:
+        # Disable RE for external developers and when executing on non-linux amd64/arm64 platforms
+        is_external_developer = not os.path.exists("/opt/mongodbtoolchain")
+        if normalized_os != "linux" or normalized_arch not in ["arm64", "amd64"
+                                                               ] or is_external_developer:
             bazel_internal_flags.append('--config=local')
 
+        # Disable remote execution for public release builds.
+        if env.GetOption("release") == "on" and (
+                env.GetOption("cache-dir") is None
+                or env.GetOption("cache-dir") == "$BUILD_ROOT/scons/cache"):
+            bazel_internal_flags.append('--config=public-release')
+
+        evergreen_tmp_dir = env.GetOption("evergreen-tmp-dir")
+        if normalized_os == "macos" and evergreen_tmp_dir:
+            bazel_internal_flags.append(f"--sandbox_writable_path={evergreen_tmp_dir}")
+
+        # Any flags that need to appear before the actual bazel command (ex. "bazel {--flags} build")
+        bazel_pre_command_internal_flags = []
+        if evergreen_tmp_dir:
+            bazel_pre_command_internal_flags += [
+                "--output_user_root=" + os.path.join(
+                    os.path.abspath(evergreen_tmp_dir), "bazel-output-root")
+            ]
+
         Globals.bazel_base_build_command = [
-            os.path.abspath("bazelisk"),
+            os.path.abspath(bazel_executable),
+            *bazel_pre_command_internal_flags,
             'build',
         ] + bazel_internal_flags + shlex.split(env.get("BAZEL_FLAGS", ""))
 
+        # Set the JAVA_HOME directories for ppc64le and s390x since their bazel binaries are not compiled with a built-in JDK.
+        if normalized_arch == "ppc64le":
+            Globals.bazel_env_variables[
+                "JAVA_HOME"] = "/usr/lib/jvm/java-11-openjdk-11.0.4.11-2.el8.ppc64le"
+        elif normalized_arch == "s390x":
+            Globals.bazel_env_variables[
+                "JAVA_HOME"] = "/usr/lib/jvm/java-11-openjdk-11.0.11.0.9-0.el8_3.s390x"
+
         # Store the bazel command line flags so scons can check if it should rerun the bazel targets
         # if the bazel command line changes.
-        env['BAZEL_FLAGS_STR'] = str(bazel_internal_flags) + env.get("BAZEL_FLAGS", "")
+        env['BAZEL_FLAGS_STR'] = ' '.join(bazel_internal_flags) + env.get("BAZEL_FLAGS", "")
+
+        if "--config=local" not in env['BAZEL_FLAGS_STR'] and "--config=public-release" not in env[
+                'BAZEL_FLAGS_STR']:
+            print(
+                "Running bazel with remote execution enabled. To disable bazel remote execution, please add BAZEL_FLAGS=--config=local to the end of your scons command line invocation."
+            )
+            if not validate_remote_execution_certs(env):
+                sys.exit(1)
 
         # We always use --compilation_mode debug for now as we always want -g, so assume -dbg location
         out_dir_platform = "$TARGET_ARCH"
@@ -497,6 +696,13 @@ def generate(env: SCons.Environment.Environment) -> None:
             out_dir_platform = "darwin_arm64" if normalized_arch == "arm64" else "darwin"
         elif normalized_os == "windows":
             out_dir_platform = "x64_windows"
+        elif normalized_os == "linux" and normalized_arch == "amd64":
+            # For c++ toolchains, bazel has some wierd behaviour where it thinks the default
+            # cpu is "k8" which is another name for x86_64 cpus, so its not wrong, but abnormal
+            out_dir_platform = "k8"
+        elif normalized_arch == "ppc64le":
+            out_dir_platform = "ppc"
+
         env["BAZEL_OUT_DIR"] = env.Dir(f"#/bazel-out/{out_dir_platform}-dbg/bin/")
 
         # === Builders ===
@@ -506,16 +712,22 @@ def generate(env: SCons.Environment.Environment) -> None:
 
         if env.GetOption('ninja') == "disabled":
 
-            def shutdown_bazel_builer():
-                Globals.kill_bazel_thread_flag = True
-
-            atexit.register(shutdown_bazel_builer)
-
             # ninja will handle the build so do not launch the bazel batch thread
-            bazel_build_thread = threading.Thread(target=bazel_batch_build_thread,
-                                                  args=(env.Dir("$BUILD_ROOT/scons/bazel").path, ))
-            bazel_build_thread.daemon = True
+            bazel_build_thread = threading.Thread(
+                target=bazel_build_thread_func, args=(env.Dir("$BUILD_ROOT/scons/bazel").path,
+                                                      env["VERBOSE"]))
             bazel_build_thread.start()
+
+            def wait_for_bazel(env):
+                nonlocal bazel_build_thread
+                Globals.waiting_on_bazel_flag = True
+                print("SCons done, switching to bazel build thread...")
+                bazel_build_thread.join()
+                if Globals.bazel_thread_terminal_output is not None:
+                    Globals.bazel_thread_terminal_output.seek(0)
+                    sys.stdout.write(Globals.bazel_thread_terminal_output.read())
+
+            env.AddMethod(wait_for_bazel, "WaitForBazel")
         else:
             env.NinjaRule("BAZEL_COPY_RULE", "$env$cmd", description="Copy from Bazel",
                           pool="local_pool")

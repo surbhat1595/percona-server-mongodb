@@ -218,8 +218,7 @@ DocumentSourceMerge::DocumentSourceMerge(NamespaceString outputNs,
                                          boost::optional<std::vector<BSONObj>> pipeline,
                                          std::set<FieldPath> mergeOnFields,
                                          boost::optional<ChunkVersion> collectionPlacementVersion)
-    : DocumentSourceWriter(kStageName.rawData(), outputNs, expCtx),
-      _outputNs(std::move(outputNs)),
+    : DocumentSourceWriter(kStageName.rawData(), std::move(outputNs), expCtx),
       _mergeOnFields(std::move(mergeOnFields)),
       _mergeOnFieldsIncludesId(_mergeOnFields.count("_id") == 1) {
     _mergeProcessor.emplace(expCtx,
@@ -333,17 +332,13 @@ StageConstraints DocumentSourceMerge::constraints(Pipeline::SplitState pipeState
                             LookupRequirement::kNotAllowed,
                             UnionRequirement::kNotAllowed};
     if (pipeState == Pipeline::SplitState::kSplitForMerge) {
-        result.mergeShardId = pExpCtx->mongoProcessInterface->determineSpecificMergeShard(
-            pExpCtx->opCtx, getOutputNs());
+        result.mergeShardId = getMergeShardId();
     }
     return result;
 }
 
 boost::optional<DocumentSource::DistributedPlanLogic> DocumentSourceMerge::distributedPlanLogic() {
-    return pExpCtx->mongoProcessInterface->determineSpecificMergeShard(pExpCtx->opCtx,
-                                                                       getOutputNs())
-        ? DocumentSourceWriter::distributedPlanLogic()
-        : boost::none;
+    return getMergeShardId() ? DocumentSourceWriter::distributedPlanLogic() : boost::none;
 }
 
 Value DocumentSourceMerge::serialize(const SerializationOptions& opts) const {
@@ -369,7 +364,7 @@ Value DocumentSourceMerge::serialize(const SerializationOptions& opts) const {
             if (!pipeline.has_value()) {
                 return boost::none;
             }
-            auto expCtxWithLetVariables = pExpCtx->copyWith(pExpCtx->ns);
+            auto expCtxWithLetVariables = pExpCtx->copyWith(getOutputNs());
             if (spec.getLet()) {
                 BSONObjBuilder cleanLetSpecBuilder;
                 for (auto&& [name, expr] : *letVariables) {

@@ -42,6 +42,46 @@ BSONObj scrubHighCardinalityFields(const ClientMetadata* clientMetadata) {
     return clientMetadata->documentWithoutMongosInfo();
 }
 
+BSONObj shapifyReadPreference(boost::optional<BSONObj> readPreference) {
+    if (!readPreference) {
+        return BSONObj();
+    }
+
+    BSONObjBuilder builder;
+    for (const auto& elem : *readPreference) {
+        if (elem.fieldNameStringData() != "tags"_sd) {
+            builder.append(elem);
+            continue;
+        }
+
+        // Sort the $readPreference tags so that different orderings still map to one query stats
+        // store key.
+        BSONObjSet sortedTags = SimpleBSONObjComparator::kInstance.makeBSONObjSet();
+        for (const auto& tag : elem.Array()) {
+            sortedTags.insert(tag.Obj());
+        }
+
+        BSONArrayBuilder arrBuilder(builder.subarrayStart("tags"_sd));
+        for (const auto& tag : sortedTags) {
+            arrBuilder.append(tag);
+        }
+    }
+    return builder.obj();
+}
+
+/**
+ * Returns a tenant id from given query shape 'queryShape' if one exists.
+ */
+boost::optional<TenantId> getTenantId(const query_shape::Shape* queryShape) {
+    if (!queryShape) {
+        return boost::none;
+    }
+    return queryShape->nssOrUUID.dbName().tenantId();
+}
+
+// Tenant id value that is used when there is no tenant, i.e. the query is executed in
+// non-multi-tenant mode. Initialized to zeros.
+static const TenantId kNotSetTenantId{OID{}};
 }  // namespace
 
 UniversalKeyComponents::UniversalKeyComponents(std::unique_ptr<query_shape::Shape> queryShape,
@@ -57,8 +97,8 @@ UniversalKeyComponents::UniversalKeyComponents(std::unique_ptr<query_shape::Shap
     : _clientMetaData(scrubHighCardinalityFields(clientMetadata)),
       _commentObj(commentObj.value_or(BSONObj()).getOwned()),
       _hintObj(hint.value_or(BSONObj()).getOwned()),
-      _readPreference(readPreference.value_or(BSONObj()).getOwned()),
       _writeConcern(writeConcern.value_or(BSONObj()).getOwned()),
+      _shapifiedReadPreference(shapifyReadPreference(readPreference)),
       _shapifiedReadConcern(shapifyReadConcern(readConcern.value_or(BSONObj()))),
       _comment(commentObj ? _commentObj.firstElement() : BSONElement()),
       _queryShape(std::move(queryShape)),
@@ -66,13 +106,17 @@ UniversalKeyComponents::UniversalKeyComponents(std::unique_ptr<query_shape::Shap
       _clientMetaDataHash(clientMetadata ? clientMetadata->hashWithoutMongosInfo()
                                          : simpleHash(BSONObj())),
       _collectionType(collectionType),
-      _hasField{.clientMetaData = bool(clientMetadata),
-                .comment = bool(commentObj),
-                .hint = bool(hint),
-                .readPreference = bool(readPreference),
-                .writeConcern = bool(writeConcern),
-                .readConcern = bool(readConcern),
-                .maxTimeMS = maxTimeMS} {
+      _tenantId{getTenantId(_queryShape.get()).value_or(kNotSetTenantId)},
+      _hasField{
+          .clientMetaData = bool(clientMetadata),
+          .comment = bool(commentObj),
+          .hint = bool(hint),
+          .readPreference = bool(readPreference),
+          .writeConcern = bool(writeConcern),
+          .readConcern = bool(readConcern),
+          .maxTimeMS = maxTimeMS,
+          .tenantId = getTenantId(_queryShape.get()).has_value(),
+      } {
     tassert(7973600, "shape must not be null", _queryShape);
 }
 
@@ -81,7 +125,7 @@ BSONObj UniversalKeyComponents::shapifyReadConcern(const BSONObj& readConcern,
     // Read concern should not be considered a literal.
     // afterClusterTime is distinct for every operation with causal consistency enabled. We
     // normalize it in order not to blow out the queryStats store cache.
-    if (readConcern["afterClusterTime"].eoo()) {
+    if (readConcern["afterClusterTime"].eoo() && readConcern["atClusterTime"].eoo()) {
         return readConcern.copy();
     } else {
         BSONObjBuilder bob;
@@ -89,7 +133,12 @@ BSONObj UniversalKeyComponents::shapifyReadConcern(const BSONObj& readConcern,
         if (auto levelElem = readConcern["level"]) {
             bob.append(levelElem);
         }
-        opts.appendLiteral(&bob, "afterClusterTime", readConcern["afterClusterTime"]);
+        if (auto afterClusterTime = readConcern["afterClusterTime"]) {
+            opts.appendLiteral(&bob, "afterClusterTime", afterClusterTime);
+        }
+        if (auto atClusterTime = readConcern["atClusterTime"]) {
+            opts.appendLiteral(&bob, "atClusterTime", atClusterTime);
+        }
         return bob.obj();
     }
 }
@@ -99,7 +148,8 @@ size_t UniversalKeyComponents::size() const {
         (_apiParams ? sizeof(*_apiParams) + shape_helpers::optionalSize(_apiParams->getAPIVersion())
                     : 0) +
         _hintObj.objsize() + (_hasField.clientMetaData ? _clientMetaData.objsize() : 0) +
-        _commentObj.objsize() + (_hasField.readPreference ? _readPreference.objsize() : 0) +
+        _commentObj.objsize() +
+        (_hasField.readPreference ? _shapifiedReadPreference.objsize() : 0) +
         (_hasField.readConcern ? _shapifiedReadConcern.objsize() : 0) +
         (_hasField.writeConcern ? _writeConcern.objsize() : 0);
 }
@@ -131,8 +181,12 @@ void UniversalKeyComponents::appendTo(BSONObjBuilder& bob, const SerializationOp
         bob.append("apiDeprecationErrors", apiDeprecationErrors.value());
     }
 
+    if (_hasField.tenantId) {
+        bob.append("tenantId"_sd, opts.serializeIdentifier(_tenantId.toString()));
+    }
+
     if (_hasField.readPreference) {
-        bob.append("$readPreference", _readPreference);
+        bob.append("$readPreference", _shapifiedReadPreference);
     }
 
     if (_hasField.writeConcern) {

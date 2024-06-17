@@ -117,7 +117,7 @@ StripeNumber getStripeNumber(const BucketKey& key, size_t numberOfStripes);
  * Extracts the information from the input 'doc' that is used to map the document to a bucket.
  */
 StatusWith<std::pair<BucketKey, Date_t>> extractBucketingParameters(
-    const NamespaceString& ns,
+    const UUID& collectionUUID,
     const StringDataComparator* comparator,
     const TimeseriesOptions& options,
     const BSONObj& doc);
@@ -151,14 +151,13 @@ Bucket* useBucketAndChangePreparedState(BucketStateRegistry& registry,
 
 /**
  * Retrieve the open bucket for write use if one exists. If none exists and 'mode' is set to kYes,
- * then we will create a new bucket. If the feature flag for alwaysUseCompressedBuckets is enabled,
- * then we check both that the candidate bucket is open and that its time range accomadates the
- * time value of the measurement we are attempting to write.
+ * then we will create a new bucket.
  */
 Bucket* useBucket(OperationContext* opCtx,
                   BucketCatalog& catalog,
                   Stripe& stripe,
                   WithLock stripeLock,
+                  const NamespaceString& nss,
                   const CreationInfo& info,
                   AllowBucketCreation mode);
 
@@ -169,6 +168,7 @@ Bucket* useBucket(OperationContext* opCtx,
 Bucket* useAlternateBucket(BucketCatalog& catalog,
                            Stripe& stripe,
                            WithLock stripeLock,
+                           const NamespaceString& nss,
                            const CreationInfo& info);
 
 /**
@@ -177,15 +177,15 @@ Bucket* useAlternateBucket(BucketCatalog& catalog,
  * validate that the bucket is expected (i.e. to help resolve hash collisions for archived buckets).
  * Does *not* hand ownership of the bucket to the catalog.
  */
-StatusWith<std::unique_ptr<Bucket>> rehydrateBucket(OperationContext* opCtx,
-                                                    BucketStateRegistry& registry,
-                                                    ExecutionStatsController& stats,
-                                                    const NamespaceString& ns,
-                                                    const StringDataComparator* comparator,
-                                                    const TimeseriesOptions& options,
-                                                    const BucketToReopen& bucketToReopen,
-                                                    uint64_t catalogEra,
-                                                    const BucketKey* expectedKey);
+StatusWith<unique_tracked_ptr<Bucket>> rehydrateBucket(OperationContext* opCtx,
+                                                       BucketCatalog& catalog,
+                                                       ExecutionStatsController& stats,
+                                                       const UUID& collectionUUID,
+                                                       const StringDataComparator* comparator,
+                                                       const TimeseriesOptions& options,
+                                                       const BucketToReopen& bucketToReopen,
+                                                       uint64_t catalogEra,
+                                                       const BucketKey* expectedKey);
 
 /**
  * Given a rehydrated 'bucket', passes ownership of that bucket to the catalog, marking the bucket
@@ -197,7 +197,7 @@ StatusWith<std::reference_wrapper<Bucket>> reopenBucket(OperationContext* opCtx,
                                                         WithLock stripeLock,
                                                         ExecutionStatsController& stats,
                                                         const BucketKey& key,
-                                                        std::unique_ptr<Bucket>&& bucket,
+                                                        unique_tracked_ptr<Bucket>&& bucket,
                                                         std::uint64_t targetEra,
                                                         ClosedBuckets& closedBuckets);
 
@@ -210,6 +210,7 @@ StatusWith<std::reference_wrapper<Bucket>> reopenBucket(OperationContext* opCtx,
 StatusWith<std::reference_wrapper<Bucket>> reuseExistingBucket(BucketCatalog& catalog,
                                                                Stripe& stripe,
                                                                WithLock stripeLock,
+                                                               const NamespaceString& nss,
                                                                ExecutionStatsController& stats,
                                                                const BucketKey& key,
                                                                Bucket& existingBucket,
@@ -367,44 +368,45 @@ Bucket& rollover(OperationContext* opCtx,
  */
 std::pair<RolloverAction, RolloverReason> determineRolloverAction(
     OperationContext* opCtx,
+    TrackingContext&,
     const BSONObj& doc,
     CreationInfo& info,
     Bucket& bucket,
     uint32_t numberOfActiveBuckets,
     Bucket::NewFieldNames& newFieldNamesToBeInserted,
-    int32_t& sizeToBeAdded,
+    Sizes& sizesToBeAdded,
     AllowBucketCreation mode);
 
 /**
  * Retrieves or initializes the execution stats for the given namespace, for writing.
  */
 ExecutionStatsController getOrInitializeExecutionStats(BucketCatalog& catalog,
-                                                       const NamespaceString& ns);
+                                                       const UUID& collectionUUID);
 
 /**
  * Retrieves the execution stats for the given namespace, if they have already been initialized.
  */
-std::shared_ptr<ExecutionStats> getExecutionStats(const BucketCatalog& catalog,
-                                                  const NamespaceString& ns);
+shared_tracked_ptr<ExecutionStats> getExecutionStats(const BucketCatalog& catalog,
+                                                     const UUID& collectionUUID);
 
 /**
  * Retrieves the execution stats from the side bucket catalog.
  * Assumes the side bucket catalog has the stats of one collection.
  */
-std::pair<NamespaceString, std::shared_ptr<ExecutionStats>> getSideBucketCatalogCollectionStats(
+std::pair<UUID, shared_tracked_ptr<ExecutionStats>> getSideBucketCatalogCollectionStats(
     BucketCatalog& sideBucketCatalog);
 
 /**
  * Merges the execution stats of a collection into the bucket catalog.
  */
 void mergeExecutionStatsToBucketCatalog(BucketCatalog& catalog,
-                                        std::shared_ptr<ExecutionStats> collStats,
-                                        const NamespaceString& viewNs);
+                                        shared_tracked_ptr<ExecutionStats> collStats,
+                                        const UUID& collectionUUID);
 
 /**
  * Generates a status with code TimeseriesBucketCleared and an appropriate error message.
  */
-Status getTimeseriesBucketClearedError(const NamespaceString& ns, const OID& oid);
+Status getTimeseriesBucketClearedError(const NamespaceString& nss, const OID& oid);
 
 /**
  * Close an open bucket, setting the state appropriately and removing it from the catalog.
@@ -439,15 +441,8 @@ void closeArchivedBucket(BucketCatalog& catalog,
  *  - Measurement count on-disk matches in-memory state. (Helpful for detecting race conditions.)
  */
 void runPostCommitDebugChecks(OperationContext* opCtx,
+                              const NamespaceString& nss,
                               const Bucket& bucket,
                               const WriteBatch& batch);
-
-/**
- * Returns false if a document's time is not within the time range of the bucket - i.e, that it is
- * either earlier than the minTime of the bucket, or that it is later than the minTime + the
- * maximum time span of the bucket. Returns true if neither of these are true and the document is
- * within the time range for the bucket.
- */
-bool isDocumentWithinTimeRangeForBucket(Bucket* potentialBucket, const CreationInfo& info);
 
 }  // namespace mongo::timeseries::bucket_catalog::internal

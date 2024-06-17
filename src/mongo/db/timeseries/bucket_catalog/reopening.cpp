@@ -57,14 +57,21 @@ boost::optional<OID> initializeRequest(BucketCatalog& catalog,
     auto it = stripe.outstandingReopeningRequests.find(key);
     if (it == stripe.outstandingReopeningRequests.end()) {
         bool inserted = false;
-        std::tie(it, inserted) = stripe.outstandingReopeningRequests.emplace(
-            key, decltype(stripe.outstandingReopeningRequests)::mapped_type{});
+        // Track the memory usage for the bucket keys in this data structure because these buckets
+        // are not open yet which means they are not already being tracked.
+        std::tie(it, inserted) = stripe.outstandingReopeningRequests.try_emplace(
+            key.cloneAsTracked(catalog.trackingContext),
+            make_tracked_inlined_vector<shared_tracked_ptr<ReopeningRequest>,
+                                        Stripe::kInlinedVectorSize>(catalog.trackingContext));
         invariant(inserted);
     }
     auto& list = it->second;
 
-    list.push_back(std::make_shared<ReopeningRequest>(
-        ExecutionStatsController{internal::getOrInitializeExecutionStats(catalog, key.ns)}, oid));
+    list.push_back(make_shared_tracked<ReopeningRequest>(
+        catalog.trackingContext,
+        ExecutionStatsController{
+            internal::getOrInitializeExecutionStats(catalog, key.collectionUUID)},
+        oid));
 
     return oid;
 }
@@ -76,17 +83,13 @@ ReopeningContext::~ReopeningContext() {
     }
 }
 
-ReopeningContext::ReopeningContext(BucketCatalog& catalog,
-                                   Stripe& s,
-                                   WithLock,
-                                   const BucketKey& k,
-                                   uint64_t era,
-                                   CandidateType&& c)
+ReopeningContext::ReopeningContext(
+    BucketCatalog& catalog, Stripe& s, WithLock, BucketKey k, uint64_t era, CandidateType&& c)
     : catalogEra{era},
       candidate{std::move(c)},
       _stripe(&s),
-      _key(k),
-      _oid{initializeRequest(catalog, s, k, candidate)},
+      _key(std::move(k)),
+      _oid{initializeRequest(catalog, s, _key, candidate)},
       _cleared(holds_alternative<std::monostate>(candidate)) {}
 
 ReopeningContext::ReopeningContext(ReopeningContext&& other)
@@ -148,19 +151,9 @@ void ReopeningContext::clear(WithLock) {
     _cleared = true;
 }
 
-ArchivedBucket::ArchivedBucket(const BucketId& b, const std::string& t)
+ArchivedBucket::ArchivedBucket(const BucketId& b, const tracked_string& t)
     : bucketId{b}, timeField{t} {}
 
-long long marginalMemoryUsageForArchivedBucket(
-    const ArchivedBucket& bucket, IncludeMemoryOverheadFromMap includeMemoryOverheadFromMap) {
-    return sizeof(Date_t) +        // key in set of archived buckets for meta hash
-        sizeof(ArchivedBucket) +   // main data for archived bucket
-        bucket.timeField.size() +  // allocated space for timeField string, ignoring SSO
-        (includeMemoryOverheadFromMap == IncludeMemoryOverheadFromMap::kInclude
-             ? sizeof(std::size_t) +                                    // key in set (meta hash)
-                 sizeof(decltype(Stripe::archivedBuckets)::value_type)  // set container
-             : 0);
-}
 
 ReopeningRequest::ReopeningRequest(ExecutionStatsController&& s, boost::optional<OID> o)
     : stats{std::move(s)}, oid{o} {}

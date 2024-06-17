@@ -31,7 +31,7 @@ const expectedParamDefaults = {
     internalQueryPlanOrChildrenIndependently: true,
     internalQueryMaxScansToExplode: 200,
     internalQueryMaxBlockingSortMemoryUsageBytes: 100 * 1024 * 1024,
-    internalQueryExecYieldIterations: 1000,
+    internalQueryExecYieldIterations: -1,
     internalQueryExecYieldPeriodMS: 10,
     internalQueryFacetBufferSizeBytes: 100 * 1024 * 1024,
     internalDocumentSourceCursorBatchSizeBytes: 4 * 1024 * 1024,
@@ -44,8 +44,6 @@ const expectedParamDefaults = {
     internalQueryMaxPushBytes: 100 * 1024 * 1024,
     internalQueryMaxRangeBytes: 100 * 1024 * 1024,
     internalQueryMaxAddToSetBytes: 100 * 1024 * 1024,
-    // Should be half the value of 'internalQueryExecYieldIterations' parameter.
-    internalInsertMaxBatchSize: 500,
     internalQueryPlannerGenerateCoveredWholeIndexScans: false,
     internalQueryIgnoreUnknownJSONSchemaKeywords: false,
     internalQueryProhibitBlockingMergeOnMongoS: false,
@@ -70,6 +68,7 @@ const expectedParamDefaults = {
     internalQueryDocumentSourceWriterBatchExtraReservedBytes: 0,
     internalQuerySlotBasedExecutionDisableTimeSeriesPushdown: false,
     internalQueryCollectOptimizerMetrics: false,
+    internalQueryDisablePlanCache: false,
 };
 
 function assertDefaultParameterValues() {
@@ -318,5 +317,8 @@ assertSetParameterSucceeds("internalQuerySlotBasedExecutionDisableTimeSeriesPush
 
 assertSetParameterSucceeds("internalQueryCollectOptimizerMetrics", true);
 assertSetParameterSucceeds("internalQueryCollectOptimizerMetrics", false);
+
+assertSetParameterSucceeds("internalQueryDisablePlanCache", true);
+assertSetParameterSucceeds("internalQueryDisablePlanCache", false);
 
 MongoRunner.stopMongod(conn);

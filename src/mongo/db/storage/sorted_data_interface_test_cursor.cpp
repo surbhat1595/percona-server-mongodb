@@ -134,9 +134,7 @@ TEST(SortedDataInterface, ExhaustCursor) {
         Lock::GlobalLock globalLock(opCtx.get(), MODE_S);
         const std::unique_ptr<SortedDataInterface::Cursor> cursor(sorted->newCursor(opCtx.get()));
         for (int i = 0; i < nToInsert; i++) {
-            auto entry = i == 0
-                ? cursor->seek(makeKeyStringForSeek(sorted.get(), BSONObj(), true, true))
-                : cursor->next();
+            auto entry = cursor->next();
             ASSERT_EQ(entry, IndexKeyEntry(BSON("" << i), RecordId(42, i * 2)));
         }
         ASSERT(!cursor->next());
@@ -183,9 +181,7 @@ TEST(SortedDataInterface, ExhaustKeyStringCursor) {
         Lock::GlobalLock globalLock(opCtx.get(), MODE_S);
         const std::unique_ptr<SortedDataInterface::Cursor> cursor(sorted->newCursor(opCtx.get()));
         for (int i = 0; i < nToInsert; i++) {
-            auto entry = i == 0 ? cursor->seekForKeyString(
-                                      makeKeyStringForSeek(sorted.get(), BSONObj(), true, true))
-                                : cursor->nextKeyString();
+            auto entry = cursor->nextKeyString();
             ASSERT(entry);
             ASSERT_EQ(entry->keyString, keyStrings.at(i));
         }
@@ -193,6 +189,21 @@ TEST(SortedDataInterface, ExhaustKeyStringCursor) {
 
         // Cursor at EOF should remain at EOF when advanced
         ASSERT(!cursor->nextKeyString());
+    }
+
+    {
+        const ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
+        Lock::GlobalLock globalLock(opCtx.get(), MODE_S);
+        const std::unique_ptr<SortedDataInterface::Cursor> cursor(sorted->newCursor(opCtx.get()));
+        for (int i = 0; i < nToInsert; i++) {
+            auto entry = cursor->nextKeyValueView();
+            ASSERT(!entry.isEmpty());
+            ASSERT_EQ(entry.getValueCopy(), keyStrings.at(i));
+        }
+        ASSERT(cursor->nextKeyValueView().isEmpty());
+
+        // Cursor at EOF should remain at EOF when advanced
+        ASSERT(cursor->nextKeyValueView().isEmpty());
     }
 }
 
@@ -233,9 +244,7 @@ TEST(SortedDataInterface, ExhaustCursorReversed) {
         const std::unique_ptr<SortedDataInterface::Cursor> cursor(
             sorted->newCursor(opCtx.get(), false));
         for (int i = nToInsert - 1; i >= 0; i--) {
-            auto entry = (i == nToInsert - 1)
-                ? cursor->seek(makeKeyStringForSeek(sorted.get(), kMaxBSONKey, false, true))
-                : cursor->next();
+            auto entry = cursor->next();
             ASSERT_EQ(entry, IndexKeyEntry(BSON("" << i), RecordId(42, i * 2)));
         }
         ASSERT(!cursor->next());
@@ -283,9 +292,7 @@ TEST(SortedDataInterface, ExhaustKeyStringCursorReversed) {
         const std::unique_ptr<SortedDataInterface::Cursor> cursor(
             sorted->newCursor(opCtx.get(), false));
         for (int i = nToInsert - 1; i >= 0; i--) {
-            auto entry = (i == nToInsert - 1) ? cursor->seekForKeyString(makeKeyStringForSeek(
-                                                    sorted.get(), kMaxBSONKey, false, true))
-                                              : cursor->nextKeyString();
+            auto entry = cursor->nextKeyString();
             ASSERT(entry);
             ASSERT_EQ(entry->keyString, keyStrings.at(i));
         }
@@ -293,6 +300,22 @@ TEST(SortedDataInterface, ExhaustKeyStringCursorReversed) {
 
         // Cursor at EOF should remain at EOF when advanced
         ASSERT(!cursor->nextKeyString());
+    }
+
+    {
+        const ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
+        Lock::GlobalLock globalLock(opCtx.get(), MODE_S);
+        const std::unique_ptr<SortedDataInterface::Cursor> cursor(
+            sorted->newCursor(opCtx.get(), false));
+        for (int i = nToInsert - 1; i >= 0; i--) {
+            auto entry = cursor->nextKeyValueView();
+            ASSERT(!entry.isEmpty());
+            ASSERT_EQ(entry.getValueCopy(), keyStrings.at(i));
+        }
+        ASSERT(cursor->nextKeyValueView().isEmpty());
+
+        // Cursor at EOF should remain at EOF when advanced
+        ASSERT(cursor->nextKeyValueView().isEmpty());
     }
 }
 
@@ -319,9 +342,7 @@ TEST(SortedDataInterface, CursorIterate1) {
         Lock::GlobalLock globalLock(opCtx.get(), MODE_S);
         const std::unique_ptr<SortedDataInterface::Cursor> cursor(sorted->newCursor(opCtx.get()));
         int n = 0;
-        for (auto entry = cursor->seek(makeKeyStringForSeek(sorted.get(), BSONObj(), true, true));
-             entry;
-             entry = cursor->next()) {
+        for (auto entry = cursor->next(); entry; entry = cursor->next()) {
             ASSERT_EQ(entry, IndexKeyEntry(BSON("" << n), RecordId(5, n * 2)));
             n++;
         }
@@ -351,9 +372,7 @@ TEST(SortedDataInterface, CursorIterate1WithSaveRestore) {
         Lock::GlobalLock globalLock(opCtx.get(), MODE_S);
         const std::unique_ptr<SortedDataInterface::Cursor> cursor(sorted->newCursor(opCtx.get()));
         int n = 0;
-        for (auto entry = cursor->seek(makeKeyStringForSeek(sorted.get(), BSONObj(), true, true));
-             entry;
-             entry = cursor->next()) {
+        for (auto entry = cursor->next(); entry; entry = cursor->next()) {
             ASSERT_EQ(entry, IndexKeyEntry(BSON("" << n), RecordId(5, n * 2)));
             n++;
             cursor->save();
@@ -386,9 +405,7 @@ TEST(SortedDataInterface, CursorIterateAllDupKeysWithSaveRestore) {
         Lock::GlobalLock globalLock(opCtx.get(), MODE_S);
         const std::unique_ptr<SortedDataInterface::Cursor> cursor(sorted->newCursor(opCtx.get()));
         int n = 0;
-        for (auto entry = cursor->seek(makeKeyStringForSeek(sorted.get(), BSONObj(), true, true));
-             entry;
-             entry = cursor->next()) {
+        for (auto entry = cursor->next(); entry; entry = cursor->next()) {
             ASSERT_EQ(entry, IndexKeyEntry(BSON("" << 5), RecordId(5, n * 2)));
             n++;
             cursor->save();

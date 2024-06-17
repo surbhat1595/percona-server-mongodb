@@ -136,10 +136,6 @@ void ClusterCommandTestFixture::expectReturnsError(ErrorCodes::Error code) {
 }
 
 DbResponse ClusterCommandTestFixture::runCommand(BSONObj cmd) {
-    // TODO SERVER-48142 should remove the following fail-point usage.
-    // Skip appending required fields in unit-tests
-    FailPointEnableBlock skipAppendingReqFields("allowSkippingAppendRequiredFieldsToResponse");
-
     // Create a new client/operation context per command
     auto client = getServiceContext()->getService()->makeClient("ClusterCmdClient");
     auto opCtx = client->makeOperationContext();
@@ -157,9 +153,11 @@ DbResponse ClusterCommandTestFixture::runCommand(BSONObj cmd) {
 
     // If bulkWrite then append adminDB.
     if (cmd.firstElementFieldNameStringData() == "bulkWrite") {
-        opMsgRequest = OpMsgRequest::fromDBAndBody(DatabaseName::kAdmin, cmd);
+        opMsgRequest = OpMsgRequestBuilder::create(
+            auth::ValidatedTenancyScope::kNotRequired, DatabaseName::kAdmin, cmd);
     } else {
-        opMsgRequest = OpMsgRequest::fromDBAndBody(kNss.dbName(), cmd);
+        opMsgRequest = OpMsgRequestBuilder::create(
+            auth::ValidatedTenancyScope::get(opCtx.get()), kNss.dbName(), cmd);
     }
 
     AlternativeClientRegion acr(client);
@@ -368,23 +366,23 @@ void ClusterCommandTestFixture::testIncludeQueryStatsMetrics(BSONObj cmd, bool i
 
         {
             // No rate limit i.e., no requests are rate limited and each one is allowed to gather
-            // stats.
+            // stats. We'll always request metrics, even if the user set includeQueryStatsMetrics
+            // to false.
             RAIIServerParameterControllerForTest rateLimit("internalQueryStatsRateLimit", -1);
 
             runCommandInspectRequests(cmd, expectFieldIs(true), isTargeted);
-
-            // Putting includeQueryStatsMetrics into the original command overrides rate limits.
             runCommandInspectRequests(cmdIncludeTrue, expectFieldIs(true), isTargeted);
-            runCommandInspectRequests(cmdIncludeFalse, expectFieldIs(false), isTargeted);
+            runCommandInspectRequests(cmdIncludeFalse, expectFieldIs(true), isTargeted);
         }
 
         {
             // Rate limit is 0 i.e., every request is rate-limited.
             RAIIServerParameterControllerForTest rateLimit("internalQueryStatsRateLimit", 0);
 
+            // If the user doesn't give includeQueryStatsMetrics, we won't insert the field.
             runCommandInspectRequests(cmd, expectNoField, isTargeted);
 
-            // Putting includeQueryStatsMetrics into the original command overrides rate limits.
+            // If the user passed us includeQueryStatsMetrics, we'll pass it through.
             runCommandInspectRequests(cmdIncludeTrue, expectFieldIs(true), isTargeted);
             runCommandInspectRequests(cmdIncludeFalse, expectFieldIs(false), isTargeted);
         }
@@ -405,8 +403,7 @@ void ClusterCommandTestFixture::testIncludeQueryStatsMetrics(BSONObj cmd, bool i
 
 void ClusterCommandTestFixture::appendTxnResponseMetadata(BSONObjBuilder& bob) {
     // Set readOnly to false to avoid opting in to the read-only optimization.
-    TxnResponseMetadata txnResponseMetadata(false);
-    txnResponseMetadata.serialize(&bob);
+    bob.append(TxnResponseMetadata::kReadOnlyFieldName, false);
 }
 
 // Satisfies dependency from StoreSASLOPtions.

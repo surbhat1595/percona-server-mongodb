@@ -2,6 +2,7 @@ import {configureFailPoint} from "jstests/libs/fail_point_util.js";
 import {getDBNameAndCollNameFromFullNamespace} from "jstests/libs/namespace_utils.js";
 import {Thread} from "jstests/libs/parallelTester.js";
 import {extractUUIDFromObject, getUUIDFromListCollections} from "jstests/libs/uuid_util.js";
+import {awaitRSClientHosts} from "jstests/replsets/rslib.js";
 import {CreateShardedCollectionUtil} from "jstests/sharding/libs/create_sharded_collection_util.js";
 
 /**
@@ -37,6 +38,7 @@ export var ReshardingTest = class {
         configShard: configShard = false,
         wiredTigerConcurrentWriteTransactions: wiredTigerConcurrentWriteTransactions = undefined,
         reshardingOplogBatchTaskCount: reshardingOplogBatchTaskCount = undefined,
+        ttlMonitorSleepSecs: ttlMonitorSleepSecs = undefined,
     } = {}) {
         // The @private JSDoc comments cause VS Code to not display the corresponding properties and
         // methods in its autocomplete list. This makes it simpler for test authors to know what the
@@ -69,6 +71,7 @@ export var ReshardingTest = class {
         this._configShard = configShard || jsTestOptions().configShard;
         this._wiredTigerConcurrentWriteTransactions = wiredTigerConcurrentWriteTransactions;
         this._reshardingOplogBatchTaskCount = reshardingOplogBatchTaskCount;
+        this._ttlMonitorSleepSecs = ttlMonitorSleepSecs;
         /** @private */
         this._opType = "reshardCollection";
 
@@ -197,6 +200,10 @@ export var ReshardingTest = class {
         if (this._reshardingOplogBatchTaskCount !== undefined) {
             rsOptions.setParameter.reshardingOplogBatchTaskCount =
                 this._reshardingOplogBatchTaskCount;
+        }
+
+        if (this._ttlMonitorSleepSecs !== undefined) {
+            rsOptions.setParameter.ttlMonitorSleepSecs = this._ttlMonitorSleepSecs;
         }
 
         this._st = new ShardingTest({
@@ -451,7 +458,7 @@ export var ReshardingTest = class {
             this._pauseCoordinatorBeforeCompletionFailpoints.push(
                 configureFailPoint(configServer,
                                    "reshardingPauseCoordinatorBeforeCompletion",
-                                   {"sourceNamespace": this._ns}));
+                                   {"sourceNamespace": this._underlyingSourceNs}));
         });
 
         this._commandDoneSignal = new CountDownLatch(1);
@@ -997,7 +1004,8 @@ export var ReshardingTest = class {
     _checkCoordinatorPostState(expectedErrorCode) {
         assert.eq(
             [],
-            this._st.config.reshardingOperations.find({ns: this._ns, state: {$ne: "quiesced"}})
+            this._st.config.reshardingOperations
+                .find({ns: this._underlyingSourceNs, state: {$ne: "quiesced"}})
                 .toArray(),
             "expected config.reshardingOperations to be empty (except quiesced operations), but found it wasn't");
 
@@ -1190,6 +1198,9 @@ export var ReshardingTest = class {
             if (res.ok === 1) {
                 replSet.awaitNodesAgreeOnPrimary();
                 assert.eq(newPrimary, replSet.getPrimary());
+                this._st.getAllNodes().forEach((conn) => {
+                    awaitRSClientHosts(conn, {host: newPrimary.host}, {ok: true, ismaster: true});
+                });
                 return;
             }
 
@@ -1214,6 +1225,10 @@ export var ReshardingTest = class {
         const opts = {allowedExitCode: MongoRunner.EXIT_SIGKILL};
         replSet.restart(originalPrimaryConn, opts, SIGKILL);
         replSet.awaitNodesAgreeOnPrimary();
+        const newPrimaryConn = replSet.getPrimary();
+        this._st.getAllNodes().forEach((conn) => {
+            awaitRSClientHosts(conn, {host: newPrimaryConn.host}, {ok: true, ismaster: true});
+        });
     }
 
     shutdownAndRestartPrimaryOnShard(shardName) {
@@ -1226,6 +1241,10 @@ export var ReshardingTest = class {
         const SIGTERM = 15;
         replSet.restart(originalPrimaryConn, {}, SIGTERM);
         replSet.awaitNodesAgreeOnPrimary();
+        const newPrimaryConn = replSet.getPrimary();
+        this._st.getAllNodes().forEach((conn) => {
+            awaitRSClientHosts(conn, {host: newPrimaryConn.host}, {ok: true, ismaster: true});
+        });
     }
 
     /**
@@ -1244,7 +1263,8 @@ export var ReshardingTest = class {
         let cloneTimestamp;
 
         assert.soon(() => {
-            const coordinatorDoc = this._st.config.reshardingOperations.findOne({ns: this._ns});
+            const coordinatorDoc =
+                this._st.config.reshardingOperations.findOne({ns: this._underlyingSourceNs});
             cloneTimestamp = coordinatorDoc !== null ? coordinatorDoc.cloneTimestamp : undefined;
             return cloneTimestamp !== undefined;
         });

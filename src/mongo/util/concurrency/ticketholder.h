@@ -57,7 +57,6 @@ class TicketHolder {
 
 public:
     TicketHolder(ServiceContext* svcCtx, int32_t numTickets, bool trackPeakUsed);
-
     virtual ~TicketHolder() {}
 
     /**
@@ -66,30 +65,40 @@ public:
      * Returns 'true' if the resize completed without reaching the 'deadline', and 'false'
      * otherwise.
      */
-    bool resize(int32_t newSize, Date_t deadline = Date_t::max()) noexcept;
+    bool resize(OperationContext* opCtx, int32_t newSize, Date_t deadline = Date_t::max());
 
     /**
      * Attempts to acquire a ticket without blocking.
      * Returns a ticket if one is available, and boost::none otherwise.
      */
-    virtual boost::optional<Ticket> tryAcquire(AdmissionContext* admCtx);
+    boost::optional<Ticket> tryAcquire(AdmissionContext* admCtx);
 
     /**
-     * Attempts to acquire a ticket. Blocks until a ticket is acquired or the Interruptible is
-     * interrupted, throwing an AssertionException. Outputs 'timeQueuedForTicketMicros' with time
-     * spent waiting for a ticket.
+     * Attempts to acquire a ticket. Blocks until a ticket is acquired or the OperationContext is
+     * interrupted, throwing an AssertionException.
      */
-    virtual Ticket waitForTicket(Interruptible& interruptible, AdmissionContext* admCtx);
+    Ticket waitForTicket(OperationContext* opCtx, AdmissionContext* admCtx);
 
     /**
      * Attempts to acquire a ticket within a deadline, 'until'. Returns 'true' if a ticket is
      * acquired and 'false' if the deadline is reached, but the operation is retryable. Throws an
-     * AssertionException if the Interruptible is interrupted. Outputs 'timeQueuedForTicketMicros'
-     * with time spent waiting for a ticket.
+     * AssertionException if the OperationContext is interrupted.
      */
-    virtual boost::optional<Ticket> waitForTicketUntil(Interruptible& interruptible,
-                                                       AdmissionContext* admCtx,
-                                                       Date_t until);
+    boost::optional<Ticket> waitForTicketUntil(OperationContext* opCtx,
+                                               AdmissionContext* admCtx,
+                                               Date_t until);
+
+    /**
+     * The same as `waitForTicketUntil` except the wait will be uninterruptible. Please make every
+     * effort to make your waiter interruptible, and try not to use this function! It only exists
+     * as a stepping stone until we can complete the work in SERVER-68868 to ensure all work in the
+     * server is interruptible.
+     *
+     * TODO(SERVER-68868): Remove this function completely
+     */
+    boost::optional<Ticket> waitForTicketUntilNoInterrupt_DO_NOT_USE(OperationContext* opCtx,
+                                                                     AdmissionContext* admCtx,
+                                                                     Date_t until);
 
     /**
      * The total number of tickets allotted to the ticket pool.
@@ -110,8 +119,6 @@ public:
      * Invariants that 'trackPeakUsed' has been passed to the TicketHolder,
      */
     int32_t getAndResetPeakUsed();
-
-    virtual void appendStats(BSONObjBuilder& b) const;
 
     /**
      * Instantaneous number of tickets 'available' (not checked out by an operation) in the ticket
@@ -149,6 +156,17 @@ public:
         AtomicWord<std::int64_t> totalTimeQueuedMicros{0};
     };
 
+    /**
+     * Append TicketHolder statistics to the provided builder.
+     */
+    void appendStats(BSONObjBuilder& b) const;
+
+protected:
+    virtual bool _resizeImpl(WithLock lock,
+                             OperationContext* opCtx,
+                             int32_t newSize,
+                             Date_t deadline);
+
 private:
     /**
      * Releases a ticket back into the ticketing pool.
@@ -159,9 +177,14 @@ private:
 
     virtual boost::optional<Ticket> _tryAcquireImpl(AdmissionContext* admCtx) = 0;
 
-    virtual boost::optional<Ticket> _waitForTicketUntilImpl(Interruptible& interruptible,
+    boost::optional<Ticket> _waitForTicketUntil(OperationContext* opCtx,
+                                                AdmissionContext* admCtx,
+                                                Date_t until,
+                                                bool interruptible);
+    virtual boost::optional<Ticket> _waitForTicketUntilImpl(OperationContext* opCtx,
                                                             AdmissionContext* admCtx,
-                                                            Date_t until) = 0;
+                                                            Date_t until,
+                                                            bool interruptible) = 0;
 
     virtual void _appendImplStats(BSONObjBuilder& b) const {}
 
@@ -189,6 +212,8 @@ protected:
      */
     void _appendCommonQueueImplStats(BSONObjBuilder& b, const QueueStats& stats) const;
 
+    Ticket _makeTicket(AdmissionContext* admCtx);
+
     AtomicWord<int32_t> _outof;
     AtomicWord<int32_t> _peakUsed;
 
@@ -198,16 +223,6 @@ protected:
 class MockTicketHolder : public TicketHolder {
 public:
     MockTicketHolder(ServiceContext* svcCtx) : TicketHolder(svcCtx, 0, true) {}
-
-    boost::optional<Ticket> tryAcquire(AdmissionContext* admCtx) override;
-
-    Ticket waitForTicket(Interruptible& interruptible, AdmissionContext* admCtx) override;
-
-    boost::optional<Ticket> waitForTicketUntil(Interruptible& interruptible,
-                                               AdmissionContext* admCtx,
-                                               Date_t until) override;
-
-    void appendStats(BSONObjBuilder& b) const override {}
 
     int32_t available() const override {
         return _available;
@@ -238,16 +253,16 @@ private:
 
     boost::optional<Ticket> _tryAcquireImpl(AdmissionContext* admCtx) override;
 
-    boost::optional<Ticket> _waitForTicketUntilImpl(Interruptible& interruptible,
+    boost::optional<Ticket> _waitForTicketUntilImpl(OperationContext* opCtx,
                                                     AdmissionContext* admCtx,
-                                                    Date_t until) override;
+                                                    Date_t until,
+                                                    bool interruptible) override;
 
     QueueStats& _getQueueStatsToUse(AdmissionContext::Priority priority) noexcept override {
         return _stats;
     }
 
     QueueStats _stats;
-
     int32_t _available = 0;
     int32_t _numFinishedProcessing = 0;
 };
@@ -257,10 +272,10 @@ private:
  * released when going out of scope.
  */
 class Ticket {
+    Ticket(const Ticket&) = delete;
+    Ticket& operator=(const Ticket&) = delete;
+
     friend class TicketHolder;
-    friend class SemaphoreTicketHolder;
-    friend class PriorityTicketHolder;
-    friend class MockTicketHolder;
 
 public:
     Ticket(Ticket&& t)
@@ -276,13 +291,13 @@ public:
         if (&t == this) {
             return *this;
         }
+
         invariant(!valid(), "Attempting to overwrite a valid ticket with another one");
-        _ticketholder = t._ticketholder;
-        _admissionContext = t._admissionContext;
+        _ticketholder = std::exchange(t._ticketholder, nullptr);
+        _admissionContext = std::exchange(t._admissionContext, nullptr);
         _priority = t._priority;
         _acquisitionTime = t._acquisitionTime;
-        t._ticketholder = nullptr;
-        t._admissionContext = nullptr;
+
         return *this;
     };
 
@@ -321,13 +336,14 @@ private:
         _admissionContext = nullptr;
     }
 
-    // No copy constructors.
-    Ticket(const Ticket&) = delete;
-    Ticket& operator=(const Ticket&) = delete;
-
     TicketHolder* _ticketholder;
     AdmissionContext* _admissionContext;
     AdmissionContext::Priority _priority;
     TickSource::Tick _acquisitionTime;
 };
+
+inline Ticket TicketHolder::_makeTicket(AdmissionContext* admCtx) {
+    return Ticket{this, admCtx};
+}
+
 }  // namespace mongo

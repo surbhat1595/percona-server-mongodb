@@ -138,6 +138,11 @@ public:
         void aggregateCursorMetrics(const CursorMetrics& metrics);
 
         /**
+         * Aggregates StorageStats from the storage engine into this AdditiveMetrics instance.
+         */
+        void aggregateStorageStats(const StorageStats& stats);
+
+        /**
          * Resets all members to the default state.
          */
         void reset();
@@ -210,6 +215,7 @@ public:
 
         boost::optional<long long> keysExamined;
         boost::optional<long long> docsExamined;
+        boost::optional<long long> bytesRead;
 
         // Number of records that match the query.
         boost::optional<long long> nMatched;
@@ -240,6 +246,16 @@ public:
 
         // Amount of time spent executing a query.
         boost::optional<Microseconds> executionTime;
+
+        // If query stats are being collected for this operation, stores the duration of execution
+        // across the cluster. In a standalone mongod, this is just the local working time. In
+        // mongod in a sharded cluster, this is the local execution time plus any execution time
+        // for other nodes to do work on our behalf. In mongos, this tracks the total working time
+        // across the cluster.
+        boost::optional<Milliseconds> clusterWorkingTime{0};
+
+        // Amount of time spent reading from disk in the storage engine.
+        boost::optional<Microseconds> readingTime{0};
 
         // True if the query plan involves an in-memory sort.
         bool hasSortStage{false};
@@ -281,9 +297,9 @@ public:
     static void appendUserInfo(const CurOp&, BSONObjBuilder&, AuthorizationSession*);
 
     /**
-     * Copies relevant plan summary metrics to this OpDebug instance.
+     * Moves relevant plan summary metrics to this OpDebug instance.
      */
-    void setPlanSummaryMetrics(const PlanSummaryStats& planSummaryStats);
+    void setPlanSummaryMetrics(PlanSummaryStats&& planSummaryStats);
 
     /**
      * The resulting object has zeros omitted. As is typical in this file.
@@ -398,6 +414,9 @@ public:
         boost::optional<std::size_t> keyHash;
         // True if the request was rate limited and stats should not be collected.
         bool wasRateLimited = false;
+        // True if the request was a change stream request.
+        // TODO SERVER-89058 will make it true for all tailable cursors.
+        bool willNeverExhaust = false;
         // Sometimes we need to request metrics as part of a higher-level operation without
         // actually caring about the metrics for this specific operation. In those cases, we
         // use metricsRequested to indicate we should request metrics from other nodes.
@@ -581,12 +600,12 @@ public:
      * Fills out CurOp and OpDebug with basic info common to all commands. We require the NetworkOp
      * in order to distinguish which protocol delivered this request, e.g. OP_QUERY or OP_MSG. This
      * is set early in the request processing backend and does not typically need to be called
-     * thereafter. Locks the client as needed to apply the specified settings.
+     * thereafter. It is necessary to hold the Client lock while this method executes.
      */
-    void setGenericOpRequestDetails(NamespaceString nss,
-                                    const Command* command,
-                                    BSONObj cmdObj,
-                                    NetworkOp op);
+    void setGenericOpRequestDetails_inlock(NamespaceString nss,
+                                           const Command* command,
+                                           BSONObj cmdObj,
+                                           NetworkOp op);
 
     /**
      * Sets metrics collected at the end of an operation onto curOp's OpDebug instance. Note that
@@ -1076,7 +1095,10 @@ public:
     void setGenericCursor_inlock(GenericCursor gc);
 
     boost::optional<SingleThreadedLockStats> getLockStatsBase() const {
-        return _lockStatsBase;
+        if (!_lockerStatsBase) {
+            return boost::none;
+        }
+        return _lockerStatsBase->lockStats;
     }
 
     void setTickSource_forTest(TickSource* tickSource) {
@@ -1102,6 +1124,34 @@ private:
     class CurOpStack;
 
     /**
+     * A set of additive locker stats that CurOp tracks during it's lifecycle.
+     */
+    struct AdditiveLockerStats {
+        void append(const AdditiveLockerStats& other);
+        void subtract(const AdditiveLockerStats& other);
+
+        /**
+         * Snapshot of locker lock stats.
+         */
+        SingleThreadedLockStats lockStats;
+
+        /**
+         * Total time spent waiting on locks.
+         */
+        Microseconds cumulativeLockWaitTime{0};
+
+        /**
+         * Total time spent queued for tickets.
+         */
+        Microseconds timeQueuedForTickets{0};
+
+        /**
+         * Total time spent queued for flow control tickets.
+         */
+        Microseconds timeQueuedForFlowControl{0};
+    };
+
+    /**
      * Gets the OperationContext associated with this CurOp.
      * This must only be called after the CurOp has been pushed to an OperationContext's CurOpStack.
      */
@@ -1111,13 +1161,28 @@ private:
     Microseconds computeElapsedTimeTotal(TickSource::Tick startTime,
                                          TickSource::Tick endTime) const;
 
-    Milliseconds _sumBlockedTimeTotal();
+    /**
+     * Collects and returns additive lockers stats
+     */
+    static AdditiveLockerStats getAdditiveLockerStats(const Locker* locker);
+
+    /**
+     * Returns the time operation spends blocked waiting for locks and tickets. Also returns the
+     * retrieved time waiting for locks.
+     */
+    std::tuple<Milliseconds, Milliseconds> _getAndSumBlockedTimeTotal();
 
     /**
      * Handles failpoints that check whether a command has completed or not.
      * Used for testing purposes instead of the getLog command.
      */
     void _checkForFailpointsAfterCommandLogged();
+
+    /**
+     * Fetches storage stats and stores them in the OpDebug if they're not already present.
+     * Can throw if interrupted while waiting for the global lock.
+     */
+    void _fetchStorageStatsIfNecessary(Date_t deadline, AdmissionContext::Priority priority);
 
     // Auxilliary method to decide if operation should be profiled when rate limiter is enabled.
     // Returns true if rate limiter is disabled.
@@ -1181,25 +1246,14 @@ private:
     std::string _planSummary;
 
     // The lock stats being reported on the locker that accrued outside of this operation. This
-    // includes the snapshot of lock stats taken when this CurOp instance is pushed to a CurOpStack
+    // includes:
+    // * the snapshot of lock stats taken when this CurOp instance is pushed to a CurOpStack
     // or the snapshot of lock stats taken when transaction resources are unstashed to this
-    // operation context.
-    boost::optional<SingleThreadedLockStats> _lockStatsBase;
-
-    // The snapshot of lock stats taken when transaction resources are stashed. This captures the
-    // locker activity that happened on this operation before the locker is released back to
-    // transaction resources.
-    boost::optional<SingleThreadedLockStats> _lockStatsOnceStashed;
-
-    // The ticket wait times being reported on the locker that accrued outside of this operation.
-    // This includes ticket wait times already accrued when the CurOp instance is pushed to a
-    // CurOpStack or ticket wait times on locker when transaction resources are unstashed to this
-    // operation context.
-    Microseconds _ticketWaitBase{0};
-
-    // The ticket wait times that accrued during this operation captured before the locker is
-    // released back to transaction resources and stashed.
-    Microseconds _ticketWaitWhenStashed{0};
+    // operation context (as positive)
+    // * the snapshot of lock stats taken when transactions resources are stashed (as negative).
+    //   This captures the locker activity that happened on this operation before the locker is
+    //   released back to transaction resources.
+    boost::optional<AdditiveLockerStats> _lockerStatsBase;
 
     // _shouldDBProfileWithRateLimit can be called several times by shouldDBProfile and
     // completeAndLogOperation so to be consistent we need to cache random generated bool value.

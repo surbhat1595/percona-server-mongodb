@@ -54,7 +54,6 @@
 namespace mongo {
 namespace {
 
-using unittest::assertGet;
 
 const NamespaceString kNss = NamespaceString::createNamespaceString_forTest("test.foo");
 const ShardId kThisShard("thisShard");
@@ -71,7 +70,7 @@ CollectionMetadata makeCollectionMetadataImpl(
     const OID epoch = OID::gen();
 
     const Timestamp kOnCurrentShardSince(100, 0);
-    const Timestamp kChunkManager(staleChunkManager ? 99 : 100, 0);
+    const boost::optional<Timestamp> kChunkManager(staleChunkManager, Timestamp{99, 0});
 
     std::vector<ChunkType> allChunks;
     auto nextMinKey = shardKeyPattern.globalMin();

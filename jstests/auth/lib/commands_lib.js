@@ -463,9 +463,6 @@ export const authCommandsLib = {
           testname: 'transitionFromDedicatedConfigServer',
           command: {transitionFromDedicatedConfigServer: 1},
           skipUnlessSharded: true,
-          skipTest: (conn) => {
-            return !TestData.setParameters.featureFlagTransitionToCatalogShard;
-          },
           testcases: [
             {
               runOnDb: adminDbName,
@@ -480,9 +477,6 @@ export const authCommandsLib = {
           testname: "_configsvrTransitionFromDedicatedConfigServer",
           command: {_configsvrTransitionFromDedicatedConfigServer: 1},
           skipSharded: true,
-          skipTest: (conn) => {
-            return !TestData.setParameters.featureFlagTransitionToCatalogShard;
-          },
           testcases: [
               {
                 runOnDb: adminDbName,
@@ -498,9 +492,6 @@ export const authCommandsLib = {
           testname: "transitionToDedicatedConfigServer",
           command: { transitionToDedicatedConfigServer: 1 },
           skipUnlessSharded: true,
-          skipTest: (conn) => {
-            return !TestData.setParameters.featureFlagTransitionToCatalogShard;
-          },
           testcases: [
             {
               runOnDb: adminDbName,
@@ -516,9 +507,6 @@ export const authCommandsLib = {
           testname: "_configsvrTransitionToDedicatedConfigServer",
           command: {_configsvrTransitionToDedicatedConfigServer: 1},
           skipSharded: true,
-          skipTest: (conn) => {
-            return !TestData.setParameters.featureFlagTransitionToCatalogShard;
-          },
           testcases: [
               {
                 runOnDb: adminDbName,
@@ -6584,6 +6572,27 @@ export const authCommandsLib = {
           ]
         },
         {
+          testname: "rotateFTDC",
+          command: {rotateFTDC: 1},
+          testcases: [
+              {
+                runOnDb: adminDbName,
+                roles: roles_monitoring,
+                privileges: [
+                    {resource: {cluster: true}, actions: ["serverStatus"]},
+                    {resource: {cluster: true}, actions: ["replSetGetStatus"]},
+                    {resource: {db: "local", collection: "oplog.rs"}, actions: ["collStats"]},
+                    {
+                      resource: {cluster: true},
+                      actions: ["connPoolStats"]
+                    },  // Only needed against mongos
+                ]
+              },
+              {runOnDb: firstDbName, roles: {}},
+              {runOnDb: secondDbName, roles: {}}
+          ]
+        },
+        {
           testname: "serverStatus",
           command: {serverStatus: 1},
           testcases: [
@@ -7122,6 +7131,23 @@ export const authCommandsLib = {
                       {killCursors: "$cmd.aggregate", cursors: [response.cursor.id]}));
               }
           }
+        },
+        {
+          testname: "aggregate_$backupFileCursor",
+          command: {aggregate: 1, cursor: {}, pipeline: [{$_backupFile: {backupId: UUID()}}]},
+          skipSharded: true,
+          // Only enterprise knows of this aggregation stage.
+          skipTest:
+              (conn) =>
+                  !getBuildInfo().modules.includes("enterprise"),
+          testcases: [{
+              runOnDb: adminDbName,
+              roles: {__system: 1},
+              privileges: [
+                  {resource: {cluster: true}, actions: ["internal"]},
+              ],
+              expectFail: true
+          }],
         },
         {
           testname: "aggregate_$search",

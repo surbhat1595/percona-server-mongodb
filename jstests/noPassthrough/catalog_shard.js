@@ -11,6 +11,7 @@ import {configureFailPoint} from "jstests/libs/fail_point_util.js";
 import {FeatureFlagUtil} from "jstests/libs/feature_flag_util.js";
 import {FixtureHelpers} from "jstests/libs/fixture_helpers.js";
 import {Thread} from "jstests/libs/parallelTester.js";
+import {restartServerReplication, stopServerReplication} from "jstests/libs/write_concern_util.js";
 import {
     moveDatabaseAndUnshardedColls
 } from "jstests/sharding/libs/move_database_and_unsharded_coll_helper.js";
@@ -47,6 +48,10 @@ function flushRoutingAndDBCacheUpdates(conn) {
 
 function getCatalogShardChunks(conn) {
     return conn.getCollection("config.chunks").find({shard: "config"}).toArray();
+}
+
+function getShardingStats(conn) {
+    return assert.commandWorked(conn.adminCommand({serverStatus: 1})).shardingStatistics;
 }
 
 const st = new ShardingTest({
@@ -223,16 +228,24 @@ const newShardName =
     // Blocked because of the sharded and unsharded databases and the remaining chunk.
     removeRes = assert.commandWorked(st.s0.adminCommand({transitionToDedicatedConfigServer: 1}));
     assert.eq("ongoing", removeRes.state);
-    // TODO SERVER-77915 remove feature flag and set remaining chunks to 2 (before track unsharded,
-    // only sharded collection had associated chunks)
+    // TODO SERVER-77915 remove feature flag and set remaining chunks to 3 (before tracking
+    // unsharded collections, only sharded collection had associated chunks)
     const isTrackUnshardedUponCreationEnabled = FeatureFlagUtil.isPresentAndEnabled(
         st.s.getDB('admin'), "TrackUnshardedCollectionsUponCreation");
-    assert.eq(isTrackUnshardedUponCreationEnabled ? 2 : 1, removeRes.remaining.chunks);
+    assert.eq(isTrackUnshardedUponCreationEnabled ? 3 : 1, removeRes.remaining.chunks);
     assert.eq(3, removeRes.remaining.dbs);
 
     moveDatabaseAndUnshardedColls(st.s.getDB(dbName), newShardName);
     moveDatabaseAndUnshardedColls(st.s.getDB(unshardedDbName), newShardName);
-    moveDatabaseAndUnshardedColls(st.s.getDB(timeseriesDbName), newShardName);
+
+    // TODO SERVER-84744 remove the feature flag check and leave moveDatabaseAndUnshardedColls
+    const isReshardingForTimeseriesEnabled =
+        FeatureFlagUtil.isPresentAndEnabled(st.s.getDB('admin'), 'ReshardingForTimeseries');
+    if (isReshardingForTimeseriesEnabled) {
+        moveDatabaseAndUnshardedColls(st.s.getDB(timeseriesDbName), newShardName);
+    } else {
+        assert.commandWorked(st.s.adminCommand({movePrimary: timeseriesDbName, to: newShardName}));
+    }
 
     // The draining sharded collections should not have been locally dropped yet.
     assert(configPrimary.getCollection(ns).exists());
@@ -252,8 +265,8 @@ const newShardName =
     // The config server owns no chunks, but must wait for its range deletions.
     assert.eq(0, getCatalogShardChunks(st.s).length, () => getCatalogShardChunks(st.s));
     removeRes = assert.commandWorked(st.s.adminCommand({transitionToDedicatedConfigServer: 1}));
-    assert.eq("pendingRangeDeletions", removeRes.state);
-    assert.eq("waiting for pending range deletions", removeRes.msg);
+    assert.eq("pendingDataCleanup", removeRes.state);
+    assert.eq("waiting for data to be cleaned up", removeRes.msg);
     assert.eq(1, removeRes.pendingRangeDeletions);
 
     suspendRangeDeletionFp.off();
@@ -305,6 +318,134 @@ const newShardName =
         collMod: "onConfig",
         changeStreamPreAndPostImages: {enabled: true}
     }));
+    // Drop to allow future transitions to embedded mode.
+    assert.commandWorked(configPrimary.getDB("directDB").dropDatabase());
+}
+
+{
+    //
+    // Transitioning to embedded mode fails if there are unexpectedly documents on the config server
+    // after draining it.
+    //
+
+    assert.commandWorked(st.s.adminCommand({transitionFromDedicatedConfigServer: 1}));
+
+    moveDatabaseAndUnshardedColls(st.s.getDB(dbName), configShardName);
+    moveDatabaseAndUnshardedColls(st.s.getDB(unshardedDbName), configShardName);
+    assert.commandWorked(st.s.adminCommand({moveChunk: ns, find: {skey: 0}, to: configShardName}));
+
+    // Sharding statistics before transitionToDedicatedConfigServer starts are correct.
+    let configPrimaryStats = getShardingStats(st.configRS.getPrimary());
+    assert.eq(configPrimaryStats.countTransitionToDedicatedConfigServerStarted, 0);
+    assert.eq(
+        configPrimaryStats.countTransitionToDedicatedConfigServerCompleted,
+        1);  // Transition command already completed once on this node. Completed > started because
+             // there was a failover in the test after starting the transition but before completing
+             // it. This is expected behavior for serverStatus counters which reset on failover.
+    assert.eq(configPrimaryStats.configServerInShardCache, true);
+    let mongosStats = getShardingStats(st.s0);
+    assert.eq(mongosStats.configServerInShardCache, true);
+
+    let removeRes =
+        assert.commandWorked(st.s0.adminCommand({transitionToDedicatedConfigServer: 1}));
+    assert.eq("started", removeRes.state);
+
+    // Sharding statistics after transitionToDedicatedConfigServer starts are correct.
+    configPrimaryStats = getShardingStats(st.configRS.getPrimary());
+    assert.eq(configPrimaryStats.countTransitionToDedicatedConfigServerStarted, 1);
+    assert.eq(configPrimaryStats.countTransitionToDedicatedConfigServerCompleted, 1);
+    assert.eq(configPrimaryStats.configServerInShardCache, true);
+    mongosStats = getShardingStats(st.s0);
+    assert.eq(mongosStats.configServerInShardCache, true);
+
+    moveDatabaseAndUnshardedColls(st.s.getDB(dbName), newShardName);
+    moveDatabaseAndUnshardedColls(st.s.getDB(unshardedDbName), newShardName);
+    assert.commandWorked(st.s.adminCommand({moveChunk: ns, find: {skey: 0}, to: newShardName}));
+    ConfigShardUtil.waitForRangeDeletions(st.s);
+
+    // Insert documents directly onto the config server after it has fully drained and verify we
+    // can't complete the transition.
+
+    // Drained sharded collection.
+    assert.commandWorked(st.configRS.getPrimary().getCollection(ns).insert({x: 1}));
+    removeRes = assert.commandWorked(st.s.adminCommand({transitionToDedicatedConfigServer: 1}));
+    assert.eq("pendingDataCleanup", removeRes.state);
+    assert.eq("waiting for data to be cleaned up", removeRes.msg);
+    assert.eq(0, removeRes.pendingRangeDeletions, tojson(removeRes));
+    assert.eq(ns, removeRes.firstNonEmptyCollection, tojson(removeRes));
+    assert.commandWorked(st.configRS.getPrimary().getCollection(ns).remove({x: 1}));
+
+    // Drained unsharded collection.
+    assert.commandWorked(st.configRS.getPrimary().getCollection(unshardedNs).insert({x: 1}));
+    removeRes = assert.commandWorked(st.s.adminCommand({transitionToDedicatedConfigServer: 1}));
+    assert.eq("pendingDataCleanup", removeRes.state);
+    assert.eq("waiting for data to be cleaned up", removeRes.msg);
+    assert.eq(0, removeRes.pendingRangeDeletions, tojson(removeRes));
+    assert.eq(unshardedNs, removeRes.firstNonEmptyCollection, tojson(removeRes));
+    assert.commandWorked(st.configRS.getPrimary().getCollection(unshardedNs).remove({x: 1}));
+
+    // Drained time series collection.
+    assert.commandWorked(
+        st.configRS.getPrimary().getCollection(timeseriesShardedNs).insert({time: ISODate()}));
+    removeRes = assert.commandWorked(st.s.adminCommand({transitionToDedicatedConfigServer: 1}));
+    assert.eq("pendingDataCleanup", removeRes.state);
+    assert.eq("waiting for data to be cleaned up", removeRes.msg);
+    assert.eq(0, removeRes.pendingRangeDeletions, tojson(removeRes));
+    assert.eq(timeseriesShardedNs, removeRes.firstNonEmptyCollection, tojson(removeRes));
+    assert.commandWorked(st.configRS.getPrimary().getCollection(timeseriesShardedNs).remove({}));
+
+    // Previously non-existent collection in a drained database, e.g. a temporary collection created
+    // by an in-progress operation or a new untracked unsharded collection.
+    assert.commandWorked(
+        st.configRS.getPrimary().getDB(dbName)["newOrphanCollection"].insert({x: 1}));
+    removeRes = assert.commandWorked(st.s.adminCommand({transitionToDedicatedConfigServer: 1}));
+    assert.eq("pendingDataCleanup", removeRes.state);
+    assert.eq("waiting for data to be cleaned up", removeRes.msg);
+    assert.eq(0, removeRes.pendingRangeDeletions, tojson(removeRes));
+    assert.eq(
+        dbName + ".newOrphanCollection", removeRes.firstNonEmptyCollection, tojson(removeRes));
+    assert.commandWorked(
+        st.configRS.getPrimary().getDB(dbName)["newOrphanCollection"].remove({x: 1}));
+
+    // Logical sessions collection.
+    assert.commandWorked(
+        st.configRS.getPrimary().getCollection("config.system.sessions").insert({x: 1}));
+    removeRes = assert.commandWorked(st.s.adminCommand({transitionToDedicatedConfigServer: 1}));
+    assert.eq("pendingDataCleanup", removeRes.state);
+    assert.eq("waiting for data to be cleaned up", removeRes.msg);
+    assert.eq(0, removeRes.pendingRangeDeletions, tojson(removeRes));
+    assert.eq("config.system.sessions", removeRes.firstNonEmptyCollection, tojson(removeRes));
+    assert.commandWorked(
+        st.configRS.getPrimary().getCollection("config.system.sessions").remove({x: 1}));
+
+    // More than one collection.
+    assert.commandWorked(st.configRS.getPrimary().getCollection(ns).insert({x: 1}));
+    assert.commandWorked(st.configRS.getPrimary().getCollection(unshardedNs).insert({x: 1}));
+    removeRes = assert.commandWorked(st.s.adminCommand({transitionToDedicatedConfigServer: 1}));
+    assert.eq("pendingDataCleanup", removeRes.state);
+    assert.eq("waiting for data to be cleaned up", removeRes.msg);
+    assert.eq(0, removeRes.pendingRangeDeletions, tojson(removeRes));
+    // Only the first non-empty collection found is in the response, so either ns or unshardedNs.
+    assert.contains(removeRes.firstNonEmptyCollection, [ns, unshardedNs], tojson(removeRes));
+    assert.commandWorked(st.configRS.getPrimary().getCollection(ns).remove({x: 1}));
+    assert.commandWorked(st.configRS.getPrimary().getCollection(unshardedNs).remove({x: 1}));
+
+    // The transition has not removed the config server as a shard yet.
+    assert.neq(null, st.s.getDB("config").shards.findOne({_id: "config"}));
+
+    removeRes = assert.commandWorked(st.s0.adminCommand({transitionToDedicatedConfigServer: 1}));
+    assert.eq("completed", removeRes.state);
+
+    // Sharding statistics after transitionToDedicatedConfigServer completes are correct.
+    configPrimaryStats = getShardingStats(st.configRS.getPrimary());
+    assert.eq(configPrimaryStats.countTransitionToDedicatedConfigServerStarted, 1);
+    assert.eq(configPrimaryStats.countTransitionToDedicatedConfigServerCompleted, 2);
+    assert.eq(configPrimaryStats.configServerInShardCache, false);
+    mongosStats = getShardingStats(st.s0);
+    assert.eq(mongosStats.configServerInShardCache, false);
+
+    // The transition has now removed the config server as a shard.
+    assert.eq(null, st.s.getDB("config").shards.findOne({_id: "config"}));
 }
 
 {
@@ -333,10 +474,25 @@ const newShardName =
     // correct indexes when receiving its first chunk after the transition.
     assert.commandWorked(st.s.getCollection(indexedNs).createIndex({newKey: 1}));
 
+    // Sharding statistics before transitionFromDedicatedConfigServer starts are correct.
+    let configPrimaryStats = getShardingStats(st.configRS.getPrimary());
+    assert.eq(configPrimaryStats.countTransitionFromDedicatedConfigServerCompleted,
+              1);  // Transition command already completed once on this node.
+    assert.eq(configPrimaryStats.configServerInShardCache, false);
+    let mongosStats = getShardingStats(st.s0);
+    assert.eq(mongosStats.configServerInShardCache, false);
+
     // Use write concern to verify the command support them. Any values weaker than the default
     // sharding metadata write concerns will be upgraded.
     assert.commandWorked(st.s.adminCommand(
         {transitionFromDedicatedConfigServer: 1, writeConcern: {wtimeout: 1000 * 60 * 60 * 24}}));
+
+    // Sharding statistics after transitionFromDedicatedConfigServer starts are correct.
+    configPrimaryStats = getShardingStats(st.configRS.getPrimary());
+    assert.eq(configPrimaryStats.countTransitionFromDedicatedConfigServerCompleted, 2);
+    assert.eq(configPrimaryStats.configServerInShardCache, true);
+    mongosStats = getShardingStats(st.s0);
+    assert.eq(mongosStats.configServerInShardCache, true);
 
     // Basic CRUD and sharded DDL work.
     basicCRUD(st.s);
@@ -350,6 +506,40 @@ const newShardName =
         st.s.adminCommand({moveChunk: indexedNs, find: {_id: 0}, to: configShardName}));
     assert.sameMembers(st.configRS.getPrimary().getCollection(indexedNs).getIndexKeys(),
                        [{_id: 1}, {oldKey: 1}, {newKey: 1}]);
+}
+
+{
+    //
+    // transitionFromDedicatedConfigServer requires replication to all config server nodes.
+    //
+
+    // Transition to dedicated mode so the config server can transition back to catalog shard mode.
+    let removeRes = assert.commandWorked(st.s.adminCommand({transitionToDedicatedConfigServer: 1}));
+    assert.eq("started", removeRes.state);
+    assert.commandWorked(st.s.adminCommand(
+        {moveChunk: ns, find: {skey: 0}, to: newShardName, _waitForDelete: true}));
+    assert.commandWorked(st.s.adminCommand(
+        {moveChunk: ns, find: {skey: 5}, to: newShardName, _waitForDelete: true}));
+    assert.commandWorked(st.s.adminCommand(
+        {moveChunk: indexedNs, find: {_id: 0}, to: newShardName, _waitForDelete: true}));
+    removeRes = assert.commandWorked(st.s.adminCommand({transitionToDedicatedConfigServer: 1}));
+    assert.eq("completed", removeRes.state);
+
+    // transitionFromDedicatedConfigServer times out with a lagged config secondary despite having a
+    // majority of its set still replicating.
+    const laggedSecondary = st.configRS.getSecondary();
+    st.configRS.awaitReplication();
+    stopServerReplication(laggedSecondary);
+    assert.commandFailedWithCode(
+        st.s.adminCommand({transitionFromDedicatedConfigServer: 1, maxTimeMS: 1000}),
+        ErrorCodes.MaxTimeMSExpired);
+    restartServerReplication(laggedSecondary);
+
+    // Now it succeeds.
+    assert.commandWorked(st.s.adminCommand({transitionFromDedicatedConfigServer: 1}));
+
+    assert.commandWorked(st.s.adminCommand(
+        {moveChunk: "config.system.sessions", find: {_id: 0}, to: configShardName}));
 }
 
 st.stop();

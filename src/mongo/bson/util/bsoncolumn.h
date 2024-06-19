@@ -145,7 +145,7 @@ public:
         }
 
     private:
-        template <class BufBuilderType, class BSONObjType, class Allocator>
+        template <class Allocator>
         friend class BSONColumnBuilder;
 
         // Initialize sub-object interleaving from current control byte position. Must be on a
@@ -447,7 +447,13 @@ public:
         _collection.push_back(_last);
     }
 
-    // Sets the last value without appending anything.
+    bool isLastMissing() {
+        return CMaterializer::isMissing(_last);
+    }
+
+    // Sets the last value without appending anything. This should be called to update _last to be
+    // the element in the reference object, and for missing top-level objects. Otherwise the append
+    // methods will take care of updating _last as needed.
     template <typename T>
     void setLast(const BSONElement& val) {
         _last = CMaterializer::template materialize<T>(*_allocator, val);
@@ -587,11 +593,17 @@ private:
 
 /**
  * Version of decompress() that accepts multiple paths decompressed to separate buffers.
+ *
+ * This function cannot yet handle arbitrary BSONColumn data:
+ * - Elements in the BSONColumn must be either objects or missing (EOO).
+ * - Uncompressed literals may appear in the BSONColumn only if they are empty objects.
+ * - Any other object data must be encoded in interleaved mode.
  */
 template <class CMaterializer, class Container, typename Path>
 requires Materializer<CMaterializer>
 void BSONColumnBlockBased::decompress(boost::intrusive_ptr<ElementStorage> allocator,
                                       std::span<std::pair<Path, Container&>> paths) const {
+
     // The Collector class wraps a reference to a buffer passed in by the caller.
     // BlockBasedInterleavedDecompressor expects references to collectors, so create a vector where
     // we allocate them.
@@ -606,14 +618,93 @@ void BSONColumnBlockBased::decompress(boost::intrusive_ptr<ElementStorage> alloc
         pathCollectors.push_back({p.first, ownedCollectors.back()});
     }
 
-    const char* control = _binary;
+    const char* ptr = _binary;
     const char* end = _binary + _size;
-    while (*control != EOO) {
-        BlockBasedInterleavedDecompressor decompressor{*allocator, control, end};
-        invariant(bsoncolumn::isInterleavedStartControlByte(*control),
-                  "non-interleaved data is not yet handled via this API");
-        control = decompressor.decompress(std::span{pathCollectors});
-        invariant(control < end);
+    const uint64_t lastNonRLEBlock = simple8b::kSingleZero;
+
+    // If there are any leading simple8b blocks, they are all skips. Handle them first.
+    uint8_t control = *ptr;
+    if (isSimple8bControlByte(control)) {
+        const char* newPtr = nullptr;
+        for (auto&& collector : ownedCollectors) {
+            newPtr = BSONColumnBlockDecompressHelpers::decompressAllMissing(
+                ptr, end, collector, lastNonRLEBlock, [&collector](size_t count, uint64_t) {
+                    for (size_t i = 0; i < count; ++i) {
+                        collector.appendPositionInfo(1);
+                    }
+                });
+        }
+        ptr = newPtr;
+    }
+
+    while (ptr < end) {
+        control = *ptr;
+        if (control == EOO) {
+            uassert(
+                8517800, "BSONColumn data ended without reaching end of buffer", ptr + 1 == end);
+            break;
+        } else if (isUncompressedLiteralControlByte(control)) {
+            // The BSONColumn encoding guarantees that the field name is just a single null byte.
+            BSONElement literal(ptr, 1, BSONElement::TrustedInitTag{});
+            dassert(BSONElement{ptr}.fieldNameSize() == 1,  // size includes null byte
+                    "Unexpected field name in top-level BSONColumn element");
+            BSONType type = literal.type();
+            ptr += literal.size();
+            switch (type) {
+                case Object: {
+                    // SERVER-88217 Remove this assertion when we can evaluate paths in arbitrary
+                    // object literals.
+                    invariant(literal.Obj().isEmpty(),
+                              "non-empty object literal in path-based decompress()");
+                    for (auto&& pathPair : pathCollectors) {
+                        if (isRootPath(pathPair.first)) {
+                            pathPair.second.template append<BSONObj>(literal);
+                        } else {
+                            pathPair.second.appendMissing();
+                            pathPair.second.template setLast<BSONElement>(BSONElement{});
+                        }
+                        pathPair.second.appendPositionInfo(1);
+                    }
+                    break;
+                }
+                default:
+                    // TODO SERVER-88215 Remove this assertion once we Handle other data types in
+                    // here.
+                    invariant(false, "unhandled data type in path-based decompress()");
+            }
+
+            if (isSimple8bControlByte(*ptr)) {
+                const char* newPtr = nullptr;
+                for (auto&& collector : ownedCollectors) {
+                    newPtr = BSONColumnBlockDecompressHelpers::decompressAllLiteral(
+                        ptr, end, collector, lastNonRLEBlock, [&collector](size_t count, uint64_t) {
+                            for (size_t i = 0; i < count; ++i) {
+                                collector.appendPositionInfo(1);
+                            }
+                        });
+                }
+                ptr = newPtr;
+            }
+        } else if (isInterleavedStartControlByte(control)) {
+            BlockBasedInterleavedDecompressor decompressor{*allocator, ptr, end};
+            ptr = decompressor.decompress(std::span{pathCollectors});
+
+            // If there are any simple8b blocks after the interleaved section, handle them now.
+            if (isSimple8bControlByte(*ptr)) {
+                const char* newPtr = nullptr;
+                for (auto&& collector : ownedCollectors) {
+                    newPtr = BSONColumnBlockDecompressHelpers::decompressAllLiteral(
+                        ptr, end, collector, lastNonRLEBlock, [&collector](size_t count, uint64_t) {
+                            for (size_t i = 0; i < count; ++i) {
+                                collector.appendPositionInfo(1);
+                            }
+                        });
+                }
+                ptr = newPtr;
+            }
+        } else {
+            uasserted(8517801, "Unexpected control byte value");
+        }
     }
 }
 

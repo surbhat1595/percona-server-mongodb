@@ -138,6 +138,8 @@
 
 namespace mongo {
 namespace {
+// Ticks for server-side Javascript deprecation log messages.
+Rarely _samplerFunctionJs, _samplerWhereClause;
 
 using namespace fmt::literals;
 
@@ -227,18 +229,13 @@ std::unique_ptr<FindCommandRequest> makeFindCommandForShards(OperationContext* o
         findCommand->setReadConcern(readConcernArgs.toBSONInner());
     }
 
+    query.getExpCtx()->initializeReferencedSystemVariables();
+
     // Replace the 'letParams' expressions with their values.
     if (auto letParams = findCommand->getLet()) {
-        BSONObjBuilder result;
-
         const auto& vars = query.getExpCtx()->variables;
         const auto& vps = query.getExpCtx()->variablesParseState;
-        for (BSONElement elem : *letParams) {
-            StringData name = elem.fieldNameStringData();
-            result << name << vars.getUserDefinedValue(vps.getVariable(name));
-        }
-
-        findCommand->setLet(result.obj());
+        findCommand->setLet(vars.toBSON(vps, *letParams));
     }
 
     // ExpressionContext may contain query settings that were looked up in QuerySettingsManager.
@@ -328,7 +325,9 @@ std::vector<AsyncRequestsSender::Request> constructRequestsForShards(
 void updateNumHostsTargetedMetrics(OperationContext* opCtx,
                                    const ChunkManager& cm,
                                    int nTargetedShards) {
-    int nShardsOwningChunks = cm.hasRoutingTable() ? cm.getNShardsOwningChunks() : 0;
+    // Note: It is fine to use 'getAproxNShardsOwningChunks' here because the result is only used to
+    // update stats.
+    int nShardsOwningChunks = cm.hasRoutingTable() ? cm.getAproxNShardsOwningChunks() : 0;
     auto targetType = NumHostsTargetedMetrics::get(opCtx).parseTargetType(
         opCtx, nTargetedShards, nShardsOwningChunks, cm.isSharded());
     NumHostsTargetedMetrics::get(opCtx).addNumHostsTargeted(
@@ -492,7 +491,7 @@ CursorId runQueryWithoutRetrying(OperationContext* opCtx,
 
     // Retrieve enough data from the ClusterClientCursor for the first batch of results.
 
-    FindCommon::waitInFindBeforeMakingBatch(opCtx, query);
+    FindCommon::waitInFindBeforeMakingBatch(opCtx, query, &routerWaitInFindBeforeMakingBatch);
 
     if (findCommand.getAllowPartialResults() &&
         opCtx->checkForInterruptNoAssert().code() == ErrorCodes::MaxTimeMSExpired) {
@@ -583,7 +582,7 @@ CursorId runQueryWithoutRetrying(OperationContext* opCtx,
         if (const auto remoteMetrics = ccc->takeRemoteMetrics()) {
             opDebug.additiveMetrics.aggregateDataBearingNodeMetrics(*remoteMetrics);
         }
-        collectQueryStatsMongos(opCtx, ccc->getKey());
+        collectQueryStatsMongos(opCtx, ccc->takeKey());
         return CursorId(0);
     }
 
@@ -716,6 +715,19 @@ CursorId ClusterFind::runQuery(OperationContext* opCtx,
     if (auto letParams = findCommand.getLet()) {
         auto* expCtx = query.getExpCtx().get();
         expCtx->variables.seedVariablesWithLetParameters(expCtx, *letParams);
+    }
+
+    if (query.getExpCtx()->hasServerSideJs.where && _samplerWhereClause.tick()) {
+        LOGV2_WARNING(8996504,
+                      "$where is deprecated. For more information, see "
+                      "https://www.mongodb.com/docs/manual/reference/operator/query/where/");
+    }
+
+    if (query.getExpCtx()->hasServerSideJs.function && _samplerFunctionJs.tick()) {
+        LOGV2_WARNING(
+            8996505,
+            "$function is deprecated. For more information, see "
+            "https://www.mongodb.com/docs/manual/reference/operator/aggregation/function/");
     }
 
     // Re-target and re-send the initial find command to the shards until we have established the

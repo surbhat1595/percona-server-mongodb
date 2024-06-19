@@ -86,10 +86,7 @@ int ElementStorage::Element::size() const {
 }
 
 BSONElement ElementStorage::Element::element() const {
-    return {_buffer,
-            _nameSize + 1,
-            _valueSize + _nameSize + kElementValueOffset,
-            BSONElement::TrustedInitTag{}};
+    return {_buffer, _nameSize + 1, BSONElement::TrustedInitTag{}};
 }
 
 ElementStorage::ContiguousBlock::ContiguousBlock(ElementStorage& storage) : _storage(storage) {
@@ -356,6 +353,22 @@ void BSONColumn::Iterator::_incrementInterleaved(Interleaved& interleaved) {
         // Exit interleaved mode and load as regular. Re-instantiate the state and set last known
         // value.
         uassert(6067604, "Invalid BSON Column interleaved encoding", processed == 0);
+
+        // Before exiting interleaved mode, verify all of the decoders are exhausted.
+        while (stateIt != stateEnd) {
+            auto& state = *stateIt;
+            if (auto d64 = get_if<DecodingState::Decoder64>(&state.decoder);
+                d64 && d64->pos.valid()) {
+                uassert(
+                    8902201, "Invalid BSON Column interleaved encoding", !((++d64->pos).more()));
+            } else if (auto d128 = get_if<DecodingState::Decoder128>(&state.decoder);
+                       d128 && d128->pos.valid()) {
+                uassert(
+                    8902202, "Invalid BSON Column interleaved encoding", !((++d128->pos).more()));
+            }
+            stateIt++;
+        }
+
         // This invalidates 'interleaved' reference, may no longer be dereferenced.
         Regular& regular = _mode.emplace<Regular>();
         get<0>(regular.state.decoder).deltaOfDelta = false;
@@ -377,7 +390,7 @@ void BSONColumn::Iterator::_incrementInterleaved(Interleaved& interleaved) {
     }
 
     // Root objects always have an empty field name and we already know the total object size.
-    BSONElement obj(objdata, 1, objsize);
+    BSONElement obj(objdata, 1, BSONElement::TrustedInitTag{});
 
     _decompressed = obj;
 }
@@ -454,7 +467,7 @@ BSONColumn::Iterator::DecodingState::loadControl(ElementStorage& allocator,
     if (bsoncolumn::isUncompressedLiteralControlByte(control)) {
         // Load BSONElement from the literal and set last encoded in case we need to calculate
         // deltas from this literal
-        BSONElement literalElem(buffer, 1, -1);
+        BSONElement literalElem(buffer, 1, BSONElement::TrustedInitTag{});
         loadUncompressed(literalElem);
         return {literalElem, literalElem.size()};
     }
@@ -721,7 +734,7 @@ bool BSONColumn::contains_forTest(BSONType elementType) const {
     while (byteIter != columnEnd) {
         control = static_cast<uint8_t>(*byteIter);
         if (bsoncolumn::isUncompressedLiteralControlByte(control)) {
-            BSONElement literalElem(byteIter, 1, -1);
+            BSONElement literalElem(byteIter, 1, BSONElement::TrustedInitTag{});
             if (control == elementType) {
                 return true;
             } else if (control == BSONType::EOO) {

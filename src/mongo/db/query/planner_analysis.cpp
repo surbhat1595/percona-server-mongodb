@@ -64,6 +64,7 @@
 #include "mongo/db/pipeline/field_path.h"
 #include "mongo/db/query/find_command.h"
 #include "mongo/db/query/index_bounds.h"
+#include "mongo/db/query/index_hint.h"
 #include "mongo/db/query/interval.h"
 #include "mongo/db/query/interval_evaluation_tree.h"
 #include "mongo/db/query/optimizer/algebra/polyvalue.h"
@@ -86,7 +87,6 @@
 
 namespace mongo {
 
-using std::endl;
 using std::pair;
 using std::string;
 using std::unique_ptr;
@@ -915,8 +915,7 @@ void QueryPlannerAnalysis::removeImpreciseInternalExprFilters(const QueryPlanner
 }
 
 // static
-std::pair<EqLookupNode::LookupStrategy, boost::optional<IndexEntry>>
-QueryPlannerAnalysis::determineLookupStrategy(
+QueryPlannerAnalysis::Strategy QueryPlannerAnalysis::determineLookupStrategy(
     const NamespaceString& foreignCollName,
     const std::string& foreignField,
     const std::map<NamespaceString, CollectionInfo>& collectionsInfo,
@@ -926,6 +925,9 @@ QueryPlannerAnalysis::determineLookupStrategy(
     if (foreignCollItr == collectionsInfo.end() || !foreignCollItr->second.exists) {
         return {EqLookupNode::LookupStrategy::kNonExistentForeignCollection, boost::none};
     }
+
+    const auto scanDirection =
+        foreignCollItr->second.collscanDirection.value_or(NaturalOrderHint::Direction::kForward);
 
     // Check if an eligible index exists for indexed loop join strategy.
     const auto foreignIndex = [&]() -> boost::optional<IndexEntry> {
@@ -956,15 +958,21 @@ QueryPlannerAnalysis::determineLookupStrategy(
         return boost::none;
     }();
 
-    // TODO SERVER-88629 Throw 'ErrorCodes::NoQueryExecutionPlans' if 'NO_TABLE_SCAN' option is set
-    // for HashJoin and NestedLoopJoin.
     if (foreignIndex) {
-        return {EqLookupNode::LookupStrategy::kIndexedLoopJoin, std::move(foreignIndex)};
-    } else if (allowDiskUse && isEligibleForHashJoin(foreignCollItr->second)) {
-        return {EqLookupNode::LookupStrategy::kHashJoin, boost::none};
-    } else {
-        return {EqLookupNode::LookupStrategy::kNestedLoopJoin, boost::none};
+        // $natural hinted scan direction is not relevant for IndexedLoopJoin, but is passed here
+        // for consistency.
+        return {
+            EqLookupNode::LookupStrategy::kIndexedLoopJoin, std::move(foreignIndex), scanDirection};
     }
+    const bool tableScanForbidden =
+        foreignCollItr->second.options & QueryPlannerParams::NO_TABLE_SCAN;
+    uassert(ErrorCodes::NoQueryExecutionPlans,
+            "No foreign index and table scan disallowed",
+            !tableScanForbidden);
+    if (allowDiskUse && isEligibleForHashJoin(foreignCollItr->second)) {
+        return {EqLookupNode::LookupStrategy::kHashJoin, boost::none, scanDirection};
+    }
+    return {EqLookupNode::LookupStrategy::kNestedLoopJoin, boost::none, scanDirection};
 }
 
 // static
@@ -1277,12 +1285,11 @@ std::unique_ptr<QuerySolutionNode> QueryPlannerAnalysis::analyzeSort(
 
     if (!solnRoot->fetched()) {
         const bool sortIsCovered = std::all_of(sortObj.begin(), sortObj.end(), [&](BSONElement e) {
-            // If the index has the collation that the query is expecting then kCollatedProvided
-            // will be returned hence we can use the index for sorting and grouping (distinct_scan)
-            // but need to add a fetch to retrieve a proper value of the key.
-            auto fieldAvailability = solnRoot->getFieldAvailability(e.fieldName());
-            return fieldAvailability == FieldAvailability::kCollatedProvided ||
-                fieldAvailability == FieldAvailability::kFullyProvided;
+            // Note that hasField() will return 'false' in the case that this field is a string
+            // and there is a non-simple collation on the index. This will lead to encoding of
+            // the field from the document on fetch, despite having read the encoded value from
+            // the index.
+            return solnRoot->hasField(e.fieldName());
         });
 
         if (!sortIsCovered) {
@@ -1349,13 +1356,9 @@ std::unique_ptr<QuerySolution> QueryPlannerAnalysis::analyzeDataAccess(
             bool fetch = false;
             for (auto&& shardKeyField : params.shardKey) {
                 auto fieldAvailability = solnRoot->getFieldAvailability(shardKeyField.fieldName());
-                if (fieldAvailability == FieldAvailability::kNotProvided ||
-                    fieldAvailability == FieldAvailability::kCollatedProvided) {
-                    // One of the shard key fields are not  or only a collated version are provided
-                    // by an index. We need to fetch the full documents prior to shard filtering. In
-                    // the case of kCollatedProvided the fetch is needed to get a non-ICU encoded
-                    // value from the collection. Else the IDXScan would only return non-readable
-                    // ICU encoded values.
+                if (fieldAvailability == FieldAvailability::kNotProvided) {
+                    // One of the shard key fields is not provided by an index. We need to fetch the
+                    // full documents prior to shard filtering.
                     fetch = true;
                     break;
                 }

@@ -564,8 +564,7 @@ TEST_F(QueryStatsStoreTest, CorrectlyRedactsFindCommandRequestAllFields) {
             },
             "$readPreference": { 
                 "mode": "nearest", 
-                "tags": [ { "some": "other tag" }, { "some": "tag" } ], 
-                "hedge": { "enabled": true } 
+                "tags": [ { "some": "other tag" }, { "some": "tag" } ]
             },
             "collectionType": "collection",
             "hint": {
@@ -623,8 +622,7 @@ TEST_F(QueryStatsStoreTest, CorrectlyRedactsFindCommandRequestAllFields) {
             },
             "$readPreference": { 
                 "mode": "nearest", 
-                "tags": [ { "some": "other tag" }, { "some": "tag" } ], 
-                "hedge": { "enabled": true } 
+                "tags": [ { "some": "other tag" }, { "some": "tag" } ]
             },
             "collectionType": "collection",
             "hint": {
@@ -1232,8 +1230,12 @@ TEST_F(QueryStatsStoreTest, CorrectlyTokenizesAggregateCommandRequestAllFieldsSi
                     "locale": "simple"
                 },
                 "let": {
-                    "HASH<var1>": "?",
-                    "HASH<var2>": "?"
+                    "HASH<var1>": {
+                        "$const": "?"
+                    },
+                    "HASH<var2>": {
+                        "$const": "?"
+                    }
                 },
                 "command": "aggregate",
                 "pipeline": [
@@ -1267,7 +1269,9 @@ TEST_F(QueryStatsStoreTest, CorrectlyTokenizesAggregateCommandRequestAllFieldsSi
                                 "$first": "$HASH<d>.HASH<e>"
                             },
                             "HASH<f>": {
-                                "$sum": 1
+                                "$sum": {
+                                    "$const": 1
+                                }
                             }
                         }
                     },
@@ -1533,6 +1537,9 @@ TEST_F(QueryStatsStoreTest, BasicDiskUsage) {
                               .append("docsReturned", emptyIntMetric)
                               .append("keysExamined", emptyIntMetric)
                               .append("docsExamined", emptyIntMetric)
+                              .append("bytesRead", emptyIntMetric)
+                              .append("readTimeMicros", emptyIntMetric)
+                              .append("workingTimeMillis", emptyIntMetric)
                               .append("hasSortStage", boolMetricBson(0, 0))
                               .append("usedDisk", boolMetricBson(0, 0))
                               .append("fromMultiPlanner", boolMetricBson(0, 0))
@@ -1564,6 +1571,9 @@ TEST_F(QueryStatsStoreTest, BasicDiskUsage) {
                               .append("docsReturned", emptyIntMetric)
                               .append("keysExamined", emptyIntMetric)
                               .append("docsExamined", emptyIntMetric)
+                              .append("bytesRead", emptyIntMetric)
+                              .append("readTimeMicros", emptyIntMetric)
+                              .append("workingTimeMillis", emptyIntMetric)
                               .append("hasSortStage", boolMetricBson(0, 1))
                               .append("usedDisk", boolMetricBson(1, 0))
                               .append("fromMultiPlanner", boolMetricBson(0, 0))

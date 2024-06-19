@@ -855,6 +855,15 @@ server_parameters:
             gt: 0 
         redact: false
 
+    skipApplyingDbCheckBatchOnSecondary:
+        description: >-
+            Parameter for whether dbcheck batches should be applied on secondaries.
+        set_at: [ startup, runtime ]
+        cpp_vartype: AtomicWord<bool>
+        cpp_varname: skipApplyingDbCheckBatchOnSecondary
+        default: false
+        redact: false
+
     dbCheckMaxInternalRetries:
         description: >-
             The maximum number of internal retries that dbCheck will run on a batch.
@@ -895,7 +904,7 @@ feature_flags:
     featureFlagReduceMajorityWriteLatency:
         description: When enabled, Secondaries acknowledge writes as durable after an oplog entry is written durably to disk, without waiting for it to be applied.
         cpp_varname: feature_flags::gReduceMajorityWriteLatency
-        default: false
+        default: true
         shouldBeFCVGated: false
 
     featureFlagReplicateVectoredInsertsTransactionally:

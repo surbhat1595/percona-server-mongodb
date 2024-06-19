@@ -49,6 +49,12 @@
 namespace mongo {
 namespace {
 
+#ifdef _WIN32
+const auto sleepDelay = 250;
+#else
+const auto sleepDelay = 100;
+#endif
+
 class TestPeriodicThread : public WatchdogPeriodicThread {
 public:
     TestPeriodicThread(Milliseconds period) : WatchdogPeriodicThread(period, "testPeriodic") {}
@@ -119,7 +125,7 @@ TEST_F(PeriodicThreadTest, Basic) {
     std::uint32_t lastCounter = testThread.getCounter();
 
     // This is racey but it should only produce false negatives
-    sleepmillis(100);
+    sleepmillis(sleepDelay);
 
     ASSERT_EQ(lastCounter, testThread.getCounter());
 }
@@ -141,7 +147,7 @@ TEST_F(PeriodicThreadTest, PauseAndStop) {
     std::uint32_t pauseCounter = testThread.getCounter();
 
     // This is racey but it should only produce false negatives
-    sleepmillis(100);
+    sleepmillis(sleepDelay);
 
     // We could have had one more run of the loop as we paused - allow for that case
     // but no other runs of the thread.
@@ -153,7 +159,7 @@ TEST_F(PeriodicThreadTest, PauseAndStop) {
     std::uint32_t stopCounter = testThread.getCounter();
 
     // This is racey but it should only produce false negatives
-    sleepmillis(100);
+    sleepmillis(sleepDelay);
 
     ASSERT_EQ(stopCounter, testThread.getCounter());
 }
@@ -175,7 +181,7 @@ TEST_F(PeriodicThreadTest, PauseAndResume) {
     std::uint32_t pauseCounter = testThread.getCounter();
 
     // This is racey but it should only produce false negatives
-    sleepmillis(100);
+    sleepmillis(sleepDelay);
 
     // We could have had one more run of the loop as we paused - allow for that case
     // but no other runs of the thread.
@@ -269,7 +275,7 @@ TEST_F(WatchdogCheckThreadTest, Basic) {
     std::uint32_t lastCounter = counterCheckPtr->getCounter();
 
     // This is racey but it should only produce false negatives
-    sleepmillis(100);
+    sleepmillis(sleepDelay);
 
     ASSERT_EQ(lastCounter, counterCheckPtr->getCounter());
 }
@@ -380,7 +386,7 @@ TEST_F(WatchdogMonitorThreadTest, SleepyHungCheck) {
 
     monitorThread.start();
 
-    sleepmillis(100);
+    sleepmillis(sleepDelay);
 
     deathEvent.wait();
 
@@ -416,7 +422,7 @@ TEST_F(WatchdogMonitorTest, SleepyHungCheck) {
 
     monitor.start();
 
-    sleepmillis(100);
+    sleepmillis(sleepDelay);
 
     deathEvent.wait();
 
@@ -479,7 +485,7 @@ TEST_F(WatchdogMonitorTest, PauseAndResume) {
     std::uint32_t pauseCounter = counterCheckPtr->getCounter();
 
     // This is racey but it should only produce false negatives
-    sleepmillis(100);
+    sleepmillis(sleepDelay);
 
     // We could have had one more run of the loop as we paused - allow for that case
     // but no other runs of the thread.
@@ -492,7 +498,7 @@ TEST_F(WatchdogMonitorTest, PauseAndResume) {
     counterCheckPtr->setSignalOnCount(counterCheckCount);
 
     // Restart the monitor with a different interval.
-    monitor.setPeriod(Milliseconds(57));
+    monitor.setPeriod(Milliseconds(1007));
 
     counterCheckPtr->waitForCount();
     // Wait for monitor to run at least once.
@@ -513,11 +519,50 @@ TEST_F(WatchdogMonitorTest, PauseAndResume) {
 
 
     // This is racey but it should only produce false negatives
-    sleepmillis(100);
+    sleepmillis(sleepDelay);
 
     ASSERT_EQ(lastCounter, counterCheckPtr->getCounter());
     ASSERT_EQ(lastCheckGeneration, monitor.getCheckGeneration());
     ASSERT_EQ(lastMonitorGeneration, monitor.getMonitorGeneration());
+}
+
+// Make sure we can reduce the monitor period and that it takes effect immediately, i.e., we
+// don't wait until the old period has expired.
+TEST_F(WatchdogMonitorTest, ReduceMonitorPeriod) {
+    WatchdogDeathCallback deathCallback = []() {
+        LOGV2_FATAL(8961000, "Death signalled, it should not have been");
+    };
+
+    auto counterCheck = std::make_unique<TestCounterCheck>();
+    auto counterCheckPtr = counterCheck.get();
+
+    std::vector<std::unique_ptr<WatchdogCheck>> checks;
+    checks.push_back(std::move(counterCheck));
+
+    // Initial monitor period of 30 minutes.
+    WatchdogMonitor monitor(std::move(checks), Milliseconds(1), Minutes(30), deathCallback);
+
+    monitor.start();
+
+    // Wait for the checker to run a number of times, and ensure the monitor hasn't.
+    counterCheckPtr->setSignalOnCount(10);
+    counterCheckPtr->waitForCount();
+    ASSERT_EQ(monitor.getMonitorGeneration(), 0);
+
+    // Reduce the monitor period significantly. We're trying to check that the monitor thread
+    // waits using the new period (set here) rather than the old one. The new period shouldn't
+    // be so short that the monitor can immediately return due to the time between monitor.start()
+    // and now exceeding the new period - we want to cover the case where it goes back to sleep.
+    monitor.setPeriod(Milliseconds(250));
+
+    // Wait until the monitor generation reaches 1, up to a timeout.
+    int tries = 0;
+    while (monitor.getMonitorGeneration() < 1) {
+        sleepmillis(100);
+        ASSERT_LT(++tries, 100) << "Took too long to observe monitor running";
+    }
+
+    monitor.shutdown();
 }
 
 class DirectoryCheckTest : public ServiceContextTest {};

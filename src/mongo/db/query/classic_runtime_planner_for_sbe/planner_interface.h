@@ -54,10 +54,11 @@ struct PlannerDataForSBE final : public PlannerData {
                       CanonicalQuery* cq,
                       std::unique_ptr<WorkingSet> workingSet,
                       const MultipleCollectionAccessor& collections,
-                      QueryPlannerParams plannerParams,
+                      std::unique_ptr<QueryPlannerParams> plannerParams,
                       PlanYieldPolicy::YieldPolicy yieldPolicy,
                       boost::optional<size_t> cachedPlanHash,
-                      std::unique_ptr<PlanYieldPolicySBE> sbeYieldPolicy)
+                      std::unique_ptr<PlanYieldPolicySBE> sbeYieldPolicy,
+                      bool useSbePlanCache)
         : PlannerData(opCtx,
                       cq,
                       std::move(workingSet),
@@ -65,9 +66,13 @@ struct PlannerDataForSBE final : public PlannerData {
                       std::move(plannerParams),
                       yieldPolicy,
                       cachedPlanHash),
-          sbeYieldPolicy(std::move(sbeYieldPolicy)) {}
+          sbeYieldPolicy(std::move(sbeYieldPolicy)),
+          useSbePlanCache(useSbePlanCache) {}
 
     std::unique_ptr<PlanYieldPolicySBE> sbeYieldPolicy;
+
+    // If true, runtime planners will use the SBE plan cache rather than the classic plan cache.
+    const bool useSbePlanCache;
 };
 
 class PlannerBase : public PlannerInterface {
@@ -124,7 +129,7 @@ protected:
     }
 
     size_t plannerOptions() const {
-        return _plannerData.plannerParams.mainCollectionInfo.options;
+        return _plannerData.plannerParams->mainCollectionInfo.options;
     }
 
     boost::optional<size_t> cachedPlanHash() const {
@@ -140,11 +145,15 @@ protected:
     }
 
     const QueryPlannerParams& plannerParams() const {
-        return _plannerData.plannerParams;
+        return *_plannerData.plannerParams;
     }
 
     PlannerDataForSBE extractPlannerData() {
         return std::move(_plannerData);
+    }
+
+    bool useSbePlanCache() const {
+        return _plannerData.useSbePlanCache;
     }
 
 private:
@@ -180,7 +189,7 @@ class MultiPlanner final : public PlannerBase {
 public:
     MultiPlanner(PlannerDataForSBE plannerData,
                  std::vector<std::unique_ptr<QuerySolution>> candidatePlans,
-                 PlanCachingMode cachingMode,
+                 bool shouldWriteToPlanCache,
                  boost::optional<std::string> replanReason = boost::none);
 
     /**
@@ -193,16 +202,46 @@ public:
 
 private:
     using SbePlanAndData = std::pair<std::unique_ptr<sbe::PlanStage>, stage_builder::PlanStageData>;
-    SbePlanAndData _buildSbePlanAndUpdatePlanCache(const QuerySolution* winningSolution,
-                                                   const plan_ranker::PlanRankingDecision& ranking);
 
     bool _shouldUseEofOptimization() const;
 
+    // Callback to pass to the 'MultiPlanStage'. Constructs an SBE plan for the winning plan,
+    // dealing with the possibility of a pushed-down agg pipeline. If '_shouldWriteToPlanCache' is
+    // true, writes the resulting SBE plan to the SBE plan cache.
+    void _buildSbePlanAndMaybeCache(const CanonicalQuery&,
+                                    MultiPlanStage& mps,
+                                    std::unique_ptr<plan_ranker::PlanRankingDecision>,
+                                    std::vector<plan_ranker::CandidatePlan>&);
+
     std::unique_ptr<MultiPlanStage> _multiPlanStage;
-    PlanCachingMode _cachingMode;
+    const bool _shouldWriteToPlanCache;
     boost::optional<std::string> _replanReason;
+
+    // The SBE plan is constructed from the callback we pass to the 'MultiPlanStage' so that it can
+    // be used to construct a cache entry. Then it gets stashed here so that it can be subsequently
+    // used to create an SBE plan executor.
+    boost::optional<SbePlanAndData> _sbePlanAndData;
+
+    // Temporary owner of query solution; ownership is surrendered in makeExecutor().
+    std::unique_ptr<QuerySolution> _winningSolution;
 };
 
+/**
+ * Uses the classic sub-planner to construct a plan for a rooted $or query. Subplanning involves
+ * selecting an indexed access path independently for each branch of a rooted $or query. See
+ * 'SubplanStage' for details.
+ *
+ * The plan caching strategy differs depending on whether we are using the classic plan cache or the
+ * SBE plan cache. When using the classic plan cache, we write a separate plan cache entry for each
+ * branch of the $or. This requires threading a callback through the 'SubplanStage' to write to the
+ * classic plan cache; the callback will get involved whenever multi-planning for a particular $or
+ * branch completes.
+ *
+ * The SBE plan cache requires that we cache entire plans -- it does not support stitching partial
+ * cached plans together to create a composite plan. When the SBE plan cache is on, we therefore do
+ * not plumb through a callback as described above. Instead, this class takes on the responsibility
+ * of constructing the complete SBE plan for the query and writing it to the SBE plan cache.
+ */
 class SubPlanner final : public PlannerBase {
 public:
     SubPlanner(PlannerDataForSBE plannerData);
@@ -215,16 +254,109 @@ public:
     std::unique_ptr<PlanExecutor, PlanExecutor::Deleter> makeExecutor(
         std::unique_ptr<CanonicalQuery> canonicalQuery) override;
 
+    /**
+     * Returns the number of times that an individual $or branch was multi-planned during the
+     * subplanning process.
+     */
+    int numPerBranchMultiplans() const {
+        return _numPerBranchMultiplans;
+    }
+
 private:
+    SubplanStage::PlanSelectionCallbacks makeCallbacks();
+
     std::unique_ptr<SubplanStage> _subplanStage;
+    // Temporary owner of query solution; ownership is surrendered in makeExecutor().
+    std::unique_ptr<QuerySolution> _solution;
+
+    int _numPerBranchMultiplans = 0;
 };
 
 /**
- * Does a trial run of the cached solution & constructs `ValidCandidatePlanner` if it still works as
- * expected. Uses the QueryPlanner and the MultiPlanner to re-generate candidate plans for this
- * query and select a new winner otherwise.
+ * Interface for "PlannerGenerators" which, given a cache entry, generates a PlannerInterface
+ * plan depending on the result of the cache entry's trial period.
+ *
+ * The lifetime of retrieving a plan from the cache is as follows:
+ *
+ *                                     ---->  ValidCandidatePlanner---------->
+ *                                    /                                       \
+ * Cache Entry --> PlannerGenerator ->  --> SingleSolutionPassthroughPlanner -> --> PlanExecutor
+ *                                    \                                       /
+ *                                     ----------> MultiPlanner ------------->
  */
-std::unique_ptr<PlannerInterface> makePlannerForCacheEntry(
+class PlannerGeneratorFromCacheEntry {
+public:
+    virtual ~PlannerGeneratorFromCacheEntry() = default;
+
+    /**
+     * Runs the trial period and generates a planner.
+     */
+    virtual std::unique_ptr<PlannerInterface> makePlanner() = 0;
+};
+
+/**
+ * PlannerGenerator for a cache entry retrieved from the SBE plan cache.
+ */
+class PlannerGeneratorFromSbeCacheEntry : public PlannerGeneratorFromCacheEntry {
+public:
+    PlannerGeneratorFromSbeCacheEntry(PlannerDataForSBE plannerData,
+                                      std::unique_ptr<sbe::CachedPlanHolder> cachedPlanHolder)
+        : _plannerData(std::move(plannerData)), _cachedPlanHolder(std::move(cachedPlanHolder)) {}
+    /**
+     * Checks if any foreign collections have changed size significantly, and if so, returns a
+     * MultiPlanner.  Otherwise executes the trial period and returns a Planner implementation
+     * based on the result.
+     */
+    std::unique_ptr<PlannerInterface> makePlanner() override;
+
+private:
+    PlannerDataForSBE _plannerData;
+    std::unique_ptr<sbe::CachedPlanHolder> _cachedPlanHolder;
+};
+
+/**
+ * PlannerGenerator for classic cache entries. This generates an SBE plan using the given
+ * PlannerData and winning QSN tree.
+ */
+class PlannerGeneratorFromClassicCacheEntry : public PlannerGeneratorFromCacheEntry {
+public:
+    PlannerGeneratorFromClassicCacheEntry(PlannerDataForSBE plannerData,
+                                          const QuerySolution& qs,
+                                          boost::optional<size_t> decisionReads);
+
+    /**
+     * Executes the trial period and returns a Planner implementation depending on the result.
+     */
+    std::unique_ptr<PlannerInterface> makePlanner() override;
+
+    /**
+     * Test-only helper for swapping in a mock SBE plan for the one that was built from the cache
+     * entry.
+     */
+    void setSbePlan_forTest(std::unique_ptr<sbe::PlanStage> sbePlan,
+                            stage_builder::PlanStageData data) {
+        _sbePlan = std::move(sbePlan);
+        _planStageData = std::move(data);
+    }
+
+private:
+    PlannerDataForSBE _plannerData;
+    const QuerySolution& _solution;
+    boost::optional<size_t> _decisionReads;
+
+    std::unique_ptr<sbe::PlanStage> _sbePlan;
+    boost::optional<stage_builder::PlanStageData> _planStageData;
+};
+
+/**
+ * Helper functions which create a PlannerGenerator of the appropriate type and immediately call
+ * makePlanner(). These functions takes the data stored in a cache entry and turn it into a
+ * PlannerInterface object, which can then be turned into a runnable PlanExecutor.
+ */
+std::unique_ptr<PlannerInterface> makePlannerForSbeCacheEntry(
     PlannerDataForSBE plannerData, std::unique_ptr<sbe::CachedPlanHolder> cachedPlanHolder);
+
+std::unique_ptr<PlannerInterface> makePlannerForClassicCacheEntry(
+    PlannerDataForSBE plannerData, const QuerySolution& qs, boost::optional<size_t> decisionWorks);
 
 }  // namespace mongo::classic_runtime_planner_for_sbe

@@ -50,7 +50,7 @@ public:
     bool supportsCheckpoints() const final {
         return false;
     }
-    bool isEphemeral() const final {
+    bool isEphemeral() const override {
         return true;
     }
     void loadCatalog(OperationContext* opCtx,
@@ -59,6 +59,12 @@ public:
     void closeCatalog(OperationContext* opCtx) final {}
     Status dropDatabase(OperationContext* opCtx, const DatabaseName& dbName) final {
         return Status::OK();
+    }
+    Status dropCollectionsWithPrefix(OperationContext* opCtx,
+                                     const DatabaseName& dbName,
+                                     const std::string& collectionNamePrefix) final {
+        return Status(ErrorCodes::CommandNotSupported,
+                      "The current storage engine doesn't support dropCollections");
     }
     void flushAllFiles(OperationContext* opCtx, bool callerHoldsReadLock) final {}
     Status beginBackup(OperationContext* opCtx) final {

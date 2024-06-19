@@ -42,7 +42,6 @@ executor:
     mongod_options:
       enableMajorityReadConcern: ''
       set_parameters:
-        enableAutoCompaction: 1
         enableElectionHandoff: 0
         enableTestCommands: 1
         logComponentVerbosity:
@@ -101,6 +100,7 @@ selector:
   - jstests/core/**/startup_log.js
   - jstests/core/**/shell_connection_strings.js
   - jstests/core/**/geo_s2ordering.js
+  - jstests/core/mixed_version_replica_set.js
   - jstests/core/timeseries/timeseries_delete_hint.js
   - jstests/core/**/set_param1.js
   - jstests/core/**/profile*.js

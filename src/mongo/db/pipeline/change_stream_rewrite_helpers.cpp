@@ -36,6 +36,7 @@
 #include <boost/optional/optional.hpp>
 #include <boost/smart_ptr.hpp>
 #include <cstddef>
+#include <fmt/format.h>
 #include <functional>
 #include <map>
 #include <ostream>
@@ -74,12 +75,14 @@ namespace change_stream_rewrite {
 using MatchExpressionRewrite =
     std::function<std::unique_ptr<MatchExpression>(const boost::intrusive_ptr<ExpressionContext>&,
                                                    const PathMatchExpression*,
-                                                   bool /* allowInexact */)>;
+                                                   bool /* allowInexact */,
+                                                   std::vector<BSONObj>&)>;
 
 using AggExpressionRewrite =
     std::function<boost::intrusive_ptr<Expression>(const boost::intrusive_ptr<ExpressionContext>&,
                                                    const ExpressionFieldPath*,
-                                                   bool /* allowInexact */)>;
+                                                   bool /* allowInexact */,
+                                                   std::vector<BSONObj>&)>;
 
 namespace {
 /**
@@ -120,7 +123,8 @@ std::unique_ptr<MatchExpression> resolvePredicateOnNonExistentField(
 std::unique_ptr<MatchExpression> matchRewriteOperationType(
     const boost::intrusive_ptr<ExpressionContext>& expCtx,
     const PathMatchExpression* predicate,
-    bool allowInexact) {
+    bool allowInexact,
+    std::vector<BSONObj>& backingBsonObjs) {
     // We should only ever see predicates on the 'operationType' field.
     tassert(5554200, "Unexpected empty path", !predicate->path().empty());
     tassert(5554201,
@@ -162,8 +166,8 @@ std::unique_ptr<MatchExpression> matchRewriteOperationType(
         if (BSONType::String != opType.type() || !kOpTypeRewriteMap.count(opType.str())) {
             return std::make_unique<AlwaysFalseMatchExpression>();
         }
-        return MatchExpressionParser::parseAndNormalize(kOpTypeRewriteMap.at(opType.str()).toBson(),
-                                                        expCtx);
+        return MatchExpressionParser::parseAndNormalize(
+            backingBsonObjs.emplace_back(kOpTypeRewriteMap.at(opType.str()).toBson()), expCtx);
     };
 
     switch (predicate->matchType()) {
@@ -212,7 +216,8 @@ std::unique_ptr<MatchExpression> matchRewriteOperationType(
 boost::intrusive_ptr<Expression> exprRewriteOperationType(
     const boost::intrusive_ptr<ExpressionContext>& expCtx,
     const ExpressionFieldPath* expr,
-    bool allowInexact) {
+    bool allowInexact,
+    std::vector<BSONObj>&) {
     auto fieldPath = expr->getFieldPathWithoutCurrentPrefix();
     tassert(5920000,
             str::stream() << "Unexpected field path" << fieldPath.fullPathWithPrefix(),
@@ -282,7 +287,8 @@ boost::intrusive_ptr<Expression> exprRewriteOperationType(
 std::unique_ptr<MatchExpression> matchRewriteDocumentKey(
     const boost::intrusive_ptr<ExpressionContext>& expCtx,
     const PathMatchExpression* predicate,
-    bool allowInexact) {
+    bool allowInexact,
+    std::vector<BSONObj>& backingBsonObjs) {
     tassert(5554600, "Unexpected empty predicate path", predicate->fieldRef()->numParts() > 0);
     tassert(5554601,
             str::stream() << "Unexpected predicate path: " << predicate->path(),
@@ -306,7 +312,8 @@ std::unique_ptr<MatchExpression> matchRewriteDocumentKey(
     // we evaluate the predicate against a non-existent field to see whether it matches.
     if (predicate->matchesSingleElement({})) {
         auto nonCRUDCase = MatchExpressionParser::parseAndNormalize(
-            fromjson("{$nor: [{op: 'i'}, {op: 'u'}, {op: 'd'}]}"), expCtx);
+            backingBsonObjs.emplace_back(fromjson("{$nor: [{op: 'i'}, {op: 'u'}, {op: 'd'}]}")),
+            expCtx);
         rewrittenPredicate->add(std::move(nonCRUDCase));
     }
 
@@ -325,7 +332,8 @@ std::unique_ptr<MatchExpression> matchRewriteDocumentKey(
 boost::intrusive_ptr<Expression> exprRewriteDocumentKey(
     const boost::intrusive_ptr<ExpressionContext>& expCtx,
     const ExpressionFieldPath* expr,
-    bool allowInexact) {
+    bool allowInexact,
+    std::vector<BSONObj>&) {
     auto fieldPath = expr->getFieldPathWithoutCurrentPrefix();
     tassert(5942300,
             str::stream() << "Unexpected field path" << fieldPath.fullPathWithPrefix(),
@@ -372,7 +380,8 @@ boost::intrusive_ptr<Expression> exprRewriteDocumentKey(
 std::unique_ptr<MatchExpression> matchRewriteFullDocument(
     const boost::intrusive_ptr<ExpressionContext>& expCtx,
     const PathMatchExpression* predicate,
-    bool allowInexact) {
+    bool allowInexact,
+    std::vector<BSONObj>& backingBsonObjs) {
     tassert(5851400, "Unexpected empty predicate path", predicate->fieldRef()->numParts() > 0);
     tassert(5851401,
             str::stream() << "Unexpected predicate path: " << predicate->path(),
@@ -412,7 +421,9 @@ std::unique_ptr<MatchExpression> matchRewriteFullDocument(
     auto insertOrReplaceCase = std::make_unique<AndMatchExpression>();
 
     auto insertOrReplaceOpFilter = MatchExpressionParser::parseAndNormalize(
-        fromjson("{$or: [{op: 'i'}, {op: 'u', 'o._id': {$exists: true}}]}"), expCtx);
+        backingBsonObjs.emplace_back(
+            fromjson("{$or: [{op: 'i'}, {op: 'u', 'o._id': {$exists: true}}]}")),
+        expCtx);
     insertOrReplaceCase->add(std::move(insertOrReplaceOpFilter));
 
     auto predForInsertOrReplace = cloneWithSubstitution(predicate, {{"fullDocument", "o"}});
@@ -427,7 +438,8 @@ std::unique_ptr<MatchExpression> matchRewriteFullDocument(
         rewrittenPredicate->add(std::move(deleteCase));
 
         auto nonCRUDCase = MatchExpressionParser::parseAndNormalize(
-            fromjson("{$nor: [{op: 'i'}, {op: 'u'}, {op: 'd'}]}"), expCtx);
+            backingBsonObjs.emplace_back(fromjson("{$nor: [{op: 'i'}, {op: 'u'}, {op: 'd'}]}")),
+            expCtx);
         rewrittenPredicate->add(std::move(nonCRUDCase));
     }
 
@@ -441,7 +453,8 @@ std::unique_ptr<MatchExpression> matchRewriteFullDocument(
 std::unique_ptr<MatchExpression> matchRewriteUpdateDescription(
     const boost::intrusive_ptr<ExpressionContext>& expCtx,
     const PathMatchExpression* predicate,
-    bool allowInexact) {
+    bool allowInexact,
+    std::vector<BSONObj>& backingBsonObjs) {
     tassert(5554500, "Unexpected empty predicate path", predicate->fieldRef()->numParts() > 0);
     tassert(5554501,
             str::stream() << "Unexpected predicate path: " << predicate->path(),
@@ -555,9 +568,10 @@ std::unique_ptr<MatchExpression> matchRewriteUpdateDescription(
                 // not need to check whether the predicate matches a missing field in this case.
                 static const std::vector<std::string> oplogFields = {"o.diff.d", "o.$unset"};
                 auto rewrittenEquality = std::make_unique<OrMatchExpression>();
+                using namespace fmt::literals;
                 for (auto&& oplogField : oplogFields) {
                     rewrittenEquality->add(std::make_unique<ExistsMatchExpression>(
-                        StringData(oplogField + "." + fieldName)));
+                        StringData("{}.{}"_format(oplogField, fieldName))));
                 }
                 return rewrittenEquality;
             };
@@ -628,7 +642,9 @@ std::unique_ptr<MatchExpression> matchRewriteUpdateDescription(
     // events, so we evaluate the predicate against a non-existent field to see whether it matches.
     if (predicate->matchesSingleElement({})) {
         auto nonUpdateCase = MatchExpressionParser::parseAndNormalize(
-            fromjson("{$or: [{op: {$ne: 'u'}}, {op: 'u', 'o._id': {$exists: true}}]}"), expCtx);
+            backingBsonObjs.emplace_back(
+                fromjson("{$or: [{op: {$ne: 'u'}}, {op: 'u', 'o._id': {$exists: true}}]}")),
+            expCtx);
         finalPredicate = std::make_unique<OrMatchExpression>(std::move(finalPredicate), nullptr);
         finalPredicate->add(std::move(nonUpdateCase));
     }
@@ -907,7 +923,8 @@ std::unique_ptr<MatchExpression> matchRewriteGenericNamespace(
 std::unique_ptr<MatchExpression> matchRewriteNs(
     const boost::intrusive_ptr<ExpressionContext>& expCtx,
     const PathMatchExpression* predicate,
-    bool allowInexact) {
+    bool allowInexact,
+    std::vector<BSONObj>& backingBsonObjs) {
     // We should only ever see predicates on the 'ns' field.
     tassert(5554101, "Unexpected empty path", !predicate->path().empty());
     tassert(5554102,
@@ -936,8 +953,8 @@ std::unique_ptr<MatchExpression> matchRewriteNs(
 
     // Create the final namespace filter for CRUD operations, i.e. {op: {$ne: 'c'}}.
     auto crudNsFilter = std::make_unique<AndMatchExpression>();
-    crudNsFilter->add(
-        MatchExpressionParser::parseAndNormalize(fromjson("{op: {$ne: 'c'}}"), expCtx));
+    crudNsFilter->add(MatchExpressionParser::parseAndNormalize(
+        backingBsonObjs.emplace_back(fromjson("{op: {$ne: 'c'}}")), expCtx));
     crudNsFilter->add(std::move(crudNsRewrite));
 
     //
@@ -1004,7 +1021,8 @@ std::unique_ptr<MatchExpression> matchRewriteNs(
 
     // Create the final namespace filter for {op: 'c'} operations.
     auto cmdNsFilter = std::make_unique<AndMatchExpression>();
-    cmdNsFilter->add(MatchExpressionParser::parseAndNormalize(fromjson("{op: 'c'}"), expCtx));
+    cmdNsFilter->add(MatchExpressionParser::parseAndNormalize(
+        backingBsonObjs.emplace_back(fromjson("{op: 'c'}")), expCtx));
     cmdNsFilter->add(std::move(cmdCases));
 
     //
@@ -1026,7 +1044,8 @@ std::unique_ptr<MatchExpression> matchRewriteNs(
 boost::intrusive_ptr<Expression> exprRewriteNs(
     const boost::intrusive_ptr<ExpressionContext>& expCtx,
     const ExpressionFieldPath* expr,
-    bool allowInexact) {
+    bool allowInexact,
+    std::vector<BSONObj>& backingBsonObjs) {
     auto fieldPath = expr->getFieldPathWithoutCurrentPrefix();
 
     // This function should only be called on the 'ns' field.
@@ -1126,7 +1145,8 @@ boost::intrusive_ptr<Expression> exprRewriteNs(
 std::unique_ptr<MatchExpression> matchRewriteTo(
     const boost::intrusive_ptr<ExpressionContext>& expCtx,
     const PathMatchExpression* predicate,
-    bool allowInexact) {
+    bool allowInexact,
+    std::vector<BSONObj>& backingBsonObjs) {
     // We should only ever see predicates on the 'to' field.
     tassert(5554400, "Unexpected empty path", !predicate->path().empty());
     tassert(5554401,
@@ -1134,8 +1154,9 @@ std::unique_ptr<MatchExpression> matchRewriteTo(
             predicate->fieldRef()->getPart(0) == DocumentSourceChangeStream::kRenameTargetNssField);
 
     if (auto rewriteTo = matchRewriteGenericNamespace(expCtx, predicate, "o.to"_sd)) {
-        auto andRewriteTo = std::make_unique<AndMatchExpression>(
-            MatchExpressionParser::parseAndNormalize(fromjson("{op: 'c'}"), expCtx));
+        auto andRewriteTo =
+            std::make_unique<AndMatchExpression>(MatchExpressionParser::parseAndNormalize(
+                backingBsonObjs.emplace_back(fromjson("{op: 'c'}")), expCtx));
         andRewriteTo->add(std::move(rewriteTo));
         return andRewriteTo;
     }
@@ -1149,7 +1170,8 @@ std::unique_ptr<MatchExpression> matchRewriteTo(
 boost::intrusive_ptr<Expression> exprRewriteTo(
     const boost::intrusive_ptr<ExpressionContext>& expCtx,
     const ExpressionFieldPath* expr,
-    bool allowInexact) {
+    bool allowInexact,
+    std::vector<BSONObj>& backingBsonObjs) {
     auto fieldPath = expr->getFieldPathWithoutCurrentPrefix();
 
     // This function should only be called on the 'to' field.
@@ -1201,7 +1223,8 @@ boost::intrusive_ptr<Expression> exprRewriteTo(
 std::unique_ptr<MatchExpression> matchRewriteFullDocumentBeforeChange(
     const boost::intrusive_ptr<ExpressionContext>& expCtx,
     const PathMatchExpression* predicate,
-    bool allowInexact) {
+    bool allowInexact,
+    std::vector<BSONObj>& backingBsonObjs) {
     tassert(6199800, "Unexpected empty path", !predicate->path().empty());
     tassert(6199801,
             str::stream() << "Unexpected predicate path: " << predicate->path(),
@@ -1217,10 +1240,10 @@ std::unique_ptr<MatchExpression> matchRewriteFullDocumentBeforeChange(
     }
 
     // Only an update or a delete can possibly match a predicate on fullDocumentBeforeChange.
-    auto updatePred = std::make_unique<AndMatchExpression>(
-        MatchExpressionParser::parseAndNormalize(fromjson("{op: 'u'}"), expCtx));
-    auto deletePred = std::make_unique<AndMatchExpression>(
-        MatchExpressionParser::parseAndNormalize(fromjson("{op: 'd'}"), expCtx));
+    auto updatePred = std::make_unique<AndMatchExpression>(MatchExpressionParser::parseAndNormalize(
+        backingBsonObjs.emplace_back(fromjson("{op: 'u'}")), expCtx));
+    auto deletePred = std::make_unique<AndMatchExpression>(MatchExpressionParser::parseAndNormalize(
+        backingBsonObjs.emplace_back(fromjson("{op: 'd'}")), expCtx));
 
     // If the predicate is on the _id field, we can apply it to the documentKey in the oplog.
     /* Example:
@@ -1281,7 +1304,8 @@ boost::intrusive_ptr<Expression> rewriteAggExpressionTree(
     const boost::intrusive_ptr<ExpressionContext>& expCtx,
     boost::intrusive_ptr<Expression> expr,
     const std::set<std::string>& fields,
-    bool allowInexact) {
+    bool allowInexact,
+    std::vector<BSONObj>& backingBsonObjs) {
     tassert(5920001, "Expression required for rewriteAggExpressionTree", expr);
 
     if (auto andExpr = dynamic_cast<ExpressionAnd*>(expr.get())) {
@@ -1290,8 +1314,8 @@ boost::intrusive_ptr<Expression> rewriteAggExpressionTree(
         while (childIt != children.end()) {
             // If inexact rewrites are permitted and any children of an $and cannot be rewritten, we
             // can omit those children without expanding the set of rejected documents.
-            if (auto rewrittenPred =
-                    rewriteAggExpressionTree(expCtx, *childIt, fields, allowInexact)) {
+            if (auto rewrittenPred = rewriteAggExpressionTree(
+                    expCtx, *childIt, fields, allowInexact, backingBsonObjs)) {
                 *childIt = rewrittenPred;
                 ++childIt;
             } else if (allowInexact) {
@@ -1307,8 +1331,8 @@ boost::intrusive_ptr<Expression> rewriteAggExpressionTree(
             // Dropping any children of an $or would expand the set of documents rejected by the
             // filter. There is no valid rewrite of a $or if we cannot rewrite all of its children.
             // It is, however, valid for children of an $or to be inexact.
-            if (auto rewrittenPred =
-                    rewriteAggExpressionTree(expCtx, *childIt, fields, allowInexact)) {
+            if (auto rewrittenPred = rewriteAggExpressionTree(
+                    expCtx, *childIt, fields, allowInexact, backingBsonObjs)) {
                 *childIt = rewrittenPred;
             } else {
                 return nullptr;
@@ -1328,7 +1352,7 @@ boost::intrusive_ptr<Expression> rewriteAggExpressionTree(
             auto childIt = norChildren.begin();
             while (childIt != norChildren.end()) {
                 if (auto rewrittenPred = rewriteAggExpressionTree(
-                        expCtx, *childIt, fields, false /* allowInexact */)) {
+                        expCtx, *childIt, fields, false /* allowInexact */, backingBsonObjs)) {
                     *childIt = rewrittenPred;
                     ++childIt;
                 } else if (allowInexact) {
@@ -1340,8 +1364,8 @@ boost::intrusive_ptr<Expression> rewriteAggExpressionTree(
             return notExpr;
         }
 
-        if (auto rewrittenPred =
-                rewriteAggExpressionTree(expCtx, notChild, fields, false /* allowInexact */)) {
+        if (auto rewrittenPred = rewriteAggExpressionTree(
+                expCtx, notChild, fields, false /* allowInexact */, backingBsonObjs)) {
             notChild = rewrittenPred;
             return notExpr;
         }
@@ -1375,7 +1399,7 @@ boost::intrusive_ptr<Expression> rewriteAggExpressionTree(
 
         // Other paths have custom rewrite logic.
         if (exprRewriteRegistry.contains(firstPath)) {
-            return exprRewriteRegistry[firstPath](expCtx, fieldExpr, allowInexact);
+            return exprRewriteRegistry[firstPath](expCtx, fieldExpr, allowInexact, backingBsonObjs);
         }
 
         // Others cannot be rewritten at all.
@@ -1400,7 +1424,7 @@ boost::intrusive_ptr<Expression> rewriteAggExpressionTree(
                 // Some expressions have null children, which we leave in place.
                 continue;
             } else if (auto rewrittenPred = rewriteAggExpressionTree(
-                           expCtx, *childIt, fields, false /* allowInexact */)) {
+                           expCtx, *childIt, fields, false /* allowInexact */, backingBsonObjs)) {
                 *childIt = rewrittenPred;
             } else {
                 return nullptr;
@@ -1426,7 +1450,8 @@ std::unique_ptr<MatchExpression> rewriteMatchExpressionTree(
     const boost::intrusive_ptr<ExpressionContext>& expCtx,
     const MatchExpression* root,
     const std::set<std::string>& fields,
-    bool allowInexact) {
+    bool allowInexact,
+    std::vector<BSONObj>& backingBsonObjs) {
     tassert(5687200, "MatchExpression required for rewriteMatchExpressionTree", root);
 
     switch (root->matchType()) {
@@ -1437,7 +1462,7 @@ std::unique_ptr<MatchExpression> rewriteMatchExpressionTree(
                 // rewritten, we can omit those children without expanding the set of rejected
                 // documents.
                 if (auto rewrittenPred = rewriteMatchExpressionTree(
-                        expCtx, root->getChild(i), fields, allowInexact)) {
+                        expCtx, root->getChild(i), fields, allowInexact, backingBsonObjs)) {
                     rewrittenAnd->add(std::move(rewrittenPred));
                 } else if (!allowInexact) {
                     return nullptr;
@@ -1452,7 +1477,7 @@ std::unique_ptr<MatchExpression> rewriteMatchExpressionTree(
                 // filter. There is no valid rewrite of a $or if we cannot rewrite all of its
                 // children. It is, however, valid for children of an $or to be inexact.
                 if (auto rewrittenPred = rewriteMatchExpressionTree(
-                        expCtx, root->getChild(i), fields, allowInexact)) {
+                        expCtx, root->getChild(i), fields, allowInexact, backingBsonObjs)) {
                     rewrittenOr->add(std::move(rewrittenPred));
                 } else {
                     return nullptr;
@@ -1467,8 +1492,11 @@ std::unique_ptr<MatchExpression> rewriteMatchExpressionTree(
             // documents, then {$nor: [P]} will incorrectly reject a _superset_ of documents.
             auto rewrittenNor = std::make_unique<NorMatchExpression>();
             for (size_t i = 0; i < root->numChildren(); ++i) {
-                if (auto rewrittenPred = rewriteMatchExpressionTree(
-                        expCtx, root->getChild(i), fields, false /* allowInexact */)) {
+                if (auto rewrittenPred = rewriteMatchExpressionTree(expCtx,
+                                                                    root->getChild(i),
+                                                                    fields,
+                                                                    false /* allowInexact */,
+                                                                    backingBsonObjs)) {
                     rewrittenNor->add(std::move(rewrittenPred));
                 } else if (!allowInexact) {
                     return nullptr;
@@ -1480,7 +1508,7 @@ std::unique_ptr<MatchExpression> rewriteMatchExpressionTree(
             // Note that children of a $not _cannot_ be inexact. If predicate P rejects a _subset_
             // of documents, then {$not: P} will incorrectly reject a _superset_ of documents.
             if (auto rewrittenPred = rewriteMatchExpressionTree(
-                    expCtx, root->getChild(0), fields, false /* allowInexact */)) {
+                    expCtx, root->getChild(0), fields, false /* allowInexact */, backingBsonObjs)) {
                 return std::make_unique<NotMatchExpression>(std::move(rewrittenPred));
             }
             return nullptr;
@@ -1494,15 +1522,19 @@ std::unique_ptr<MatchExpression> rewriteMatchExpressionTree(
                 expCtx.get(), BSON("" << origExprVal).firstElement(), expCtx->variablesParseState);
 
             // Attempt to rewrite the aggregation expression and return a new ExprMatchExpression.
-            if (auto rewrittenExpr =
-                    rewriteAggExpressionTree(expCtx, clonedExpr, fields, allowInexact)) {
+            if (auto rewrittenExpr = rewriteAggExpressionTree(
+                    expCtx, clonedExpr, fields, allowInexact, backingBsonObjs)) {
                 return std::make_unique<ExprMatchExpression>(rewrittenExpr, expCtx);
             }
             return nullptr;
         }
         default: {
             if (auto pathME = dynamic_cast<const PathMatchExpression*>(root)) {
-                tassert(5687201, "Unexpected empty path", !pathME->path().empty());
+                // Only attempt to rewrite non-empty paths.
+                if (pathME->path().empty()) {
+                    return nullptr;
+                }
+
                 auto firstPath = pathME->fieldRef()->getPart(0).toString();
 
                 // Only attempt to rewrite paths that begin with one of the caller-requested fields.
@@ -1517,7 +1549,8 @@ std::unique_ptr<MatchExpression> rewriteMatchExpressionTree(
 
                 // Other paths have custom rewrite logic.
                 if (matchRewriteRegistry.contains(firstPath)) {
-                    return matchRewriteRegistry[firstPath](expCtx, pathME, allowInexact);
+                    return matchRewriteRegistry[firstPath](
+                        expCtx, pathME, allowInexact, backingBsonObjs);
                 }
 
                 // Others cannot be rewritten at all.
@@ -1533,6 +1566,7 @@ std::unique_ptr<MatchExpression> rewriteMatchExpressionTree(
 std::unique_ptr<MatchExpression> rewriteFilterForFields(
     const boost::intrusive_ptr<ExpressionContext>& expCtx,
     const MatchExpression* userMatch,
+    std::vector<BSONObj>& backingBsonObjs,
     std::set<std::string> includeFields,
     std::set<std::string> excludeFields) {
     // If we get null in, we return null immediately.
@@ -1559,7 +1593,8 @@ std::unique_ptr<MatchExpression> rewriteFilterForFields(
     }
 
     // Attempt to rewrite the tree. Predicates on unknown or unrequested fields will be discarded.
-    return rewriteMatchExpressionTree(expCtx, userMatch, includeFields, true /* allowInexact */);
+    return rewriteMatchExpressionTree(
+        expCtx, userMatch, includeFields, true /* allowInexact */, backingBsonObjs);
 }
 }  // namespace change_stream_rewrite
 }  // namespace mongo

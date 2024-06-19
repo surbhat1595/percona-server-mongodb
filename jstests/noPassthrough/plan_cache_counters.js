@@ -2,7 +2,7 @@
  * Test that the plan cache hits, misses and skipped serverStatus' counters are updated correctly
  * when serving queries.
  */
-import {checkSbeFullyEnabled} from "jstests/libs/sbe_util.js";
+import {checkSbeFullFeatureFlagEnabled, checkSbeFullyEnabled} from "jstests/libs/sbe_util.js";
 
 const conn = MongoRunner.runMongod({});
 const db = conn.getDB("plan_cache_hits_and_misses_metrics");
@@ -16,7 +16,8 @@ assert.commandWorked(db.createCollection(collCapped.getName(), {capped: true, si
 assert.commandWorked(coll.insert({a: 1}));
 assert.commandWorked(collCapped.insert({a: 1}));
 
-const isSbeEnabled = checkSbeFullyEnabled(db);
+const shouldGenerateSbePlan = checkSbeFullyEnabled(db);
+const isUsingSbePlanCache = checkSbeFullFeatureFlagEnabled(db);
 
 /**
  * Retrieves the "hits", "misses" and "skipped" serverStatus metrics for the given 'planCacheType'
@@ -56,7 +57,7 @@ function runCommandAndCheckPlanCacheMetric({
     command,
     indexes,
     expectedCacheBehaviors,
-    planCacheType = (isSbeEnabled ? "sbe" : "classic")
+    planCacheType = (isUsingSbePlanCache ? "sbe" : "classic")
 }) {
     if (indexes) {
         assert.commandWorked(coll.dropIndexes());
@@ -101,7 +102,7 @@ function runCommandAndCheckPlanCacheMetric({
     {
         command: {find: coll.getName(), filter: {a: 1}, comment: "query coll scan"},
         expectedCacheBehaviors:
-            [cacheBehavior.miss, isSbeEnabled ? cacheBehavior.hit : cacheBehavior.miss]
+            [cacheBehavior.miss, isUsingSbePlanCache ? cacheBehavior.hit : cacheBehavior.miss]
     },
     // Same as above but with an aggregate command.
     {
@@ -111,7 +112,7 @@ function runCommandAndCheckPlanCacheMetric({
             cursor: {},
             comment: "query coll scan aggregate"
         },
-        expectedCacheBehaviors: [isSbeEnabled ? cacheBehavior.hit : cacheBehavior.miss]
+        expectedCacheBehaviors: [isUsingSbePlanCache ? cacheBehavior.hit : cacheBehavior.miss]
     },
     // Same query but with two indexes on the collection. We should recover from plan cache on
     // third run when a plan cache entry gets activated.
@@ -143,12 +144,13 @@ function runCommandAndCheckPlanCacheMetric({
         planCacheType: "classic"
     },
     // Hinted queries are cached and can be recovered only in SBE. Note that 'hint' changes the
-    // query shape, so we expect to recover only on a second run.
+    // query shape when the SBE cache is used, so we expect to recover only on a second run.
     {
         command: {find: coll.getName(), filter: {a: 1}, comment: "query hint", hint: {a: 1}},
         expectedCacheBehaviors: [
-            isSbeEnabled ? cacheBehavior.miss : cacheBehavior.skip,
-            isSbeEnabled ? cacheBehavior.hit : cacheBehavior.skip
+            (shouldGenerateSbePlan && isUsingSbePlanCache) ? cacheBehavior.miss
+                                                           : cacheBehavior.skip,
+            (shouldGenerateSbePlan && isUsingSbePlanCache) ? cacheBehavior.hit : cacheBehavior.skip
         ],
     },
     // Min queries never get cached.

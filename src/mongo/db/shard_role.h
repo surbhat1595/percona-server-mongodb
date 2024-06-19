@@ -198,10 +198,10 @@ public:
                           shard_role_details::AcquiredCollection& acquiredCollection);
 
     CollectionAcquisition(const CollectionAcquisition& other);
-    CollectionAcquisition(CollectionAcquisition&& other);
+    CollectionAcquisition(CollectionAcquisition&& other) noexcept;
 
     CollectionAcquisition& operator=(const CollectionAcquisition& other);
-    CollectionAcquisition& operator=(CollectionAcquisition&& other);
+    CollectionAcquisition& operator=(CollectionAcquisition&& other) noexcept;
 
     ~CollectionAcquisition();
 
@@ -251,10 +251,10 @@ public:
                     const shard_role_details::AcquiredView& acquiredView);
 
     ViewAcquisition(const ViewAcquisition& other);
-    ViewAcquisition(ViewAcquisition&& other);
+    ViewAcquisition(ViewAcquisition&& other) noexcept;
 
     ViewAcquisition& operator=(const ViewAcquisition& other);
-    ViewAcquisition& operator=(ViewAcquisition&& other);
+    ViewAcquisition& operator=(ViewAcquisition&& other) noexcept;
 
     ~ViewAcquisition();
 
@@ -371,7 +371,7 @@ CollectionAcquisition acquireCollection(OperationContext* opCtx,
                                         LockMode mode);
 
 CollectionAcquisitions acquireCollections(OperationContext* opCtx,
-                                          CollectionAcquisitionRequests acquisitionRequests,
+                                          const CollectionAcquisitionRequests& acquisitionRequests,
                                           LockMode mode);
 
 CollectionOrViewAcquisition acquireCollectionOrView(
@@ -379,7 +379,7 @@ CollectionOrViewAcquisition acquireCollectionOrView(
 
 CollectionOrViewAcquisitions acquireCollectionsOrViews(
     OperationContext* opCtx,
-    CollectionOrViewAcquisitionRequests acquisitionRequests,
+    const CollectionOrViewAcquisitionRequests& acquisitionRequests,
     LockMode mode);
 
 
@@ -395,13 +395,13 @@ CollectionAcquisition acquireCollectionMaybeLockFree(
     OperationContext* opCtx, CollectionAcquisitionRequest acquisitionRequest);
 
 CollectionAcquisitions acquireCollectionsMaybeLockFree(
-    OperationContext* opCtx, CollectionAcquisitionRequests acquisitionRequests);
+    OperationContext* opCtx, const CollectionAcquisitionRequests& acquisitionRequests);
 
 CollectionOrViewAcquisition acquireCollectionOrViewMaybeLockFree(
     OperationContext* opCtx, CollectionOrViewAcquisitionRequest acquisitionRequest);
 
 CollectionOrViewAcquisitions acquireCollectionsOrViewsMaybeLockFree(
-    OperationContext* opCtx, CollectionOrViewAcquisitionRequests acquisitionRequests);
+    OperationContext* opCtx, const CollectionOrViewAcquisitionRequests& acquisitionRequests);
 
 /**
  * Please read the comments on AcquisitionPrerequisites::kLocalCatalogOnlyWithPotentialDataLoss for

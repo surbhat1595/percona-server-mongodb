@@ -50,6 +50,7 @@ class OperationContext;
  */
 StatusWith<BSONObj> fixDocumentForInsert(OperationContext* opCtx,
                                          const BSONObj& doc,
+                                         bool bypassEmptyTsReplacement = false,
                                          bool* containsDotsOrDollarsField = nullptr);
 
 /**

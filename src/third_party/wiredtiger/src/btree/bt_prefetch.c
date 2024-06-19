@@ -9,13 +9,13 @@
 #include "wt_internal.h"
 
 /*
- * __wt_btree_prefetch --
+ * __wti_btree_prefetch --
  *     Pre-load a set of pages into the cache. This session holds a hazard pointer on the ref passed
  *     in, so there must be a valid page and a valid parent page (though that parent could change if
  *     a split happens).
  */
 int
-__wt_btree_prefetch(WT_SESSION_IMPL *session, WT_REF *ref)
+__wti_btree_prefetch(WT_SESSION_IMPL *session, WT_REF *ref)
 {
     WT_CONNECTION_IMPL *conn;
     WT_DECL_RET;
@@ -77,7 +77,7 @@ __wt_btree_prefetch(WT_SESSION_IMPL *session, WT_REF *ref)
          * session transaction snapshot.
          */
         if (WT_REF_GET_STATE(next_ref) == WT_REF_DISK && F_ISSET(next_ref, WT_REF_FLAG_LEAF) &&
-          next_ref->page_del == NULL && !F_ISSET(next_ref, WT_REF_FLAG_PREFETCH)) {
+          next_ref->page_del == NULL && !F_ISSET_ATOMIC_8(next_ref, WT_REF_FLAG_PREFETCH)) {
             ret = __wt_conn_prefetch_queue_push(session, next_ref);
             if (ret == EBUSY) {
                 ret = 0;

@@ -33,11 +33,13 @@
 #include "mongo/util/string_listset.h"
 
 #include <algorithm>
+#include <bitset>
+#include <concepts>
 #include <functional>
 #include <iterator>
 
 namespace mongo {
-InListData::InListData(const InListData& other)
+InListData::InListData(CloneCtorTag, const InListData& other)
     : _collator(other._collator),
       _sbeTagMask(other._sbeTagMask),
       _hashSetSbeTagMask(other._hashSetSbeTagMask),
@@ -48,76 +50,38 @@ InListData::InListData(const InListData& other)
       _hasNonEmptyArray(other._hasNonEmptyArray),
       _hasNonEmptyObject(other._hasNonEmptyObject),
       _hasLargeStrings(other._hasLargeStrings),
-      _sorted(other._sorted),
-      _sortedAndDeduped(other._sortedAndDeduped),
-      _hasMultipleUniqueElements(other._hasMultipleUniqueElements),
-      _hashSetInitialized(false),
-      _prepared(false),
+      _wasPreSorted(other._wasPreSorted),
+      _wasPreSortedAndDeduped(other._wasPreSortedAndDeduped),
+      _hasSingleUniqueElement(other._hasSingleUniqueElement),
       _arr(other._arr),
       _oldBackingArr(other._oldBackingArr),
-      _elements(other._elements),
       _originalElements(other._originalElements),
-      _hashSet(0, sbe::value::ValueHash{}, sbe::value::ValueEq{}) {}
+      _sortedElements(boost::in_place_init, cloneSortedElements(other._sortedElements)),
+      _firstOfEachTypeElements(other._firstOfEachTypeElements) {}
 
 void InListData::appendElements(BSONArrayBuilder& bab, bool getSortedAndDeduped) {
-    if (getSortedAndDeduped) {
-        for (size_t i = 0; i < _elements.size(); ++i) {
-            bab.append(_elements[i]);
-        }
-    } else {
-        appendOriginalElements(bab);
+    for (const auto& elem : getElements(getSortedAndDeduped)) {
+        bab.append(elem);
     }
 }
 
-void InListData::appendOriginalElements(BSONArrayBuilder& bab) const {
-    if (_arr) {
-        BSONObjIterator it(*_arr);
-        while (it.more()) {
-            BSONElement e = it.next();
-            if (e.type() != BSONType::RegEx) {
-                bab.append(e);
-            }
-        }
-    } else {
-        auto& elems = _originalElements ? *_originalElements : _elements;
-        for (size_t i = 0; i < elems.size(); ++i) {
-            bab.append(elems[i]);
-        }
-    }
-}
-
-std::vector<BSONElement> InListData::getFirstOfEachType(bool getSortedAndDeduped) {
-    stdx::unordered_set<int> seenTypes;
-    std::vector<BSONElement> result;
-
-    if (getSortedAndDeduped) {
-        for (auto&& elem : getElements()) {
-            if (seenTypes.insert(canonicalizeBSONType(elem.type())).second) {
+std::vector<BSONElement> InListData::getFirstOfEachType(bool getSortedAndDeduped) const {
+    if (getSortedAndDeduped && !_wasPreSortedAndDeduped) {
+        // Registers if an element of a given canonical type has been observed in the elements
+        // array. Uses one bit for each canonical type.
+        CanonicalTypeMask observedElementsCanonicalTypeMask;
+        std::vector<BSONElement> result;
+        for (const auto& elem : getElements()) {
+            const auto normalizedCanonicalType = getNormalizedCanonicalType(elem.type());
+            if (!observedElementsCanonicalTypeMask.test(normalizedCanonicalType)) {
                 result.emplace_back(elem);
+                observedElementsCanonicalTypeMask.set(normalizedCanonicalType);
             }
         }
+        return result;
     } else {
-        if (_arr) {
-            for (auto&& elem : *_arr) {
-                // '_arr' might contain regexs. In this context, we ignore any regexes that we might
-                // encounter.
-                if (elem.type() != BSONType::RegEx) {
-                    if (seenTypes.insert(canonicalizeBSONType(elem.type())).second) {
-                        result.emplace_back(elem);
-                    }
-                }
-            }
-        } else {
-            auto& elems = _originalElements ? *_originalElements : _elements;
-            for (auto&& elem : elems) {
-                if (seenTypes.insert(canonicalizeBSONType(elem.type())).second) {
-                    result.emplace_back(elem);
-                }
-            }
-        }
+        return {_firstOfEachTypeElements.cbegin(), _firstOfEachTypeElements.cend()};
     }
-
-    return result;
 }
 
 Status InListData::setElementsImpl(boost::optional<BSONObj> arr,
@@ -125,7 +89,7 @@ Status InListData::setElementsImpl(boost::optional<BSONObj> arr,
                                    bool errorOnRegex,
                                    boost::optional<uint32_t> elemsSizeHint,
                                    const std::function<Status(const BSONElement&)>& fn) {
-    tassert(7690405, "Cannot call setElementImpl() after InListData has been prepared", !_prepared);
+    tassert(7690405, "Cannot call setElementImpl() after InListData has been shared", !isShared());
     tassert(7690416,
             "Expected either 'arr' or 'elementsIn' to be defined but not both",
             arr.has_value() != elementsIn.has_value());
@@ -135,6 +99,11 @@ Status InListData::setElementsImpl(boost::optional<BSONObj> arr,
     bool hasMultipleUniqueElements = false;
 
     uint32_t typeMask = 0;
+
+    // Registers if an element of a given canonical type has been observed in the elements array.
+    // Uses one bit for each canonical type.
+    CanonicalTypeMask observedElementsCanonicalTypeMask;
+
     bool hasEmptyArray = false;
     bool hasEmptyObject = false;
     bool hasNonEmptyArray = false;
@@ -142,6 +111,9 @@ Status InListData::setElementsImpl(boost::optional<BSONObj> arr,
     bool hasLargeStrings = false;
 
     std::vector<BSONElement> elements;
+
+    // A vector of BSONElements of the first observed elements of each distinct canonical type.
+    SmallBSONElementVector firstOfEachTypeElements;
 
     if (arr) {
         const uint32_t arrSizeInBytes = arr->objsize();
@@ -190,22 +162,28 @@ Status InListData::setElementsImpl(boost::optional<BSONObj> arr,
                 elements.emplace_back(e);
             }
 
-            typeMask |= getBSONTypeMask(type);
+            const auto bsonTypeMask = getBSONTypeMask(type);
+            if ((typeMask & bsonTypeMask) == 0) {
+                const auto normalizedCanonicalType = getNormalizedCanonicalType(type);
+                if (!observedElementsCanonicalTypeMask.test(normalizedCanonicalType)) {
+                    firstOfEachTypeElements.emplace_back(e);
+                    observedElementsCanonicalTypeMask.set(normalizedCanonicalType);
+                }
+                typeMask |= bsonTypeMask;
+            }
 
             if (type == BSONType::String || type == BSONType::Symbol) {
                 uint32_t len = e.valuestrsize() - 1;
                 bool isLargeString = len > kLargeStringThreshold;
                 hasLargeStrings |= isLargeString;
-            } else {
-                if (type == BSONType::Array) {
-                    // If 'e' is an array, update 'hasEmptyArray' and 'hasNonEmptyArray'.
-                    hasEmptyArray |= e.Obj().isEmpty();
-                    hasNonEmptyArray |= !e.Obj().isEmpty();
-                } else if (type == BSONType::Object) {
-                    // If 'e' is an object, update 'hasEmptyObject' and 'hasNonEmptyObject'.
-                    hasEmptyObject |= e.Obj().isEmpty();
-                    hasNonEmptyObject |= !e.Obj().isEmpty();
-                }
+            } else if (type == BSONType::Array) {
+                // If 'e' is an array, update 'hasEmptyArray' and 'hasNonEmptyArray'.
+                hasEmptyArray |= e.Obj().isEmpty();
+                hasNonEmptyArray |= !e.Obj().isEmpty();
+            } else if (type == BSONType::Object) {
+                // If 'e' is an object, update 'hasEmptyObject' and 'hasNonEmptyObject'.
+                hasEmptyObject |= e.Obj().isEmpty();
+                hasNonEmptyObject |= !e.Obj().isEmpty();
             }
 
             if (elemsAreSorted) {
@@ -260,34 +238,6 @@ Status InListData::setElementsImpl(boost::optional<BSONObj> arr,
         typeMask |= stringLikeMask;
     }
 
-    // We defer on actually sorting and deduping '_elements'. Record what we've observed so far.
-    _sorted = elemsAreSorted;
-    _sortedAndDeduped = elemsAreSorted && elemsAreUnique;
-    _hasMultipleUniqueElements = hasMultipleUniqueElements;
-
-    if (arr) {
-        // If 'arr' is defined, then save 'arr' and 'elements' into '_arr' and '_elements'
-        // respectively and clear '_oldBackingArr' and '_originalElements'.
-        _arr = std::move(arr);
-        _oldBackingArr = boost::none;
-        _elements = std::move(elements);
-        _originalElements = boost::none;
-    } else {
-        // If 'arr' is not defined, save the old value of '_arr' into '_oldBackingArr' if needed,
-        // save 'elements' into '_elements', and clear '_arr' and '_originalElements'.
-        if (_arr && _arr->isOwned()) {
-            tassert(7690413, "Expected '_oldBackingArr' to be 'boost::none'", !_oldBackingArr);
-            _oldBackingArr = std::move(_arr);
-        }
-        _arr = boost::none;
-
-        _elements = std::move(elements);
-        _originalElements = boost::none;
-    }
-
-    // Mark the elements as being initialized.
-    _elementsInitialized = true;
-
     // Save type info fields.
     _typeMask = typeMask;
     _hasEmptyArray = hasEmptyArray;
@@ -299,8 +249,33 @@ Status InListData::setElementsImpl(boost::optional<BSONObj> arr,
     // Update '_sbeTagMask' and '_hashSetSbeTagMask'.
     updateSbeTagMasks();
 
-    // Sort and de-dup the elements.
-    sortAndDedupElements();
+    if (arr) {
+        // If 'arr' is defined, save 'arr' into '_arr' and clear '_oldBackingArr'.
+        _oldBackingArr = boost::none;
+        _arr = std::move(arr);
+    } else {
+        // If 'arr' is not defined, save the old value of '_arr' into '_oldBackingArr' if needed
+        // and then clear '_arr'.
+        if (_arr && _arr->isOwned()) {
+            tassert(7690413, "Expected '_oldBackingArr' to be 'boost::none'", !_oldBackingArr);
+            _oldBackingArr = std::move(_arr);
+        }
+
+        _arr = boost::none;
+    }
+
+    // Save 'elements' into '_originalElements', reset '_sortedElements' back to the "uninitialized"
+    // state, and mark the elements as being initialized.
+    _originalElements = std::move(elements);
+    _sortedElements.emplace();
+    _firstOfEachTypeElements = std::move(firstOfEachTypeElements);
+    _elementsInitialized = true;
+
+    // Record what we observed about '_originalElements' regarding whether it's been pre-sorted
+    // and whether it's been pre-deduplicated.
+    _wasPreSorted = elemsAreSorted;
+    _wasPreSortedAndDeduped = elemsAreSorted && elemsAreUnique;
+    _hasSingleUniqueElement = !_originalElements.empty() && !hasMultipleUniqueElements;
 
     return Status::OK();
 }
@@ -331,36 +306,8 @@ void InListData::updateSbeTagMasks() {
     }
 }
 
-void InListData::sortAndDedupElements() {
-    if (_sortedAndDeduped) {
-        return;
-    }
-
-    auto elemLt = InListElemLessThan(_collator);
-
-    bool sorted = _sorted;
-    bool sortedAndDeduped = _sortedAndDeduped;
-    _sorted = true;
-    _sortedAndDeduped = true;
-
-    if (!sortedAndDeduped) {
-        // Save a copy of the original '_elements' vector before sorting and de-duping.
-        _originalElements.emplace(_elements);
-
-        if (!sorted) {
-            std::sort(_elements.begin(), _elements.end(), elemLt);
-        }
-
-        auto elemEq = InListElemEqualTo(_collator);
-        auto newEnd = std::unique(_elements.begin(), _elements.end(), elemEq);
-        if (newEnd != _elements.end()) {
-            _elements.erase(newEnd, _elements.end());
-        }
-    }
-}
-
 void InListData::setCollator(const CollatorInterface* coll) {
-    tassert(7690407, "Cannot call setCollator() after InListData has been prepared", !_prepared);
+    tassert(7690407, "Cannot call setCollator() after InListData has been shared", !isShared());
 
     // Set '_collator'.
     auto oldColl = _collator;
@@ -373,105 +320,105 @@ void InListData::setCollator(const CollatorInterface* coll) {
         return;
     }
 
-    // If _elements contains at least one collatable type, then we call setElementsImpl() with the
-    // same BSON array to force '_elements' to be re-built and sorted using the new collation.
     const uint32_t collatableTypesMask = getBSONTypeMask(BSONType::String) |
         getBSONTypeMask(BSONType::Symbol) | getBSONTypeMask(BSONType::Array) |
         getBSONTypeMask(BSONType::Object);
 
+    // If _originalElements contains at least one collatable type, then we call setElementsImpl()
+    // passing in the same BSON array or the same std::vector<BSONElement>. This will cause
+    // '_originalElements' to be re-built and re-sorted using the new collation.
     if (_typeMask & collatableTypesMask) {
         if (_arr) {
             // '_arr' may contain Regexes. These Regexes are not part of the equalities list and in
             // this context we just want to ignore them, so we set 'errorOnRegex' to false.
             constexpr bool errorOnRegex = false;
-            auto elemsSize = static_cast<uint32_t>(_elements.size());
+            auto elemsSize = static_cast<uint32_t>(_originalElements.size());
 
             auto status = setElementsImpl(*_arr, {}, errorOnRegex, elemsSize);
             tassert(status);
         } else {
-            auto status = _originalElements ? setElementsImpl({}, std::move(*_originalElements))
-                                            : setElementsImpl({}, std::move(_elements));
+            auto originalElems = std::move(_originalElements);
+            _originalElements = std::vector<BSONElement>{};
+
+            auto status = setElementsImpl({}, std::move(originalElems));
             tassert(status);
         }
     }
 }
 
 void InListData::makeBSONOwned() {
-    tassert(7690408, "Cannot call makeBSONOwned() after InListData has been prepared", !_prepared);
+    tassert(7690408, "Cannot call makeBSONOwned() after InListData has been shared", !isShared());
 
-    // If setElements() hasn't been called yet or if isBSONOwned() is true, then there's nothing
-    // to do.
+    // If setElements() hasn't been called yet or if isBSONOwned() is true, then there is
+    // nothing to do.
     if (!_elementsInitialized || isBSONOwned()) {
         return;
     }
 
+    // If '_arr' is defined, then we simply call makeArrOwned() and return.
     if (_arr) {
-        // Get a pointer to the old BSON buffer.
-        const char* oldBuf = _arr->objdata();
-
-        // Copy _arr's BSON data into a new owned buffer.
-        _arr->makeOwned();
-        const char* newBuf = _arr->objdata();
-
-        // Update each BSONElement in '_elements' to refer to the new buffer.
-        for (auto&& e : _elements) {
-            const char* newData = newBuf + (e.rawdata() - oldBuf);
-            e = BSONElement(newData, e.fieldNameSize(), e.size(), BSONElement::TrustedInitTag{});
-        }
-    } else {
-        // Serialize the original list of elements into an owned BSONArray.
-        BSONArrayBuilder bab;
-        auto& elems = _originalElements ? *_originalElements : _elements;
-        for (size_t i = 0; i < elems.size(); ++i) {
-            bab.append(elems[i]);
-        }
-        auto arr = bab.obj();
-
-        // Call setElementsImpl() and pass in the owned BSONArray.
-        constexpr bool errorOnRegex = true;
-        auto elemsSize = static_cast<uint32_t>(elems.size());
-
-        auto status = setElementsImpl(std::move(arr), {}, errorOnRegex, elemsSize);
-        tassert(status);
-    }
-}
-
-void InListData::prepare() {
-    tassert(7690409, "Cannot call prepare() when InListData has already been prepared", !_prepared);
-
-    buildHashSet();
-
-    _prepared = true;
-}
-
-void InListData::buildHashSet() {
-    if (_hashSetInitialized) {
+        makeArrOwned();
         return;
     }
 
-    for (auto&& e : _elements) {
-        auto [tag, val] = sbe::bson::convertFrom<true>(e);
+    // If '_arr' is not defined, then we need to build a new BSONArray from _originalElements.
+    BSONArrayBuilder bab;
+    for (const auto& elem : _originalElements) {
+        bab.append(elem);
+    }
+    auto arr = bab.obj();
 
-        if (e.type() == BSONType::String || e.type() == BSONType::Symbol) {
-            auto str = e.valueStringData();
+    // Call setElementsImpl() and pass in the new BSONArray. This will set '_originalElements',
+    // '_sortedElements', and all other fields appropriately.
+    constexpr bool errorOnRegex = true;
+    auto elemsSize = static_cast<uint32_t>(_originalElements.size());
 
-            if (!_collator && str.size() <= kLargeStringThreshold) {
-                _hashSet.insert({tag, val});
-            }
-        } else if (sbe::value::isShallowType(tag) || tag == sbe::value::TypeTags::NumberDecimal) {
-            _hashSet.insert({tag, val});
-        }
+    auto status = setElementsImpl(std::move(arr), {}, errorOnRegex, elemsSize);
+    tassert(status);
+}
+
+namespace {
+// Updates each BSONElement in container 'elements' to refer to backing buffer 'newBuffer' given
+// that each element refers to backing buffer 'previousBuffer'.
+template <typename C>
+requires std::same_as<typename C::value_type, BSONElement> && requires(C c) {
+    { std::begin(c) } -> std::same_as<typename C::iterator>;
+    { std::end(c) } -> std::same_as<typename C::iterator>;
+}
+void remapElements(C& elements, const char* previousBuffer, const char* newBuffer) {
+    for (auto& e : elements) {
+        const char* newAddress = newBuffer + (e.rawdata() - previousBuffer);
+        e = BSONElement(newAddress, e.fieldNameSize(), BSONElement::TrustedInitTag{});
+    }
+}
+}  // namespace
+
+void InListData::makeArrOwned() {
+    if (!_arr || _arr->isOwned()) {
+        return;
     }
 
-    // Use lower_bound() / upper_bound() to find the first element that must be inside the
-    // "search range" that should be used when the contains() method performs a binary search.
-    auto elemLt = InListElemLessThan(_collator);
-    auto binarySearchBeginIt = (!_collator && !_hasLargeStrings)
-        ? std::upper_bound(_elements.begin(), _elements.end(), BSONType::String, elemLt)
-        : std::lower_bound(_elements.begin(), _elements.end(), BSONType::String, elemLt);
+    // Get a pointer to the old BSON buffer.
+    const char* oldBuf = _arr->objdata();
 
-    _binarySearchStartOffset = binarySearchBeginIt - _elements.begin();
+    // Copy _arr's BSON data into a new owned buffer.
+    _arr->makeOwned();
+    const char* newBuf = _arr->objdata();
 
-    _hashSetInitialized = true;
+    // Update each BSONElement in '_originalElements' to refer to the new buffer.
+    remapElements(_originalElements, oldBuf, newBuf);
+
+    // If '_sortedElements' holds a vector, update each BSONElement in '_sortedElements' to
+    // refer to the new buffer.
+    if (std::vector<BSONElement>* sortedElems = _sortedElements->getIfInitialized()) {
+        remapElements(*sortedElems, oldBuf, newBuf);
+    }
+
+    // Update each BSONElement in '_firstOfEachTypeElements' to refer to the new buffer.
+    remapElements(_firstOfEachTypeElements, oldBuf, newBuf);
+}
+
+std::size_t InListData::getNormalizedCanonicalType(BSONType type) {
+    return canonicalizeBSONType(type) - kCanonicalTypeMinValue;
 }
 }  // namespace mongo

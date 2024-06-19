@@ -97,8 +97,19 @@
         bool __set_err = true;                                                              \
         const char *(cfg)[] = {WT_CONFIG_BASE(s, struct_name##_##func_name), config, NULL}; \
         API_SESSION_INIT(s, struct_name, func_name, dh);                                    \
-        if ((config) != NULL)                                                               \
-    WT_ERR(__wt_config_check((s), WT_CONFIG_REF(s, struct_name##_##func_name), (config), 0))
+        /*                                                                                  \
+         * Optimize configuration checking. If the configuration string                     \
+         * passed into the API is empty, use NULL instead, it saves a                       \
+         * little on every configuration lookup. The API caller's configuration             \
+         * string is stored in array position 1.                                            \
+         */                                                                                 \
+        if (config != NULL) {                                                               \
+            if (((const char *)config)[0] == '\0')                                          \
+                cfg[1] = NULL;                                                              \
+            else                                                                            \
+                WT_ERR(__wt_config_check(                                                   \
+                  (s), WT_CONFIG_REF(s, struct_name##_##func_name), (config), 0));          \
+        }
 
 #define API_END(s, ret)                                                                    \
     if ((s) != NULL) {                                                                     \
@@ -385,9 +396,9 @@
     WT_CONF_API_TYPE(h, n) _conf; \
     WT_CONF *conf = NULL
 
-#define API_CONF(session, h, n, cfg, conf)                                      \
+#define API_CONF(session, h, n, config, conf)                                   \
     WT_ERR(__wt_conf_compile_api_call(session, WT_CONFIG_REF(session, h##_##n), \
-      WT_CONFIG_ENTRY_##h##_##n, cfg[1], &_conf, sizeof(_conf), &conf))
+      WT_CONFIG_ENTRY_##h##_##n, config, &_conf, sizeof(_conf), &conf))
 
 #define SESSION_API_CONF(session, n, cfg, conf) API_CONF(session, WT_SESSION, n, cfg, conf)
 

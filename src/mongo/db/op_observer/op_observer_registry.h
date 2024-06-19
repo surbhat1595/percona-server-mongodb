@@ -383,10 +383,12 @@ public:
             o->onCollMod(opCtx, nss, uuid, collModCmd, oldCollOptions, indexInfo);
     }
 
-    void onDropDatabase(OperationContext* const opCtx, const DatabaseName& dbName) override {
+    void onDropDatabase(OperationContext* const opCtx,
+                        const DatabaseName& dbName,
+                        bool markFromMigrate) override {
         ReservedTimes times{opCtx};
         for (auto& o : _observers)
-            o->onDropDatabase(opCtx, dbName);
+            o->onDropDatabase(opCtx, dbName, markFromMigrate);
     }
 
     repl::OpTime onDropCollection(OperationContext* const opCtx,
@@ -533,12 +535,16 @@ public:
 
     void preTransactionPrepare(
         OperationContext* opCtx,
+        const std::vector<OplogSlot>& reservedSlots,
         const TransactionOperations& transactionOperations,
         const ApplyOpsOplogSlotAndOperationAssignment& applyOpsOperationAssignment,
         Date_t wallClockTime) override {
         for (auto&& observer : _observers) {
-            observer->preTransactionPrepare(
-                opCtx, transactionOperations, applyOpsOperationAssignment, wallClockTime);
+            observer->preTransactionPrepare(opCtx,
+                                            reservedSlots,
+                                            transactionOperations,
+                                            applyOpsOperationAssignment,
+                                            wallClockTime);
         }
     }
 

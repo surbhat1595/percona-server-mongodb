@@ -331,7 +331,7 @@ void StorageEngineImpl::loadCatalog(OperationContext* opCtx,
     // Use the stable timestamp as minValid. We know for a fact that the collection exist at
     // this point and is in sync. If we use an earlier timestamp than replication rollback we
     // may be out-of-order for the collection catalog managing this namespace.
-    Timestamp minValidTs = stableTs ? *stableTs : Timestamp::min();
+    const Timestamp minValidTs = stableTs ? *stableTs : Timestamp::min();
     CollectionCatalog::write(opCtx, [&minValidTs](CollectionCatalog& catalog) {
         // Let the CollectionCatalog know that we are maintaining timestamps from minValidTs
         catalog.catalogIdTracker().rollback(minValidTs);
@@ -418,33 +418,38 @@ void StorageEngineImpl::loadCatalog(OperationContext* opCtx,
             continue;
         }
 
-        Timestamp minVisibleTs = Timestamp::min();
         // If there's no recovery timestamp, every collection is available.
-        if (boost::optional<Timestamp> recoveryTs = _engine->getRecoveryTimestamp()) {
-            // Otherwise choose a minimum visible timestamp that's at least as large as the true
-            // value. For every collection we will choose either the `oldestTimestamp` or the
-            // `recoveryTimestamp`. Choose the `oldestTimestamp` for collections that existed at the
-            // `oldestTimestamp` and conservatively choose the `recoveryTimestamp` for everything
-            // else.
-            minVisibleTs = recoveryTs.value();
-            if (existedAtOldestTs.find(entry.catalogId) != existedAtOldestTs.end()) {
-                // Collections found at the `oldestTimestamp` on startup can have their minimum
-                // visible timestamp pulled back to that value.
-                minVisibleTs = _engine->getOldestTimestamp();
-            }
-
+        auto collectionMinValidTs = minValidTs;
+        if (stableTs) {
             // This failpoint is useful for tests which want to exercise atClusterTime reads across
-            // server starts (e.g. resharding). It is likely only safe for tests which don't run
-            // operations that bump the minimum visible timestamp and can guarantee the collection
-            // always exists for the atClusterTime value(s).
-            setMinVisibleForAllCollectionsToOldestOnStartup.execute(
-                [this, &minVisibleTs](const BSONObj& data) {
-                    minVisibleTs = _engine->getOldestTimestamp();
+            // server starts (e.g. resharding). It is only safe for tests which can guarantee the
+            // collection always exists for the atClusterTime value(s) and have not changed (i.e. no
+            // DDL operations have run on them).
+            //
+            // Despite its name, the setMinVisibleForAllCollectionsToOldestOnStartup failpoint
+            // controls the minValidTs in MongoDB Server versions with a point-in-time
+            // CollectionCatalog but had controlled the minVisibleTs in older MongoDB Server
+            // versions. We haven't renamed it to avoid issues in multiversion testing.
+            setMinVisibleForAllCollectionsToOldestOnStartup.executeIf(
+                [&](const BSONObj& data) {
+                    auto oldestTs = _engine->getOldestTimestamp();
+                    if (collectionMinValidTs > oldestTs)
+                        collectionMinValidTs = oldestTs;
+                },
+                [&](const auto&) {
+                    // We only do this for collections that existed at the oldest timestamp or after
+                    // startup when we aren't sure if it existed or not.
+                    const auto catalog = CollectionCatalog::latest(opCtx);
+                    const auto& tracker = catalog->catalogIdTracker();
+                    auto oldestTs = _engine->getOldestTimestamp();
+                    auto lookup = tracker.lookup(entry.nss, oldestTs);
+                    return lookup.result !=
+                        HistoricalCatalogIdTracker::LookupResult::Existence::kNotExists;
                 });
         }
 
         _initCollection(
-            opCtx, entry.catalogId, entry.nss, _options.forRepair, minVisibleTs, minValidTs);
+            opCtx, entry.catalogId, entry.nss, _options.forRepair, collectionMinValidTs);
 
         if (entry.nss.isOrphanCollection()) {
             LOGV2(22248, "Orphaned collection found", logAttrs(entry.nss));
@@ -458,7 +463,6 @@ void StorageEngineImpl::_initCollection(OperationContext* opCtx,
                                         RecordId catalogId,
                                         const NamespaceString& nss,
                                         bool forRepair,
-                                        Timestamp minVisibleTs,
                                         Timestamp minValidTs) {
     const auto catalogEntry = _catalog->getParsedCatalogEntry(opCtx, catalogId);
     const auto md = catalogEntry->metadata;
@@ -953,6 +957,12 @@ std::vector<DatabaseName> StorageEngineImpl::listDatabases(
 }
 
 Status StorageEngineImpl::dropDatabase(OperationContext* opCtx, const DatabaseName& dbName) {
+    return dropCollectionsWithPrefix(opCtx, dbName, "" /*collectionNamePrefix*/);
+}
+
+Status StorageEngineImpl::dropCollectionsWithPrefix(OperationContext* opCtx,
+                                                    const DatabaseName& dbName,
+                                                    const std::string& collectionNamePrefix) {
     auto catalog = CollectionCatalog::get(opCtx);
     {
         auto dbNames = catalog->getAllDbNames();
@@ -963,7 +973,7 @@ Status StorageEngineImpl::dropDatabase(OperationContext* opCtx, const DatabaseNa
 
     std::vector<UUID> toDrop = catalog->getAllCollectionUUIDsFromDb(dbName);
 
-    auto status = _dropCollections(opCtx, toDrop);
+    auto status = _dropCollections(opCtx, toDrop, collectionNamePrefix);
 
     // If all collections were dropped successfully then drop database's encryption key
     if (status.isOK()) {
@@ -975,32 +985,38 @@ Status StorageEngineImpl::dropDatabase(OperationContext* opCtx, const DatabaseNa
 
 /**
  * Returns the first `dropCollection` error that this method encounters. This method will attempt
- * to drop all collections, regardless of the error status.
+ * to drop all collections, regardless of the error status. This method will attempt to drop all
+ * collections matching the prefix 'collectionNamePrefix'. To drop all collections regardless of
+ * prefix, use an empty string.
  */
 Status StorageEngineImpl::_dropCollections(OperationContext* opCtx,
-                                           const std::vector<UUID>& toDrop) {
+                                           const std::vector<UUID>& toDrop,
+                                           const std::string& collectionNamePrefix) {
     Status firstError = Status::OK();
     WriteUnitOfWork wuow(opCtx);
     auto collectionCatalog = CollectionCatalog::get(opCtx);
     for (auto& uuid : toDrop) {
         auto coll = collectionCatalog->lookupCollectionByUUIDForMetadataWrite(opCtx, uuid);
+        if (coll->ns().coll().startsWith(collectionNamePrefix)) {
+            // Drop all indexes in the collection.
+            coll->getIndexCatalog()->dropAllIndexes(
+                opCtx, coll, /*includingIdIndex=*/true, /*onDropFn=*/{});
 
-        // Drop all indexes in the collection.
-        coll->getIndexCatalog()->dropAllIndexes(
-            opCtx, coll, /*includingIdIndex=*/true, /*onDropFn=*/{});
+            audit::logDropCollection(opCtx->getClient(), coll->ns());
 
-        audit::logDropCollection(opCtx->getClient(), coll->ns());
-
-        if (auto sharedIdent = coll->getSharedIdent()) {
-            Status result =
-                catalog::dropCollection(opCtx, coll->ns(), coll->getCatalogId(), sharedIdent);
-            if (!result.isOK() && firstError.isOK()) {
-                firstError = result;
+            if (auto sharedIdent = coll->getSharedIdent()) {
+                Status result =
+                    catalog::dropCollection(opCtx, coll->ns(), coll->getCatalogId(), sharedIdent);
+                if (!result.isOK() && firstError.isOK()) {
+                    firstError = result;
+                }
             }
-        }
 
-        CollectionCatalog::get(opCtx)->dropCollection(
-            opCtx, coll, opCtx->getServiceContext()->getStorageEngine()->supportsPendingDrops());
+            CollectionCatalog::get(opCtx)->dropCollection(
+                opCtx,
+                coll,
+                opCtx->getServiceContext()->getStorageEngine()->supportsPendingDrops());
+        }
     }
 
     wuow.commit();
@@ -1084,7 +1100,7 @@ Status StorageEngineImpl::repairRecordStore(OperationContext* opCtx,
 
     // When repairing a record store, keep the existing behavior of not installing a minimum visible
     // timestamp.
-    _initCollection(opCtx, catalogId, nss, false, Timestamp::min(), Timestamp::min());
+    _initCollection(opCtx, catalogId, nss, false, Timestamp::min());
 
     return status;
 }

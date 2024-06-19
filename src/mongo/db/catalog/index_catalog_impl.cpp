@@ -1349,8 +1349,8 @@ Status IndexCatalogImpl::resetUnfinishedIndexForRecovery(OperationContext* opCtx
     // Drop the ident if it exists. The storage engine will return OK if the ident is not found.
     auto engine = opCtx->getServiceContext()->getStorageEngine();
     const std::string ident = released->getIdent();
-    Status status =
-        engine->getEngine()->dropIdent(shard_role_details::getRecoveryUnit(opCtx), ident);
+    Status status = engine->getEngine()->dropIdentSynchronous(
+        shard_role_details::getRecoveryUnit(opCtx), ident);
     if (!status.isOK()) {
         return status;
     }
@@ -1484,13 +1484,7 @@ bool IndexCatalogImpl::haveIdIndex(OperationContext* opCtx) const {
 }
 
 const IndexDescriptor* IndexCatalogImpl::findIdIndex(OperationContext* opCtx) const {
-    auto ii = getIndexIterator(opCtx, InclusionPolicy::kReady);
-    while (ii->more()) {
-        const IndexDescriptor* desc = ii->next()->descriptor();
-        if (desc->isIdIndex())
-            return desc;
-    }
-    return nullptr;
+    return _readyIndexes.getIdIndex();
 }
 
 const IndexDescriptor* IndexCatalogImpl::findIndexByName(OperationContext* opCtx,
@@ -1634,6 +1628,9 @@ const IndexDescriptor* IndexCatalogImpl::refreshEntry(OperationContext* opCtx,
 
     const std::string indexName = oldDesc->indexName();
     invariant(collection->isIndexReady(indexName));
+
+    // The _id index should not be modified by a collMod.
+    tassert(9037800, "Should not be refreshing the _id index", !oldDesc->isIdIndex());
 
     // Delete the IndexCatalogEntry that owns this descriptor. After deletion, 'oldDesc' is invalid
     // and should not be dereferenced. Also, invalidate the index from the
@@ -1905,12 +1902,16 @@ Status IndexCatalogImpl::updateRecord(OperationContext* const opCtx,
         if (opDiff) {
             std::vector<const UpdateIndexData*> allIndexPaths;
             allIndexPaths.reserve(numIndexesToUpdate);
-            for (auto& indexes : {std::ref(_readyIndexes), std::ref(_buildingIndexes)}) {
-                for (const auto& indexEntry : indexes.get()) {
-                    dassert(!indexEntry->getIndexedPaths().isEmpty());
-                    allIndexPaths.push_back(&indexEntry->getIndexedPaths());
-                }
+
+            for (const auto& indexEntry : _readyIndexes) {
+                dassert(!indexEntry->getIndexedPaths().isEmpty());
+                allIndexPaths.push_back(&indexEntry->getIndexedPaths());
             }
+            for (const auto& indexEntry : _buildingIndexes) {
+                dassert(!indexEntry->getIndexedPaths().isEmpty());
+                allIndexPaths.push_back(&indexEntry->getIndexedPaths());
+            }
+
             toUpdate = mongo::doc_diff::anyIndexesMightBeAffected(*opDiff, allIndexPaths);
         } else {
             toUpdate = mongo::doc_diff::BitVector(numIndexesToUpdate);

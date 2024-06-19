@@ -277,7 +277,7 @@ public:
         }
     }
 
-    void makeDonorsReadyToDonate(OperationContext* opCtx) {
+    void makeDonorsReadyToDonateWithAssert(OperationContext* opCtx) {
         auto coordDoc = getCoordinatorDoc(opCtx);
         ASSERT_NE(coordDoc.getStartTime(), Date_t::min());
 
@@ -293,7 +293,7 @@ public:
         replaceCoordinatorDoc(opCtx, coordDoc);
     }
 
-    void makeRecipientsFinishedCloning(OperationContext* opCtx) {
+    void makeRecipientsFinishedCloningWithAssert(OperationContext* opCtx) {
         auto coordDoc = getCoordinatorDoc(opCtx);
         ASSERT_NE(coordDoc.getMetrics()->getDocumentCopy()->getStart(), Date_t::min());
 
@@ -308,7 +308,7 @@ public:
         replaceCoordinatorDoc(opCtx, coordDoc);
     }
 
-    void makeRecipientsBeInStrictConsistency(OperationContext* opCtx) {
+    void makeRecipientsBeInStrictConsistencyWithAssert(OperationContext* opCtx) {
         auto coordDoc = getCoordinatorDoc(opCtx);
         ASSERT_LTE(coordDoc.getMetrics()->getOplogApplication()->getStart(),
                    coordDoc.getMetrics()->getOplogApplication()->getStop());
@@ -324,11 +324,7 @@ public:
         replaceCoordinatorDoc(opCtx, coordDoc);
     }
 
-    void makeDonorsProceedToDone(OperationContext* opCtx) {
-        auto coordDoc = getCoordinatorDoc(opCtx);
-        ASSERT_LTE(coordDoc.getMetrics()->getDocumentCopy()->getStart(),
-                   coordDoc.getMetrics()->getDocumentCopy()->getStop());
-
+    void makeDonorsProceedToDone(OperationContext* opCtx, ReshardingCoordinatorDocument coordDoc) {
         auto donorShards = coordDoc.getDonorShards();
         DonorShardContext donorCtx;
         donorCtx.setState(DonorStateEnum::kDone);
@@ -340,11 +336,21 @@ public:
         replaceCoordinatorDoc(opCtx, coordDoc);
     }
 
-    void makeRecipientsProceedToDone(OperationContext* opCtx) {
+    void makeDonorsProceedToDone(OperationContext* opCtx) {
+        auto coordDoc = getCoordinatorDoc(opCtx);
+        makeDonorsProceedToDone(opCtx, coordDoc);
+    }
+
+    void makeDonorsProceedToDoneWithAssert(OperationContext* opCtx) {
         auto coordDoc = getCoordinatorDoc(opCtx);
         ASSERT_LTE(coordDoc.getMetrics()->getDocumentCopy()->getStart(),
                    coordDoc.getMetrics()->getDocumentCopy()->getStop());
 
+        makeDonorsProceedToDone(opCtx, coordDoc);
+    }
+
+    void makeRecipientsProceedToDone(OperationContext* opCtx,
+                                     ReshardingCoordinatorDocument coordDoc) {
         auto shards = coordDoc.getRecipientShards();
         RecipientShardContext ctx;
         ctx.setState(RecipientStateEnum::kDone);
@@ -353,6 +359,35 @@ public:
         }
         coordDoc.setRecipientShards(shards);
 
+        replaceCoordinatorDoc(opCtx, coordDoc);
+    }
+
+    void makeRecipientsProceedToDone(OperationContext* opCtx) {
+        auto coordDoc = getCoordinatorDoc(opCtx);
+        makeRecipientsProceedToDone(opCtx, coordDoc);
+    }
+
+    void makeRecipientsProceedToDoneWithAssert(OperationContext* opCtx) {
+        auto coordDoc = getCoordinatorDoc(opCtx);
+        ASSERT_LTE(coordDoc.getMetrics()->getDocumentCopy()->getStart(),
+                   coordDoc.getMetrics()->getDocumentCopy()->getStop());
+        makeRecipientsProceedToDone(opCtx, coordDoc);
+    }
+
+    void makeRecipientsReturnErrorWithAssert(OperationContext* opCtx) {
+        auto coordDoc = getCoordinatorDoc(opCtx);
+        ASSERT_NE(coordDoc.getMetrics()->getDocumentCopy()->getStart(), Date_t::min());
+        auto shards = coordDoc.getRecipientShards();
+        RecipientShardContext ctx;
+        ctx.setState(RecipientStateEnum::kError);
+        Status abortReasonStatus{ErrorCodes::SnapshotUnavailable, "test simulated error"};
+        resharding::emplaceTruncatedAbortReasonIfExists(ctx, abortReasonStatus);
+
+        for (auto& shard : shards) {
+            shard.setMutableState(ctx);
+        }
+
+        coordDoc.setRecipientShards(shards);
         replaceCoordinatorDoc(opCtx, coordDoc);
     }
 
@@ -624,20 +659,20 @@ public:
 
             switch (state) {
                 case CoordinatorStateEnum::kPreparingToDonate:
-                    makeDonorsReadyToDonate(opCtx);
+                    makeDonorsReadyToDonateWithAssert(opCtx);
                     break;
                 case CoordinatorStateEnum::kCloning:
-                    makeRecipientsFinishedCloning(opCtx);
+                    makeRecipientsFinishedCloningWithAssert(opCtx);
                     break;
                 case CoordinatorStateEnum::kApplying:
                     coordinator->onOkayToEnterCritical();
                     break;
                 case CoordinatorStateEnum::kBlockingWrites:
-                    makeRecipientsBeInStrictConsistency(opCtx);
+                    makeRecipientsBeInStrictConsistencyWithAssert(opCtx);
                     break;
                 case CoordinatorStateEnum::kCommitting:
-                    makeDonorsProceedToDone(opCtx);
-                    makeRecipientsProceedToDone(opCtx);
+                    makeDonorsProceedToDoneWithAssert(opCtx);
+                    makeRecipientsProceedToDoneWithAssert(opCtx);
                     break;
                 default:
                     break;
@@ -831,12 +866,12 @@ TEST_F(ReshardingCoordinatorServiceTest, StepDownStepUpEachTransition) {
 
         switch (state) {
             case CoordinatorStateEnum::kCloning: {
-                makeDonorsReadyToDonate(opCtx);
+                makeDonorsReadyToDonateWithAssert(opCtx);
                 break;
             }
 
             case CoordinatorStateEnum::kApplying: {
-                makeRecipientsFinishedCloning(opCtx);
+                makeRecipientsFinishedCloningWithAssert(opCtx);
                 break;
             }
 
@@ -847,7 +882,7 @@ TEST_F(ReshardingCoordinatorServiceTest, StepDownStepUpEachTransition) {
             }
 
             case CoordinatorStateEnum::kCommitting: {
-                makeRecipientsBeInStrictConsistency(opCtx);
+                makeRecipientsBeInStrictConsistencyWithAssert(opCtx);
                 break;
             }
 
@@ -877,8 +912,8 @@ TEST_F(ReshardingCoordinatorServiceTest, StepDownStepUpEachTransition) {
         waitUntilCommittedCoordinatorDocReach(opCtx, state);
     }
 
-    makeDonorsProceedToDone(opCtx);
-    makeRecipientsProceedToDone(opCtx);
+    makeDonorsProceedToDoneWithAssert(opCtx);
+    makeRecipientsProceedToDoneWithAssert(opCtx);
 
     // Join the coordinator if it has not yet been cleaned up.
     if (auto coordinator = getCoordinatorIfExists(opCtx, instanceId)) {
@@ -911,6 +946,54 @@ TEST_F(ReshardingCoordinatorServiceTest, StepDownStepUpEachTransition) {
             UUID::parse(collection.getField(CollectionType::kUuidFieldName)).getValue().toString(),
             doc.getReshardingUUID().toString());
     }
+}
+
+TEST_F(ReshardingCoordinatorServiceTest, ReportForCurrentOpAfterCompletion) {
+    auto pauseAfterInsertCoordinatorDoc =
+        globalFailPointRegistry().find("pauseAfterInsertCoordinatorDoc");
+    auto timesEnteredFailPoint = pauseAfterInsertCoordinatorDoc->setMode(FailPoint::alwaysOn);
+
+    auto coordinator = initializeAndGetCoordinator();
+    auto instanceId =
+        BSON(ReshardingCoordinatorDocument::kReshardingUUIDFieldName << _reshardingUUID);
+
+    // Wait until we know we've inserted the coordinator doc, but before the coordinator contacts
+    // any participants so that the coordinator does not have to "wait" for participants to abort
+    // before finishing aborting itself
+    pauseAfterInsertCoordinatorDoc->waitForTimesEntered(timesEnteredFailPoint + 1);
+
+    // Force a failover, and wait for the state machine to fulfill the completion promise. At this
+    // point, the resharding metrics will have been unregistered from the cumulative metrics.
+    stepDown(operationContext());
+    pauseAfterInsertCoordinatorDoc->setMode(FailPoint::off);
+    ASSERT_EQ(coordinator->getCompletionFuture().getNoThrow(), ErrorCodes::CallbackCanceled);
+
+    // Now call step up. The old coordinator object has not yet been destroyed because we still hold
+    // a shared pointer to it ('coordinator') - this can happen in production after a failover if a
+    // state machine is slow to clean up. Wait for the coordinator to have started, but again don't
+    // let it move to a state where it contacts participants.
+    auto pauseBeforeCTHolderInitialization =
+        globalFailPointRegistry().find("pauseBeforeCTHolderInitialization");
+    timesEnteredFailPoint = pauseBeforeCTHolderInitialization->setMode(FailPoint::alwaysOn);
+
+    stepUp(operationContext());
+    pauseBeforeCTHolderInitialization->waitForTimesEntered(timesEnteredFailPoint + 1);
+
+    // Assert that the old coordinator object will return a currentOp report, because the resharding
+    // metrics still exist on the coordinator object itelf.
+    ASSERT(coordinator->reportForCurrentOp(
+        MongoProcessInterface::CurrentOpConnectionsMode::kExcludeIdle,
+        MongoProcessInterface::CurrentOpSessionsMode::kIncludeIdle));
+
+    // Ensure a new coordinator can start and register resharding metrics, despite the "zombie"
+    // state machine still existing.
+    auto newCoordinator = getCoordinator(operationContext(), instanceId);
+    ASSERT_NE(coordinator, newCoordinator);
+
+    // No need to finish the resharding op, so we just cancel the op.
+    newCoordinator->abort(true /* skipQuiescePeriod */);
+    pauseBeforeCTHolderInitialization->setMode(FailPoint::off);
+    newCoordinator->getCompletionFuture().wait();
 }
 
 TEST_F(ReshardingCoordinatorServiceTest, ReshardingCoordinatorFailsIfMigrationNotAllowed) {
@@ -1019,6 +1102,91 @@ TEST_F(ReshardingCoordinatorServiceTest, SuccessfullyAbortReshardOperationImmedi
     pauseBeforeCTHolderInitialization->setMode(FailPoint::off, 0);
     coordinator->getCompletionFuture().wait();
 }
+
+TEST_F(ReshardingCoordinatorServiceTest, CoordinatorReturnsErrorCode) {
+    const std::vector<CoordinatorStateEnum> states = {CoordinatorStateEnum::kPreparingToDonate,
+                                                      CoordinatorStateEnum::kCloning,
+                                                      CoordinatorStateEnum::kAborting};
+
+    PauseDuringStateTransitions stateTransitionsGuard{controller(), states};
+
+    auto opCtx = operationContext();
+    auto coordinator = initializeAndGetCoordinator();
+
+    stateTransitionsGuard.wait(CoordinatorStateEnum::kPreparingToDonate);
+    stateTransitionsGuard.unset(CoordinatorStateEnum::kPreparingToDonate);
+    waitUntilCommittedCoordinatorDocReach(opCtx, CoordinatorStateEnum::kPreparingToDonate);
+
+    makeDonorsReadyToDonateWithAssert(opCtx);
+
+    stateTransitionsGuard.wait(CoordinatorStateEnum::kCloning);
+    stateTransitionsGuard.unset(CoordinatorStateEnum::kCloning);
+    waitUntilCommittedCoordinatorDocReach(opCtx, CoordinatorStateEnum::kCloning);
+
+    makeRecipientsReturnErrorWithAssert(opCtx);
+
+    stateTransitionsGuard.wait(CoordinatorStateEnum::kAborting);
+    stateTransitionsGuard.unset(CoordinatorStateEnum::kAborting);
+    waitUntilCommittedCoordinatorDocReach(opCtx, CoordinatorStateEnum::kAborting);
+
+    makeRecipientsProceedToDone(opCtx);
+    makeDonorsProceedToDone(opCtx);
+
+    ASSERT_THROWS_CODE(coordinator->getCompletionFuture().get(opCtx),
+                       DBException,
+                       ErrorCodes::SnapshotUnavailable);
+}
+
+TEST_F(ReshardingCoordinatorServiceTest, CoordinatorReturnsErrorCodeAfterRestart) {
+    const std::vector<CoordinatorStateEnum> states = {CoordinatorStateEnum::kPreparingToDonate,
+                                                      CoordinatorStateEnum::kCloning,
+                                                      CoordinatorStateEnum::kAborting};
+
+    PauseDuringStateTransitions stateTransitionsGuard{controller(), states};
+
+    auto opCtx = operationContext();
+    auto coordinator = initializeAndGetCoordinator();
+
+    stateTransitionsGuard.wait(CoordinatorStateEnum::kPreparingToDonate);
+    stateTransitionsGuard.unset(CoordinatorStateEnum::kPreparingToDonate);
+    waitUntilCommittedCoordinatorDocReach(opCtx, CoordinatorStateEnum::kPreparingToDonate);
+
+    makeDonorsReadyToDonateWithAssert(opCtx);
+
+    stateTransitionsGuard.wait(CoordinatorStateEnum::kCloning);
+    stateTransitionsGuard.unset(CoordinatorStateEnum::kCloning);
+    waitUntilCommittedCoordinatorDocReach(opCtx, CoordinatorStateEnum::kCloning);
+
+
+    makeRecipientsReturnErrorWithAssert(opCtx);
+
+    stateTransitionsGuard.wait(CoordinatorStateEnum::kAborting);
+    stateTransitionsGuard.unset(CoordinatorStateEnum::kAborting);
+    waitUntilCommittedCoordinatorDocReach(opCtx, CoordinatorStateEnum::kAborting);
+
+
+    stepDown(opCtx);
+    ASSERT_THROWS_WITH_CHECK(
+        coordinator->getCompletionFuture().get(), DBException, [&](const DBException& ex) {
+            ASSERT_TRUE(ex.code() == ErrorCodes::CallbackCanceled ||
+                        ex.code() == ErrorCodes::InterruptedDueToReplStateChange);
+        });
+
+    coordinator.reset();
+    stepUp(opCtx);
+
+    makeRecipientsProceedToDone(opCtx);
+    makeDonorsProceedToDone(opCtx);
+
+    auto instanceId =
+        BSON(ReshardingCoordinatorDocument::kReshardingUUIDFieldName << _reshardingUUID);
+    coordinator = getCoordinator(opCtx, instanceId);
+
+    ASSERT_THROWS_CODE(coordinator->getCompletionFuture().get(opCtx),
+                       DBException,
+                       ErrorCodes::SnapshotUnavailable);
+}
+
 
 }  // namespace
 }  // namespace mongo

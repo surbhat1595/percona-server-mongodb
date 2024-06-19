@@ -43,6 +43,9 @@ namespace mongo::query_stats {
 struct DataBearingNodeMetrics {
     uint64_t keysExamined = 0;
     uint64_t docsExamined = 0;
+    uint64_t bytesRead = 0;
+    Microseconds readingTime{0};
+    Milliseconds clusterWorkingTime{0};
     bool hasSortStage : 1 = false;
     bool usedDisk : 1 = false;
     bool fromMultiPlanner : 1 = false;
@@ -55,6 +58,9 @@ struct DataBearingNodeMetrics {
     void add(const DataBearingNodeMetrics& other) {
         keysExamined += other.keysExamined;
         docsExamined += other.docsExamined;
+        bytesRead += other.bytesRead;
+        readingTime += other.readingTime;
+        clusterWorkingTime += other.clusterWorkingTime;
         hasSortStage = hasSortStage || other.hasSortStage;
         usedDisk = usedDisk || other.usedDisk;
         fromMultiPlanner = fromMultiPlanner || other.fromMultiPlanner;
@@ -74,6 +80,9 @@ struct DataBearingNodeMetrics {
     void aggregateCursorMetrics(const CursorMetrics& metrics) {
         keysExamined += metrics.getKeysExamined();
         docsExamined += metrics.getDocsExamined();
+        bytesRead += metrics.getBytesRead();
+        readingTime += Microseconds(metrics.getReadingTimeMicros());
+        clusterWorkingTime += Milliseconds(metrics.getWorkingTimeMillis());
         hasSortStage = hasSortStage || metrics.getHasSortStage();
         usedDisk = usedDisk || metrics.getUsedDisk();
         fromMultiPlanner = fromMultiPlanner || metrics.getFromMultiPlanner();

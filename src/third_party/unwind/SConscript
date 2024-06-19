@@ -1,8 +1,10 @@
 # -*- mode: python -*-
 
 Import("env")
+Import("get_option")
 Import("has_option")
 Import("debugBuild")
+Import("vendored_libunwind_needs_lzma")
 
 # https://www.nongnu.org/libunwind/man/libunwind(3).html#section_1
 # For local unwinding (introspection, which is all we want), include
@@ -22,6 +24,15 @@ env = env.Clone(
     DISALLOW_VISHIDDEN=True,
     NINJA_GENSOURCE_INDEPENDENT=True,
 )
+
+# Enabling the function sanitizer (part of ubsan) references symbols defined in a separate file when compiled with
+# dynamic linking in Clang. The C program definitions setup in SCons do not link this separate file.
+# Disable function sanitizer to avoid triggering symbol resolution errors when libraries defined in this
+# environment are used by C programs (in this case, wiredtiger).
+if get_option("link-model") == "dynamic" and 'undefined' in (get_option('sanitize')
+                                                             or '').split(','):
+    if env.AddToCCFLAGSIfSupported("-fno-sanitize=function"):
+        env.AppendUnique(LINKFLAGS=["-fno-sanitize=function"])
 
 unwind_root = env.Dir(".").srcnode()
 unwind_platform = unwind_root.Dir("platform/${TARGET_OS}_${TARGET_ARCH}")
@@ -153,13 +164,15 @@ env.Append(CPPPATH=[
     unwind_root.Dir("dist/include/tdep-${UNWIND_TARGET_ARCH}"),
 ])
 
-# propagates to consumers that inject (depend on) unwind.
-env.RegisterConsumerModifications(
-    CPPPATH=[unwind_platform.Dir("install/include")],
-    SYSLIBDEPS_PRIVATE=[env['LIBDEPS_LZMA_SYSLIBDEP']],
-)
+extra_sysdeps = {}
+if vendored_libunwind_needs_lzma:
+    extra_sysdeps['SYSLIBDEPS_PRIVATE'] = [env['LIBDEPS_LZMA_SYSLIBDEP']]
 
-env.Append(SYSLIBDEPS_PRIVATE=[env['LIBDEPS_LZMA_SYSLIBDEP']])
+# propagates to consumers that inject (depend on) unwind.
+env.RegisterConsumerModifications(CPPPATH=[unwind_platform.Dir("install/include")], **extra_sysdeps)
+
+if len(extra_sysdeps):
+    env.Append(**extra_sysdeps)
 
 env.Append(CPPDEFINES=[
     'HAVE_CONFIG_H',

@@ -236,6 +236,7 @@ enums:
                 extra_data:
                     serverlessActionTypes:
                         - applyOps
+                        - bypassDefaultMaxTimeMS
                         - killAnyCursor
                         - killAnySession
                         - killCursors

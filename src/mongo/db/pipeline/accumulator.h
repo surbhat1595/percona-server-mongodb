@@ -67,11 +67,19 @@ enum class AccumulatorDocumentsNeeded {
 
     // AccumulatorState only needs to see one document in a group, and when there is a sort order,
     // that document must be the first document.
-    kFirstDocument,
+    kFirstInputDocument,
 
     // AccumulatorState only needs to see one document in a group, and when there is a sort order,
     // that document must be the last document.
-    kLastDocument,
+    kLastInputDocument,
+
+    // AccumulatorState may only need to see the first document in a group if there is an index that
+    // matches the sort order.
+    kFirstOutputDocument,
+
+    // AccumulatorState may only need to see the last document in a group if there is an index that
+    // matches the sort order.
+    kLastOutputDocument,
 };
 
 class AccumulatorState : public RefCountable {
@@ -151,15 +159,6 @@ public:
         invariant(ec);
         invariant(ec->getValue().nullish());
 
-        // We want to wrap constant expressions in order to avoid re-parsing issues in cases where
-        // an array is being passed through a $literal, e.g. $push: {$literal: [1, a]}. Removing
-        // the wrapper would cause the query to error out since accumulators are unary operators.
-        ExpressionConstant const* argumentConst = dynamic_cast<ExpressionConstant*>(argument.get());
-        if (argumentConst) {
-            return DOC(getOpName() << argumentConst->serializeConstant(
-                           options, argumentConst->getValue(), true));
-        }
-
         return DOC(getOpName() << argument->serialize(options));
     }
 
@@ -218,7 +217,7 @@ public:
     }
 
 private:
-    ValueUnorderedSet _set;
+    ValueFlatUnorderedSet _set;
 };
 
 class AccumulatorFirst final : public AccumulatorState {
@@ -238,7 +237,7 @@ public:
     static boost::intrusive_ptr<AccumulatorState> create(ExpressionContext* expCtx);
 
     AccumulatorDocumentsNeeded documentsNeeded() const final {
-        return AccumulatorDocumentsNeeded::kFirstDocument;
+        return AccumulatorDocumentsNeeded::kFirstInputDocument;
     }
 
 private:
@@ -291,7 +290,7 @@ public:
     static boost::intrusive_ptr<AccumulatorState> create(ExpressionContext* expCtx);
 
     AccumulatorDocumentsNeeded documentsNeeded() const final {
-        return AccumulatorDocumentsNeeded::kLastDocument;
+        return AccumulatorDocumentsNeeded::kLastInputDocument;
     }
 
 private:

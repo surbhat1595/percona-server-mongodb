@@ -28,6 +28,7 @@
  */
 
 #include "mongo/rpc/write_concern_error_detail.h"
+#include "mongo/s/write_ops/batched_command_request.h"
 #include "mongo/s/write_ops/write_op.h"
 #include <absl/container/node_hash_map.h>
 #include <absl/meta/type_traits.h>
@@ -60,7 +61,6 @@
 #include "mongo/db/stats/counters.h"
 #include "mongo/db/write_concern_options.h"
 #include "mongo/s/collection_uuid_mismatch.h"
-#include "mongo/s/migration_blocking_operation/migration_blocking_operation_cluster_parameters_gen.h"
 #include "mongo/s/transaction_router.h"
 #include "mongo/s/write_ops/batch_write_op.h"
 #include "mongo/s/write_ops/write_without_shard_key_util.h"
@@ -130,7 +130,6 @@ bool isNewBatchRequiredUnordered(
  * Helper to determine whether a number of targeted writes require a new targeted batch.
  */
 bool wouldMakeBatchesTooBig(const std::vector<std::unique_ptr<TargetedWrite>>& writes,
-                            int writeSizeBytes,
                             const TargetedBatchMap& batchMap) {
     for (auto&& write : writes) {
         TargetedBatchMap::const_iterator it = batchMap.find(write->endpoint.shardName);
@@ -144,7 +143,8 @@ bool wouldMakeBatchesTooBig(const std::vector<std::unique_ptr<TargetedWrite>>& w
             return true;
         }
 
-        if (it->second->getEstimatedSizeBytes() + writeSizeBytes > BSONObjMaxUserSize) {
+        invariant(write->estimatedSizeBytes > 0);
+        if (it->second->getEstimatedSizeBytes() + write->estimatedSizeBytes > BSONObjMaxUserSize) {
             // Batch would be too big
             return true;
         }
@@ -242,20 +242,33 @@ void populateCollectionUUIDMismatch(OperationContext* opCtx,
     }
 }
 
-bool shouldCoordinateMultiUpdate(OperationContext* opCtx, bool isMultiWrite) {
-    if (opCtx->isCommandForwardedFromRouter() || !isMultiWrite) {
+bool shouldCoordinateMultiUpdate(OperationContext* opCtx,
+                                 PauseMigrationsDuringMultiUpdatesEnablement& pauseMigrations,
+                                 bool isMultiWrite,
+                                 bool isUpsert) {
+    if (!isMultiWrite || !pauseMigrations.isEnabled()) {
+        // If this is not a multi write or if the cluster parameter is off, the op is not relevant.
         return false;
     }
 
-    auto* clusterParameters = ServerParameterSet::getClusterParameterSet();
-    auto* clusterPauseMigrationsParam = clusterParameters->get<ClusterParameterWithStorage<
-        migration_blocking_operation::PauseMigrationsDuringMultiUpdatesParam>>(
-        "pauseMigrationsDuringMultiUpdates");
-    if (!clusterPauseMigrationsParam->getValue(boost::none).getEnabled()) {
+    if (isUpsert) {
+        // The full shard key must be specified for an upsert, so we will only ever target a single
+        // shard. This prevents chunk migrations from being a problem, since the whole operation
+        // will execute either before or after the migration occurs.
         return false;
-    };
+    }
+
+    if (opCtx->isCommandForwardedFromRouter()) {
+        // Coordinating a multi update involves running the update on a mongod (the db primary
+        // shard), but it uses the same codepath as mongos. This flag is set to prevent the mongod
+        // from repeatedly coordinating the update and forwarding it to itself.
+        return false;
+    }
 
     if (TransactionRouter::get(opCtx)) {
+        // Similar to the upsert case, if we are in a transaction then the whole of the operation
+        // will execute either before or after any conflicting chunk migrations, so the problem is
+        // avoided.
         return false;
     }
 
@@ -270,6 +283,7 @@ StatusWith<WriteType> targetWriteOps(OperationContext* opCtx,
                                      std::vector<WriteOp>& writeOps,
                                      bool ordered,
                                      bool recordTargetErrors,
+                                     PauseMigrationsDuringMultiUpdatesEnablement& pauseMigrations,
                                      GetTargeterFn getTargeterFn,
                                      GetWriteSizeFn getWriteSizeFn,
                                      int baseCommandSizeBytes,
@@ -408,9 +422,11 @@ StatusWith<WriteType> targetWriteOps(OperationContext* opCtx,
             }
         }
 
-        const auto estWriteSizeBytes = getWriteSizeFn(writeOp);
+        for (auto&& write : writes) {
+            write->estimatedSizeBytes = getWriteSizeFn(writeOp, write->endpoint.shardName);
+        }
 
-        if (wouldMakeBatchesTooBig(writes, estWriteSizeBytes, batchMap)) {
+        if (wouldMakeBatchesTooBig(writes, batchMap)) {
             invariant(!batchMap.empty());
             writeOp.resetWriteToReady();
             break;
@@ -444,17 +460,17 @@ StatusWith<WriteType> targetWriteOps(OperationContext* opCtx,
             writeItem.getOpType() == BatchedCommandRequest::BatchType_Update ||
             writeItem.getOpType() == BatchedCommandRequest::BatchType_Delete) {
 
-            auto isMultiWrite = [&] {
+            auto [isMultiWrite, isUpsert] = [&] {
                 if (writeItem.getOpType() == BatchedCommandRequest::BatchType_Update) {
                     auto updateReq = writeItem.getUpdateRef();
-                    return updateReq.getMulti();
+                    return std::make_tuple(updateReq.getMulti(), updateReq.getUpsert());
                 } else {
                     auto deleteReq = writeItem.getDeleteRef();
-                    return deleteReq.getMulti();
+                    return std::make_tuple(deleteReq.getMulti(), false);
                 }
             }();
 
-            if (shouldCoordinateMultiUpdate(opCtx, isMultiWrite)) {
+            if (shouldCoordinateMultiUpdate(opCtx, pauseMigrations, isMultiWrite, isUpsert)) {
                 // Multi writes blocking migrations should be in their own batch.
                 if (!batchMap.empty()) {
                     writeOp.resetWriteToReady();
@@ -506,6 +522,8 @@ StatusWith<WriteType> targetWriteOps(OperationContext* opCtx,
             nsEndpointMap[targeter.getNS()].insert(&write->endpoint);
             nsShardIdMap[targeter.getNS()].insert(shardId);
 
+            auto estWriteSizeBytes = write->estimatedSizeBytes;
+
             batchIt->second->addWrite(std::move(write), estWriteSizeBytes);
         }
 
@@ -544,10 +562,11 @@ StatusWith<WriteType> BatchWriteOp::targetBatch(const NSTargeter& targeter,
         _writeOps,
         ordered,
         recordTargetErrors,
+        _pauseMigrationsDuringMultiUpdatesParameter,
         // getTargeterFn:
         [&](const WriteOp& writeOp) -> const NSTargeter& { return targeter; },
-        // getWriteSizeFn:
-        [&](const WriteOp& writeOp) {
+        // assignWriteSizeFn:
+        [&](const WriteOp& writeOp, ShardId& shard) {
             // If retryable writes are used, MongoS needs to send an additional array of stmtId(s)
             // corresponding to the statements that got routed to each individual shard, so they
             // need to be accounted in the potential request size so it does not exceed the max BSON
@@ -579,7 +598,9 @@ StatusWith<WriteType> BatchWriteOp::targetBatch(const NSTargeter& targeter,
         return targetStatus;
     }
 
-    _nShardsOwningChunks = targeter.getNShardsOwningChunks();
+    // Note: It is fine to use 'getAproxNShardsOwningChunks' here because the result is only used to
+    // update stats.
+    _nShardsOwningChunks = targeter.getAproxNShardsOwningChunks();
 
     return targetStatus;
 }
@@ -697,6 +718,9 @@ BatchedCommandRequest BatchWriteOp::buildBatchRequest(
             wcb.setStmtIds(std::move(stmtIdsForOp));
         }
 
+        wcb.setBypassEmptyTsReplacement(
+            _clientRequest.getWriteCommandRequestBase().getBypassEmptyTsReplacement());
+
         return wcb;
     }());
 
@@ -729,9 +753,17 @@ void BatchWriteOp::noteBatchResponse(const TargetedWriteBatch& targetedBatch,
     }
 
     int firstTargetedWriteOpIdx = targetedBatch.getWrites().front()->writeOpRef.first;
-    bool shouldDeferWriteWithoutShardKeyReponse =
-        _writeOps[firstTargetedWriteOpIdx].getWriteType() == WriteType::WithoutShardKeyWithId &&
-        targetedBatch.getNumOps() > 1;
+    bool isWriteWithoutShardKeyWithId =
+        _writeOps[firstTargetedWriteOpIdx].getWriteType() == WriteType::WithoutShardKeyWithId;
+    int batchSize = targetedBatch.getNumOps();
+    // A WriteWithoutShardKeyWithId batch of size 1 can be completed if it found n=1 from a
+    // previous shard. In this case skip processing the response.
+    if (batchSize == 1 && isWriteWithoutShardKeyWithId &&
+        _writeOps[firstTargetedWriteOpIdx].getWriteState() == WriteOpState_Completed) {
+        return;
+    }
+
+    bool shouldDeferWriteWithoutShardKeyReponse = isWriteWithoutShardKeyWithId && batchSize > 1;
     if (!shouldDeferWriteWithoutShardKeyReponse) {
         // Increment stats for this batch
         _incBatchStats(response);
@@ -790,14 +822,6 @@ void BatchWriteOp::noteBatchResponse(const TargetedWriteBatch& targetedBatch,
     write_ops::WriteError* lastError = nullptr;
     for (auto&& write : targetedBatch.getWrites()) {
         WriteOp& writeOp = _writeOps[write->writeOpRef.first];
-        // A WriteWithoutShardKeyWithId batch of size 1 can be completed if it found n=1 from a
-        // previous shard.
-        if (targetedBatch.getNumOps() == 1 &&
-            writeOp.getWriteType() == WriteType::WithoutShardKeyWithId &&
-            writeOp.getWriteState() == WriteOpState_Completed) {
-            break;
-        }
-
         invariant(writeOp.getWriteState() == WriteOpState_Pending);
 
         // See if we have an error for the write

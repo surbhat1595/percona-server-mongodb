@@ -144,6 +144,12 @@ protected:
         return canonicalize(opCtx, queryObj, {}, {}, {});
     }
 
+    void testEncodeClassic(unittest::GoldenTestContext& gctx, const CanonicalQuery& cq) {
+        gctx.outStream() << "==== VARIATION: cq=" << cq.toString();
+        const auto key = canonical_query_encoder::encodeClassic(cq);
+        gctx.outStream() << key << std::endl << std::endl;
+    }
+
     /**
      * Test functions for computeKey, when no indexes are present. Cache keys are intentionally
      * obfuscated and are meaningful only within the current lifetime of the server process. Users
@@ -402,6 +408,23 @@ TEST_F(CanonicalQueryEncoderTest, ComputeKeyGeoNear) {
                    "{}");
 }
 
+// Cache keys for $_internalBucketGeoWithin with flat and spherical geometry should
+// not be the same.
+TEST_F(CanonicalQueryEncoderTest, ComputeKeyTimeseriesGeoWithin) {
+    // Flat geometry.
+    unique_ptr<CanonicalQuery> cqFlat(
+        canonicalize(opCtx(),
+                     "{ $_internalBucketGeoWithin: { withinRegion: { $center: [ [ 180.0, 0.0 ], "
+                     "1.79 ] }, field: \"loc\" } }"));
+    // Spherical geometry.
+    unique_ptr<CanonicalQuery> cqSpherical(
+        canonicalize(opCtx(),
+                     "{ $_internalBucketGeoWithin: { withinRegion: { $centerSphere: [ [ 180.0, 0.0 "
+                     "], 1.79 ] }, field: \"loc\" } }"));
+    ASSERT_NOT_EQUALS(canonical_query_encoder::encodeClassic(*cqFlat),
+                      canonical_query_encoder::encodeClassic(*cqSpherical));
+}
+
 TEST_F(CanonicalQueryEncoderTest, ComputeKeyRegexDependsOnFlags) {
     unittest::GoldenTestContext gctx(&goldenTestConfig);
     // The computed key depends on which execution engine is enabled. As such, we enable SBE for
@@ -495,6 +518,71 @@ TEST_F(CanonicalQueryEncoderTest, CheckCollationIsEncoded) {
         opCtx(), fromjson("{a: 1, b: 1}"), {}, {}, fromjson("{locale: 'mock_reverse_string'}")));
 
     testComputeKey(gctx, *cq);
+}
+
+TEST_F(CanonicalQueryEncoderTest, CheckSubplanningQueriesAreEncodedDifferentlyWhenSbeCompatible) {
+    unittest::GoldenTestContext gctx(&goldenTestConfig);
+    unique_ptr<CanonicalQuery> cqWithOr(canonicalize(opCtx(), "{$or: [{a: 1, x:1}, {b: 1, y:2}]}"));
+    cqWithOr->setSbeCompatible(true);
+
+    // Test how we compute the top level key.
+    testEncodeClassic(gctx, *cqWithOr);
+
+    // Test how we compute the keys when using the CanonicalQuery() constructor specifically used by
+    // subplanning.
+    CanonicalQuery subQuery1(opCtx(), *cqWithOr, 0 /* index of OR branch */);
+    subQuery1.setSbeCompatible(true);
+    CanonicalQuery subQuery2(opCtx(), *cqWithOr, 1 /* index of OR branch */);
+    subQuery2.setSbeCompatible(true);
+
+    testEncodeClassic(gctx, subQuery1);
+    testEncodeClassic(gctx, subQuery2);
+
+    // Test how we compute the key for an equivalent query, though not created with the subplanning
+    // constructor.
+    unique_ptr<CanonicalQuery> equivalentToSubQuery1(canonicalize(opCtx(), "{a: 1, x:1}"));
+    equivalentToSubQuery1->setSbeCompatible(true);
+    unique_ptr<CanonicalQuery> equivalentToSubQuery2(canonicalize(opCtx(), "{b: 1, y:2}"));
+    equivalentToSubQuery2->setSbeCompatible(true);
+
+    testEncodeClassic(gctx, *equivalentToSubQuery1);
+    testEncodeClassic(gctx, *equivalentToSubQuery2);
+
+    // Now check that the keys for subQueryX and equivalentSubQueryX are NOT equal.
+    ASSERT_NE(canonical_query_encoder::encodeClassic(subQuery1),
+              canonical_query_encoder::encodeClassic(*equivalentToSubQuery1));
+    ASSERT_NE(canonical_query_encoder::encodeClassic(subQuery2),
+              canonical_query_encoder::encodeClassic(*equivalentToSubQuery2));
+}
+
+TEST_F(CanonicalQueryEncoderTest, ComputeClassicKeyForSbeCompatibleQuery) {
+    unittest::GoldenTestContext gctx(&goldenTestConfig);
+
+    auto test = [&](const char* match, const char* sort, const char* proj) {
+        auto cq = canonicalize(opCtx(), fromjson(match), fromjson(sort), fromjson(proj), BSONObj());
+        cq->setSbeCompatible(true);
+
+        testEncodeClassic(gctx, *cq);
+    };
+
+    test("{}", "{}", "{}");
+    test("{$or: [{a: 1}, {b: 2}]}", "{}", "{}");
+    test("{a: 1}", "{}", "{}");
+    test("{b: 1}", "{}", "{}");
+    test("{a: 1, b: 1, c: 1}", "{}", "{}");
+
+    // With sort
+    test("{}", "{a: 1}", "{}");
+    test("{}", "{a: -1}", "{}");
+    test("{a: 1}", "{a: 1}", "{}");
+
+    // With projection
+    test("{a: 1}", "{a: 1}", "{a: 1}");
+    test("{}", "{a: 1}", "{a: 1}");
+    test("{}", "{a: 1}", "{a: 1}");
+    test("{}", "{}", "{a: 1}");
+    test("{}", "{}", "{a: true}");
+    test("{}", "{}", "{a: false}");
 }
 
 TEST_F(CanonicalQueryEncoderTest, ComputeKeySBE) {
@@ -726,9 +814,13 @@ TEST_F(CanonicalQueryEncoderTest, BonsaiInEncoding) {
     // Single element $in's are translated as $eq's, which means that two single element $in's with
     // different types shouldn't have the same key.
     ASSERT_NE(encodeBonsai("{a: {$in: [1]}}"), encodeBonsai("{a: {$in: ['str']}}"));
-    // $in's with different lengths should not have the same key.
+    // $in with length 1 is optimized to an $eq. It should have a different key than a $in with an
+    // arbitrary length.
     ASSERT_NE(encodeBonsai("{a: {$in: [1]}}"), encodeBonsai("{a: {$in: [1, 2]}}"));
-    ASSERT_NE(encodeBonsai("{a: {$in: [1, 2]}}"), encodeBonsai("{a: {$in: [1, 2, 3]}}"));
+    // $in's with different lengths should have the same key.
+    ASSERT_EQ(encodeBonsai("{a: {$in: [1, 2]}}"), encodeBonsai("{a: {$in: [1, 2, 3]}}"));
+    ASSERT_EQ(encodeBonsai("{a: {$in: [1, 2]}}"),
+              encodeBonsai("{a: {$in: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]}}"));
     // $in with same length but different types have the same key.
     ASSERT_EQ(encodeBonsai("{a: {$in: [1, 2]}}"), encodeBonsai("{a: {$in: ['str1', 'str2']}}"));
 }

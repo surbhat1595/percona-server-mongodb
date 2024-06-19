@@ -344,7 +344,10 @@ ActiveTransactionHistory fetchActiveTransactionHistory(OperationContext* opCtx,
                                            entry.getOpTime());
             }
         }
-        result.affectedNamespaces.emplace(entry.getNss());
+
+        if (!entry.getNss().isEmpty()) {
+            result.affectedNamespaces.emplace(entry.getNss());
+        }
     };
 
     // Restore the current timestamp read source after fetching transaction history, which may
@@ -399,6 +402,15 @@ ActiveTransactionHistory fetchActiveTransactionHistory(OperationContext* opCtx,
                 insertStmtIdsForOplogEntry(entry);
             }
         } catch (const DBException& ex) {
+            if (ErrorCodes::isIDLParseError(ex.code()) || ex.code() == ErrorCodes::FailedToParse ||
+                ex.code() == ErrorCodes::TypeMismatch || ex.code() == ErrorCodes::BadValue) {
+                LOGV2_WARNING(
+                    8756300,
+                    "Failed to parse oplog entry during session load.  Did a downgrade happen?",
+                    "error"_attr = ex.toStatus());
+                result.hasIncompleteHistory = true;
+                break;
+            }
             if (ex.code() == ErrorCodes::IncompleteTransactionHistory) {
                 result.hasIncompleteHistory = true;
                 break;
@@ -608,7 +620,7 @@ void TransactionParticipant::performNoopWrite(OperationContext* opCtx, StringDat
     }
 
     {
-        AutoGetOplogFastPath oplogWrite(opCtx, OplogAccessMode::kWrite);
+        AutoGetOplog oplogWrite(opCtx, OplogAccessMode::kWrite);
         uassert(ErrorCodes::NotWritablePrimary,
                 "Not primary when performing noop write for {}"_format(msg),
                 replCoord->canAcceptWritesForDatabase(opCtx, DatabaseName::kAdmin));
@@ -1785,7 +1797,7 @@ TransactionParticipant::Participant::prepareTransaction(
             // of RSTL lock inside abortTransaction will be no-op since we already have it.
             // This abortGuard gets dismissed before we release the RSTL while transitioning to
             // the prepared state.
-            UninterruptibleLockGuard noInterrupt(shard_role_details::getLocker(opCtx));  // NOLINT.
+            UninterruptibleLockGuard noInterrupt(opCtx);  // NOLINT.
             abortTransaction(opCtx);
         } catch (...) {
             // It is illegal for aborting a prepared transaction to fail for any reason, so we crash
@@ -1829,6 +1841,10 @@ TransactionParticipant::Participant::prepareTransaction(
         o(lk).txnState.transitionTo(TransactionState::kPrepared);
     }
 
+    auto applyOpsOplogSlotAndOperationAssignment = completedTransactionOperations->getApplyOpsInfo(
+        getMaxNumberOfTransactionOperationsInSingleOplogEntry(),
+        getMaxSizeOfTransactionOperationsInSingleOplogEntryBytes(),
+        /*prepare=*/true);
     std::vector<OplogSlot> reservedSlots;
     if (prepareOptime) {
         // On secondary, we just prepare the transaction and discard the buffered ops.
@@ -1838,10 +1854,11 @@ TransactionParticipant::Participant::prepareTransaction(
         reservedSlots.push_back(prepareOplogSlot);
     } else {
         // Even if the prepared transaction contained no statements, we always reserve at least
-        // 1 oplog slot for the prepare oplog entry.
-        auto numSlotsToReserve = retrieveCompletedTransactionOperations(opCtx)->numOperations();
-        numSlotsToReserve += p().transactionOperations.getNumberOfPrePostImagesToWrite();
-        oplogSlotReserver.emplace(opCtx, std::max(1, static_cast<int>(numSlotsToReserve)));
+        // 1 oplog slot for the prepare oplog entry.  The result of getApplyOpsInfo should
+        // reflect that.
+        auto numSlotsToReserve = applyOpsOplogSlotAndOperationAssignment.numberOfOplogSlotsRequired;
+        dassert(numSlotsToReserve >= 1);
+        oplogSlotReserver.emplace(opCtx, static_cast<int>(numSlotsToReserve));
         invariant(oplogSlotReserver->getSlots().size() >= 1);
         prepareOplogSlot = oplogSlotReserver->getLastSlot();
         reservedSlots = oplogSlotReserver->getSlots();
@@ -1864,15 +1881,11 @@ TransactionParticipant::Participant::prepareTransaction(
             hangAfterReservingPrepareTimestamp.pauseWhileSet();
         }
     }
-    auto applyOpsOplogSlotAndOperationAssignment = completedTransactionOperations->getApplyOpsInfo(
-        reservedSlots,
-        getMaxNumberOfTransactionOperationsInSingleOplogEntry(),
-        getMaxSizeOfTransactionOperationsInSingleOplogEntryBytes(),
-        /*prepare=*/true);
 
     auto opObserver = opCtx->getServiceContext()->getOpObserver();
     const auto wallClockTime = opCtx->getServiceContext()->getFastClockSource()->now();
     opObserver->preTransactionPrepare(opCtx,
+                                      reservedSlots,
                                       *completedTransactionOperations,
                                       applyOpsOplogSlotAndOperationAssignment,
                                       wallClockTime);
@@ -2001,21 +2014,19 @@ void TransactionParticipant::Participant::commitUnpreparedTransaction(OperationC
     auto opObserver = opCtx->getServiceContext()->getOpObserver();
     invariant(opObserver);
 
-    // Reserve all the optimes in advance, so we only need to get the optime mutex once.  We
-    // reserve enough entries for all statements in the transaction.
-    std::vector<OplogSlot> reservedSlots;
-    if (!txnOps->isEmpty()) {
-        reservedSlots = LocalOplogInfo::get(opCtx)->getNextOpTimes(
-            opCtx, txnOps->numOperations() + txnOps->getNumberOfPrePostImagesToWrite());
-    }
-
     // Serialize transaction statements to BSON and determine their assignment to "applyOps"
     // entries.
     const auto applyOpsOplogSlotAndOperationAssignment =
-        txnOps->getApplyOpsInfo(reservedSlots,
-                                getMaxNumberOfTransactionOperationsInSingleOplogEntry(),
+        txnOps->getApplyOpsInfo(getMaxNumberOfTransactionOperationsInSingleOplogEntry(),
                                 getMaxSizeOfTransactionOperationsInSingleOplogEntryBytes(),
                                 /*prepare=*/false);
+
+    // Reserve all the optimes for the applyOps operations and any pre/post images.
+    std::vector<OplogSlot> reservedSlots;
+    if (!txnOps->isEmpty()) {
+        reservedSlots = LocalOplogInfo::get(opCtx)->getNextOpTimes(
+            opCtx, applyOpsOplogSlotAndOperationAssignment.numberOfOplogSlotsRequired);
+    }
 
     opObserver->onUnpreparedTransactionCommit(
         opCtx, reservedSlots, *txnOps, applyOpsOplogSlotAndOperationAssignment);
@@ -2109,7 +2120,7 @@ void TransactionParticipant::Participant::commitPreparedTransaction(
 
         // Once entering "committing with prepare" we cannot throw an exception,
         // and therefore our lock acquisitions cannot be interruptible.
-        UninterruptibleLockGuard noInterrupt(shard_role_details::getLocker(opCtx));  // NOLINT.
+        UninterruptibleLockGuard noInterrupt(opCtx);  // NOLINT.
 
         // On secondary, we generate a fake empty oplog slot, since it's not used by opObserver.
         OplogSlot commitOplogSlot;
@@ -2243,9 +2254,12 @@ void TransactionParticipant::Participant::_commitSplitPreparedTxnOnPrimary(
 
         repl::UnreplicatedWritesBlock notReplicated(splitOpCtx.get());
         const auto& session = sessInfos.session;
-        splitOpCtx->setLogicalSessionId(session.getSessionId());
-        splitOpCtx->setTxnNumber(session.getTxnNumber());
-        splitOpCtx->setInMultiDocumentTransaction();
+        {
+            auto lk = stdx::lock_guard(*splitOpCtx->getClient());
+            splitOpCtx->setLogicalSessionId(session.getSessionId());
+            splitOpCtx->setTxnNumber(session.getTxnNumber());
+            splitOpCtx->setInMultiDocumentTransaction();
+        }
 
         auto mongoDSessionCatalog = MongoDSessionCatalog::get(splitOpCtx.get());
         checkedOutSession = mongoDSessionCatalog->checkOutSession(splitOpCtx.get());
@@ -2258,8 +2272,7 @@ void TransactionParticipant::Participant::_commitSplitPreparedTxnOnPrimary(
         // and therefore our lock acquisitions cannot be interruptible. We also must set the
         // UninterruptibleLockGuard before unstashTransactionResources because this function
         // can throw when reacquiring locks and tickets.
-        UninterruptibleLockGuard noInterrupt(  // NOLINT
-            newTxnParticipant.o().txnResourceStash->locker());
+        UninterruptibleLockGuard noInterrupt(splitOpCtx.get());  // NOLINT
         newTxnParticipant.unstashTransactionResources(splitOpCtx.get(), "commitTransaction");
 
         shard_role_details::getRecoveryUnit(splitOpCtx.get())->setCommitTimestamp(commitTimestamp);
@@ -2420,7 +2433,7 @@ void TransactionParticipant::Participant::_abortActiveTransaction(
 
         try {
             // If we need to write an abort oplog entry, this function can no longer be interrupted.
-            UninterruptibleLockGuard noInterrupt(shard_role_details::getLocker(opCtx));  // NOLINT.
+            UninterruptibleLockGuard noInterrupt(opCtx);  // NOLINT.
 
             // Write the abort oplog entry. This must be done after aborting the storage
             // transaction, so that the lock state is reset, and there is no max lock timeout on the
@@ -2475,9 +2488,12 @@ void TransactionParticipant::Participant::_abortSplitPreparedTxnOnPrimary(
         std::unique_ptr<MongoDSessionCatalog::Session> checkedOutSession;
 
         repl::UnreplicatedWritesBlock notReplicated(splitOpCtx.get());
-        splitOpCtx->setLogicalSessionId(sessionInfo.session.getSessionId());
-        splitOpCtx->setTxnNumber(sessionInfo.session.getTxnNumber());
-        splitOpCtx->setInMultiDocumentTransaction();
+        {
+            auto lk = stdx::lock_guard(*splitOpCtx->getClient());
+            splitOpCtx->setLogicalSessionId(sessionInfo.session.getSessionId());
+            splitOpCtx->setTxnNumber(sessionInfo.session.getTxnNumber());
+            splitOpCtx->setInMultiDocumentTransaction();
+        }
 
         auto mongoDSessionCatalog = MongoDSessionCatalog::get(splitOpCtx.get());
         checkedOutSession = mongoDSessionCatalog->checkOutSession(splitOpCtx.get());
@@ -2491,8 +2507,7 @@ void TransactionParticipant::Participant::_abortSplitPreparedTxnOnPrimary(
         // and therefore our lock acquisitions cannot be interruptible. We also must set the
         // UninterruptibleLockGuard before unstashTransactionResources because this function
         // can throw when reacquiring locks and tickets.
-        UninterruptibleLockGuard noInterrupt(  // NOLINT
-            newTxnParticipant.o().txnResourceStash->locker());
+        UninterruptibleLockGuard noInterrupt(splitOpCtx.get());  // NOLINT
         newTxnParticipant.unstashTransactionResources(splitOpCtx.get(), "abortTransaction");
 
         {

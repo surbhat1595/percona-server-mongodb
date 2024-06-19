@@ -39,8 +39,10 @@ static constexpr auto kDefaultMaxTimeMSClusterParameterName = "defaultMaxTimeMS"
 
 /**
  * Returns the value of maxTimeMS that should be used for a command or boost::none if none could be
- * used.
+ * used. Also returns if 'defaultMaxTimeMS' was used.
  */
-boost::optional<Milliseconds> getRequestOrDefaultMaxTimeMS(
-    OperationContext* opCtx, const boost::optional<IDLAnyType>& requestMaxTimeMS, Command* command);
+std::pair<boost::optional<Milliseconds>, bool> getRequestOrDefaultMaxTimeMS(
+    OperationContext* opCtx,
+    const boost::optional<IDLAnyType>& requestMaxTimeMS,
+    bool isReadOperation);
 }  // namespace mongo

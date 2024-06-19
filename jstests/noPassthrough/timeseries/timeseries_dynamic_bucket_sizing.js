@@ -21,6 +21,7 @@ const timeFieldName = 'time';
 const metaFieldName = 'meta';
 const timestamp = ISODate('2023-02-13T01:00:00Z');
 const collName = 't';
+const bucketCatalogMemoryLimit = 1 * 1000 * 1000 * 1000;  // 1 GB
 
 // A cardinality higher than this calculated value will call for smaller bucket size limit caused
 // by cache pressure.
@@ -30,7 +31,12 @@ const replSet = new ReplSetTest({
     nodes: 1,
     nodeOptions: {wiredTigerCacheSizeGB: minWiredTigerCacheSizeGB},
 });
-replSet.startSet({setParameter: {timeseriesBucketMaxSize: defaultBucketMaxSize}});
+replSet.startSet({
+    setParameter: {
+        timeseriesBucketMaxSize: defaultBucketMaxSize,
+        timeseriesIdleBucketExpiryMemoryUsageThreshold: bucketCatalogMemoryLimit
+    }
+});
 replSet.initiate();
 
 const db = replSet.getPrimary().getDB(jsTestName());
@@ -166,7 +172,7 @@ compressedBuckets = timeseriesStats.numCompressedBuckets;
 assert.eq(bucketsClosedDueToSize, 0, formatStatsLog(timeseriesStats));
 assert.eq(timeseriesStats.numBucketsClosedDueToSchemaChange, 0, formatStatsLog(timeseriesStats));
 assert.eq(timeseriesStats.numBucketsClosedDueToTimeForward, 0, formatStatsLog(timeseriesStats));
-assert.eq(timeseriesStats.numBucketsClosedDueToTimeBackward, 0, formatStatsLog(timeseriesStats));
+assert.eq(timeseriesStats.numBucketsArchivedDueToTimeBackward, 0, formatStatsLog(timeseriesStats));
 assert.eq(timeseriesStats.numBucketsClosedDueToMemoryThreshold, 0, formatStatsLog(timeseriesStats));
 
 // Previously, the bucket max size was 128KB, but under cache pressure using

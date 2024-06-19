@@ -52,9 +52,6 @@ executor:
 matrix_suite: true
 selector:
   exclude_files:
-  - jstests/concurrency/fsm_workloads/agg_graph_lookup.js
-  - jstests/concurrency/fsm_workloads/agg_lookup.js
-  - jstests/concurrency/fsm_workloads/view_catalog_cycle_lookup.js
   - jstests/concurrency/fsm_workloads/auth_create_role.js
   - jstests/concurrency/fsm_workloads/auth_create_user.js
   - jstests/concurrency/fsm_workloads/auth_drop_role.js
@@ -93,6 +90,7 @@ selector:
   - requires_profiling
   - does_not_support_transactions
   - assumes_unsharded_collection
+  - temp_disabled_embedded_router_uncategorized
   roots:
   - jstests/concurrency/fsm_workloads/**/*.js
 test_kind: fsm_workload_test

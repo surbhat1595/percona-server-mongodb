@@ -158,6 +158,7 @@ executor:
         TestData:
           runningWithConfigStepdowns: true
           runningWithShardStepdowns: true
+          terminateShards: true
           useActionPermittedFile: true
           runningWithBalancer: true
           fsmPreOverridesLoadedCallback:
@@ -207,6 +208,9 @@ executor:
         queryAnalysisWriterIntervalSecs: 1
         defaultConfigCommandTimeoutMS: 90000
         skipDroppingHashedShardKeyIndex: true
+        # Delay orphan cleanup to get around SERVER-87673.
+        # Choose a setting lower than continuous stepdown interval to get around SERVER-90242.
+        orphanCleanupDelaySecs: 5
     num_rs_nodes_per_shard: 3
     num_shards: 2
     num_mongos: 2

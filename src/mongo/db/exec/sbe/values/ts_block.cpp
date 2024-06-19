@@ -51,61 +51,6 @@
 namespace mongo::sbe::value {
 
 namespace {
-// Internally used by TsBlock, and not exposed as part of the rest of the native block types. This
-// block owns its data in an intrusive_ptr<ElementStorage>, and provides a view of SBE tags/vals
-// which point into it.
-class ElementStorageValueBlock final : public ValueBlock {
-public:
-    ElementStorageValueBlock() = default;
-    ElementStorageValueBlock(const ElementStorageValueBlock& o) = delete;
-    ElementStorageValueBlock(ElementStorageValueBlock&& o) = delete;
-
-    /**
-     * Constructor which takes a storage buffer along with 'tags' and 'vals' which point into the
-     * storage buffer. The storage buffer is responsible for freeing the values. That is,
-     * releaseValue() will not be called.
-     */
-    ElementStorageValueBlock(boost::intrusive_ptr<mongo::bsoncolumn::ElementStorage> storage,
-                             std::vector<TypeTags> tags,
-                             std::vector<Value> vals)
-        : _storage(std::move(storage)), _vals(std::move(vals)), _tags(std::move(tags)) {}
-
-    size_t size() const {
-        return _tags.size();
-    }
-
-    boost::optional<size_t> tryCount() const override {
-        return _vals.size();
-    }
-
-    DeblockedTagVals deblock(boost::optional<DeblockedTagValStorage>& storage) override {
-        return {_vals.size(), _tags.data(), _vals.data()};
-    }
-
-    std::unique_ptr<ValueBlock> clone() const override {
-        // Just like TsBlock, any attempts to copy/clone this block result in a fully owned
-        // version. The "viewness" does not propagate.
-        std::vector<TypeTags> cpyTags(_tags.size(), value::TypeTags::Nothing);
-        std::vector<Value> cpyVals(_tags.size());
-        ValueVectorGuard guard(cpyTags, cpyVals);
-        for (size_t i = 0; i < _tags.size(); ++i) {
-            std::tie(cpyTags[i], cpyVals[i]) = value::copyValue(_tags[i], _vals[i]);
-        }
-
-        guard.reset();
-        return std::make_unique<HeterogeneousBlock>(std::move(cpyTags), std::move(cpyVals));
-    }
-
-private:
-    // Storage for the values.
-    boost::intrusive_ptr<mongo::bsoncolumn::ElementStorage> _storage;
-
-    // The values stored in these vectors are pointers into '_storage', which is responsible for
-    // freeing them.
-    std::vector<Value> _vals;
-    std::vector<TypeTags> _tags;
-};
-
 /**
  * Used by the block-based decompressing API to decompress directly into vectors that are needed
  * by other functions to construct blocks. The API requires all 'Containers' to implement
@@ -113,36 +58,157 @@ private:
  **/
 class BlockBasedDecompressAdaptor {
     using Element = sbe::bsoncolumn::SBEColumnMaterializer::Element;
+    using ElementStorage = mongo::bsoncolumn::ElementStorage;
 
 public:
-    BlockBasedDecompressAdaptor(std::vector<TypeTags>& tags, std::vector<Value>& vals)
-        : _tags(tags), _vals(vals){};
+    BlockBasedDecompressAdaptor(
+        size_t expectedCount, boost::intrusive_ptr<ElementStorage> allocator = new ElementStorage{})
+        : _allocator(allocator) {
+        _tags.reserve(expectedCount);
+        _vals.reserve(expectedCount);
+        _positions.reserve(expectedCount);
+    }
 
     void push_back(const Element& e) {
-        // 'ElementStorage' and 'TsBlock' each assume they own the decompressed element. To avoid
-        // freeing the same elements twice, we will store a copy of the element in SBE.
-        // TODO SERVER-85256 stop copying 'e'.
-        auto [cpyTag, cpyVal] = value::copyValue(e.first, e.second);
-        _tags.push_back(cpyTag);
-        _vals.push_back(cpyVal);
+        auto [tag, val] = e;
+        _allValuesShallow = _allValuesShallow && value::isShallowType(tag);
+        _tags.push_back(tag);
+        _vals.push_back(val);
     }
 
     Element back() {
         return {_tags.back(), _vals.back()};
     }
 
-    // TODO SERVER-85718 Enable when integrating interleaved mode.
-    // void appendPositionInfo(int32_t n) {
-    //     _positions.push_back(n);
-    // }
+    void appendPositionInfo(int32_t n) {
+        _positions.push_back(n);
+    }
+
+    boost::intrusive_ptr<ElementStorage> allocator() const {
+        return _allocator;
+    }
+
+    std::unique_ptr<value::ValueBlock> extractBlock() {
+        if (_allValuesShallow) {
+            // We have no deep types, so '_tags' and '_vals' do not contain pointers into
+            // '_storage'.  We can pass these into a block type which takes ownership of its
+            // values, and we may be able to advantage of homogeneous/repeated data.
+            return buildBlockFromStorage(std::move(_tags), std::move(_vals));
+        } else {
+            // If the block has any deep types, we output an ElementStorageValueBlock to avoid
+            // copying the deep value(s).
+            return std::make_unique<ElementStorageValueBlock>(
+                std::move(_allocator), std::move(_tags), std::move(_vals));
+        }
+    }
+
+    std::vector<int32_t> extractPositionInfo() {
+        return std::move(_positions);
+    }
 
 private:
-    std::vector<TypeTags>& _tags;
-    std::vector<Value>& _vals;
-    // TODO SERVER-85718 Enable when integrating interleaved mode. This vector will hold the
-    // position information of the values.
-    // std::vector<int32_t> _positions;
+    std::vector<TypeTags> _tags;
+    std::vector<Value> _vals;
+    std::vector<int32_t> _positions;
+
+    boost::intrusive_ptr<ElementStorage> _allocator;
+
+    // Whether push_back() has been called only with shallow values, which do not point into
+    // '_storage'.
+    bool _allValuesShallow = true;
 };
+
+struct ElementAnalysis {
+    // The set of all scalar values reachable along an arbitrarily deep path containing objects only
+    // (no arrays).
+    absl::flat_hash_set<const char*> _scalarValuesInObjects = {};
+    bool _containsArrays = false;
+};
+
+/**
+ * Recursively traverses 'elem' for any scalar fields, updating the analysis to reflect presence of
+ * arrays and pointers to scalar values.
+ */
+void analyzeElement(ElementAnalysis& analysis, BSONElement elem) {
+    if (elem.type() == BSONType::Array) {
+        analysis._containsArrays = true;
+        // Do not recurse into children; elements within arrays are not candidates for path-based
+        // decompression due to challenges with arrays in BSONColumns with legacy interleaved mode.
+        // See SERVER-90712.
+        return;
+    }
+
+    // Note: isABSONObj() returns true for both objects and arrays. But we just checked that this is
+    // not an array.
+    if (!elem.isABSONObj()) {
+        analysis._scalarValuesInObjects.insert(elem.value());
+        return;
+    }
+
+    for (auto e : elem.embeddedObject()) {
+        analyzeElement(analysis, e);
+    }
+}
+
+/**
+ * If the fast scalar-in-object optimization can be applied for the given PathRequest, return the
+ * bsoncolumn::SBEPath that corresponds to it. Otherwise, return none.
+ *
+ * The optimization can be applied if:
+ * - The path is a filter path (not a project path)
+ * - If the path selects nothing, or if it selects exactly one scalar field for both the min and max
+ *   in the column. In practice we probably only check one of the min or max, but both are checked
+ *   here out of an abundance of caution.
+ */
+boost::optional<bsoncolumn::SBEPath> canUsePathBasedDecompression(
+    const CellBlock::PathRequest& path,
+    const ElementAnalysis& analysis,
+    BSONElement elemMin,
+    BSONElement elemMax) {
+
+    // We can only handle filter paths if there are arrays in the object.
+    if (path.type != CellBlock::kFilter && analysis._containsArrays) {
+        return boost::none;
+    }
+
+    // Trim the Get in the 0-th element.
+    invariant(holds_alternative<CellBlock::Get>(path.path[0]));
+    size_t offset = 1;
+    if (holds_alternative<CellBlock::Traverse>(path.path[1])) {
+        // Also skip over a Traverse element if one is there.
+        offset = 2;
+    }
+
+    auto trimmed = std::span{path.path}.subspan(offset);
+    invariant(trimmed.size() >= 1);
+    if (trimmed.size() == 1) {
+        invariant(holds_alternative<CellBlock::Id>(trimmed[0]));
+        // This is an object and the path is just "Id", so not a scalar.
+        return boost::none;
+    }
+
+    CellBlock::PathRequest trimmedPath = CellBlock::PathRequest{path.type};
+    trimmedPath.path.assign(trimmed.begin(), trimmed.end());
+    bsoncolumn::SBEPath sbePath{trimmedPath};
+
+    // If the path matches nothing, or a single scalar element, then we can apply the optimization.
+    //
+    // TODO SERVER-89514 Refactor this to avoid traversing both fieldMin and fieldMax for every
+    // path.
+    for (auto elem : {elemMin, elemMax}) {
+        auto elems = sbePath.elementsToMaterialize(elem.Obj());
+        if (elems.size() > 1) {
+            return boost::none;
+        }
+
+        if (!elems.empty() && !analysis._scalarValuesInObjects.contains(elems[0])) {
+            return boost::none;
+        }
+    }
+
+    return sbePath;
+}
+
 }  // namespace
 
 TsBucketPathExtractor::TsBucketPathExtractor(std::vector<CellBlock::PathRequest> pathReqs,
@@ -151,7 +217,9 @@ TsBucketPathExtractor::TsBucketPathExtractor(std::vector<CellBlock::PathRequest>
       _timeField(timeField),
       // (Ignore FCV check): This feature flag doesn't have any upgrade/downgrade concerns.
       _blockBasedDecompressionEnabled(
-          feature_flags::gBlockBasedDecodingScalarAPI.isEnabledAndIgnoreFCVUnsafe()) {
+          feature_flags::gBlockBasedDecodingScalarAPI.isEnabledAndIgnoreFCVUnsafe()),
+      _blockBasedScalarInObjectDecompressionEnabled(
+          feature_flags::gBlockBasedDecodingPathAPI.isEnabledAndIgnoreFCVUnsafe()) {
 
     size_t idx = 0;
     for (auto& req : _pathReqs) {
@@ -174,10 +242,11 @@ TsBucketPathExtractor::ExtractResult TsBucketPathExtractor::extractCellBlocks(
     const BSONObj& bucketObj) {
 
     BSONElement bucketControl = bucketObj[timeseries::kBucketControlFieldName];
-    invariant(!bucketControl.eoo());
+    invariant(bucketControl.type() == BSONType::Object);
+    BSONObj bucketControlObj = bucketControl.Obj();
 
     const size_t noOfMeasurements = [&]() {
-        if (auto ct = bucketControl.Obj()[timeseries::kBucketControlCountFieldName]) {
+        if (auto ct = bucketControlObj[timeseries::kBucketControlCountFieldName]) {
             return static_cast<size_t>(ct.numberLong());
         }
         return static_cast<size_t>(
@@ -187,11 +256,20 @@ TsBucketPathExtractor::ExtractResult TsBucketPathExtractor::extractCellBlocks(
     const int bucketVersion = bucketObj.getIntField(timeseries::kBucketControlVersionFieldName);
 
     const BSONElement bucketDataElem = bucketObj[timeseries::kBucketDataFieldName];
-    invariant(!bucketDataElem.eoo());
     invariant(bucketDataElem.type() == BSONType::Object);
 
-    // Build a mapping from the top level field name to the bucket's corresponding bson element.
-    StringMap<BSONElement> topLevelFieldToBsonElt;
+    // Build a mapping from the top level field name to the bucket's corresponding bson element and
+    // min/max values.
+    struct FieldInfo {
+        // The actual data in the field, either a BSON object or a BSONColumn.
+        BSONElement data = BSONElement{};
+        BSONElement min = BSONElement{};
+        BSONElement max = BSONElement{};
+    };
+
+    // Populate the 'FieldInfo' data values.
+    StringDataMap<FieldInfo> topLevelFieldNameToInfo;
+    topLevelFieldNameToInfo.reserve(_topLevelFieldToIdxes.size());
     for (auto elt : bucketDataElem.embeddedObject()) {
         auto it = _topLevelFieldToIdxes.find(elt.fieldNameStringData());
         if (it != _topLevelFieldToIdxes.end()) {
@@ -200,35 +278,59 @@ TsBucketPathExtractor::ExtractResult TsBucketPathExtractor::extractCellBlocks(
                     "Unsupported type for timeseries bucket data",
                     blockTag == value::TypeTags::bsonObject ||
                         blockTag == value::TypeTags::bsonBinData);
-            topLevelFieldToBsonElt[elt.fieldName()] = elt;
+            topLevelFieldNameToInfo.emplace(elt.fieldNameStringData(), FieldInfo{.data = elt});
         }
     }
+
+    // Populate min and max for each 'FieldInfo'.
+    {
+        auto setMinMax = [&topLevelFieldNameToInfo](BSONElement minMaxElt, auto setFn) {
+            if (minMaxElt.type() != BSONType::Object) {
+                return;
+            }
+
+            BSONObj minMaxObj = minMaxElt.Obj();
+            size_t fieldsFound = 0;
+            const size_t nFields = topLevelFieldNameToInfo.size();
+            for (BSONElement elt : minMaxObj) {
+                if (auto it = topLevelFieldNameToInfo.find(elt.fieldNameStringData());
+                    it != topLevelFieldNameToInfo.end()) {
+                    setFn(it->second, elt);
+                    ++fieldsFound;
+                    if (fieldsFound >= nFields) {
+                        break;
+                    }
+                }
+            }
+        };
+
+        setMinMax(bucketControlObj[timeseries::kBucketControlMinFieldName],
+                  [](FieldInfo& fi, BSONElement elt) { fi.min = elt; });
+        setMinMax(bucketControlObj[timeseries::kBucketControlMaxFieldName],
+                  [](FieldInfo& fi, BSONElement elt) { fi.max = elt; });
+    }
+
+    // The time series decoding API gives a couple ways to efficiently decode data:
+    // - A whole BSONColumn binary at a time
+    // - Extracting paths that identify scalar fields in a BSONColumn, as long as there are not
+    //   multi-element arrays along the path
+    // For other kinds of paths, we materialize each top level field as BSON, and then extract from
+    // that. This is awful in terms of performance, but it can be swapped out with a more efficient
+    // implementation when the decoding API can support it efficiently.
 
     std::vector<std::unique_ptr<TsBlock>> outBlocks;
     std::vector<std::unique_ptr<CellBlock>> outCells(_pathReqs.size());
 
-    // The time series decoding API gives us the top level fields only. To simulate an API
-    // which lets us extract more granular paths, we materialize each top level field as BSON,
-    // and then extract from that. This is awful in terms of performance, but it can be swapped
-    // out with a more efficient implementation when a more granular API becomes available.
+    for (auto& [topLevelField, fieldInfo] : topLevelFieldNameToInfo) {
 
-    auto bucketControlMin = bucketControl.Obj()[timeseries::kBucketControlMinFieldName];
-    auto bucketControlMax = bucketControl.Obj()[timeseries::kBucketControlMaxFieldName];
-
-    for (auto& [topLevelField, columnElt] : topLevelFieldToBsonElt) {
         // The set of indexes in _pathReqs which begin with this top level field.
         const auto& pathIndexesForCurrentField = _topLevelFieldToIdxes[topLevelField];
-        auto [columnTag, columnVal] = bson::convertFrom<true /*View*/>(columnElt);
+        auto [columnTag, columnVal] = bson::convertFrom<true /*View*/>(fieldInfo.data);
 
-        std::pair<TypeTags, Value> controlMin = {TypeTags::Nothing, Value{0u}};
-        std::pair<TypeTags, Value> controlMax = {TypeTags::Nothing, Value{0u}};
-        if (!bucketControlMin.eoo() && !bucketControlMax.eoo()) {
-            auto fieldMin = bucketControlMin[topLevelField];
-            controlMin = bson::convertFrom<true /*View*/>(fieldMin);
-
-            auto fieldMax = bucketControlMax[topLevelField];
-            controlMax = bson::convertFrom<true /*View*/>(fieldMax);
-        }
+        BSONElement fieldMin = fieldInfo.min;
+        BSONElement fieldMax = fieldInfo.max;
+        std::pair<TypeTags, Value> controlMin = bson::convertFrom<true /*View*/>(fieldMin);
+        std::pair<TypeTags, Value> controlMax = bson::convertFrom<true /*View*/>(fieldMax);
 
         // The time field cannot be nothing.
         const bool isTimeField = topLevelField == _timeField;
@@ -258,8 +360,20 @@ TsBucketPathExtractor::ExtractResult TsBucketPathExtractor::extractCellBlocks(
                 // CellBlock in 'topLevelCellBlock' so that if we end up decoding this CellBlock,
                 // we do so once, and via same TsCellBlockForTopLevelField instance.
                 outCells[idx] = std::make_unique<TsCellBlockForTopLevelField>(tsBlock);
+            } else if (_pathReqs[idx].path.size() == 3 &&
+                       holds_alternative<CellBlock::Get>(_pathReqs[idx].path[0]) &&
+                       holds_alternative<CellBlock::Traverse>(_pathReqs[idx].path[1]) &&
+                       holds_alternative<CellBlock::Id>(_pathReqs[idx].path[2]) &&
+                       (tsBlock->hasNoObjsOrArrays())) {
+                // We are traversing a top level field AND there are no arrays. The path must look
+                // like: [Get <field> Traverse Id]. If this is the case, we can take a fast path and
+                // skip the work of shredding the whole thing.
+                //
+                // In this case the top level TsCellBlockForTopLevelField (representing the [Get
+                // <field> Id]) is identical to the path [Get <field> Traverse Id]. We make a top
+                // level cell block with an unowned pointer.
+                outCells[idx] = std::make_unique<TsCellBlockForTopLevelField>(tsBlock);
             } else {
-                // Remember this PathReq index for later.
                 nonTopLevelIdxesForCurrentField.push_back(idx);
             }
         }
@@ -269,29 +383,12 @@ TsBucketPathExtractor::ExtractResult TsBucketPathExtractor::extractCellBlocks(
             continue;
         }
 
-        // First check if we are traversing a top level field AND there are no arrays. The path
-        // must look like: [Get <field> Traverse Id]. If this is the case, we take a fast path and
-        // skip the work of shredding the whole thing.
-
-        bool allUsedFastPath = true;
-        for (auto pathIdx : nonTopLevelIdxesForCurrentField) {
-            if (_pathReqs[pathIdx].path.size() == 3 &&
-                holds_alternative<CellBlock::Get>(_pathReqs[pathIdx].path[0]) &&
-                holds_alternative<CellBlock::Traverse>(_pathReqs[pathIdx].path[1]) &&
-                holds_alternative<CellBlock::Id>(_pathReqs[pathIdx].path[2]) &&
-                (tsBlock->hasNoObjsOrArrays())) {
-                // In this case the top level TsCellBlockForTopLevelField (representing the [Get
-                // <field> Id]) is identical to the path [Get <field> Traverse Id]. We make a top
-                // level cell block with an unowned pointer.
-                outCells[pathIdx] = std::make_unique<TsCellBlockForTopLevelField>(tsBlock);
-            } else {
-                allUsedFastPath = false;
-            }
-        }
-
-        if (allUsedFastPath) {
-            // There's no need to do any more work for this top level field. Every path request
-            // was a top level get or eligible for the fast path.
+        // Try to use path-based decompression if all of the remaining paths refer to scalars in
+        // objects in a compressed BSONColumn.
+        if (tryPathBasedDecompression(
+                *tsBlock, fieldMin, fieldMax, nonTopLevelIdxesForCurrentField, outCells)) {
+            // We handled all the remainging paths with fast path-based decompression, so there is
+            // no more work to do.
             continue;
         }
 
@@ -325,6 +422,72 @@ TsBucketPathExtractor::ExtractResult TsBucketPathExtractor::extractCellBlocks(
         }
     }
     return ExtractResult{noOfMeasurements, std::move(outBlocks), std::move(outCells)};
+}
+
+bool TsBucketPathExtractor::tryPathBasedDecompression(
+    TsBlock& tsBlock,
+    const BSONElement fieldMin,
+    const BSONElement fieldMax,
+    const std::vector<size_t>& nonTopLevelIdxesForCurrentField,
+    std::vector<std::unique_ptr<CellBlock>>& outCells) const {
+
+    if (!_blockBasedScalarInObjectDecompressionEnabled ||
+        tsBlock.getBlockTag() != TypeTags::bsonBinData) {
+        return false;
+    }
+
+    if (fieldMin.type() != BSONType::Object || fieldMax.type() != BSONType::Object) {
+        return false;
+    }
+
+    ElementAnalysis analysis;
+    analyzeElement(analysis, fieldMin);
+    analyzeElement(analysis, fieldMax);
+
+    std::vector<bsoncolumn::SBEPath> bsoncolPaths;
+    for (size_t idx : nonTopLevelIdxesForCurrentField) {
+        auto maybePath = canUsePathBasedDecompression(_pathReqs[idx], analysis, fieldMin, fieldMax);
+        if (maybePath) {
+            bsoncolPaths.emplace_back(std::move(*maybePath));
+        } else {
+            break;
+        }
+    }
+
+    if (bsoncolPaths.size() != nonTopLevelIdxesForCurrentField.size()) {
+        return false;
+    }
+
+    using SBEMaterializer = sbe::bsoncolumn::SBEColumnMaterializer;
+
+    boost::intrusive_ptr<mongo::bsoncolumn::ElementStorage> allocator =
+        new mongo::bsoncolumn::ElementStorage{};
+
+    std::vector<BlockBasedDecompressAdaptor> containers;
+    std::vector<std::pair<bsoncolumn::SBEPath, BlockBasedDecompressAdaptor&>> pathPairs;
+    containers.reserve(bsoncolPaths.size());
+    pathPairs.reserve(bsoncolPaths.size());
+
+    size_t noOfMeasurements = tsBlock.count();
+    for (auto&& bsoncolPath : bsoncolPaths) {
+        containers.emplace_back(noOfMeasurements, allocator);
+        pathPairs.emplace_back(std::move(bsoncolPath), containers.back());
+    }
+
+    mongo::bsoncolumn::BSONColumnBlockBased col{tsBlock.getBinData()};
+    col.decompress<SBEMaterializer>(
+        allocator,
+        std::span<std::pair<bsoncolumn::SBEPath, BlockBasedDecompressAdaptor&>>{pathPairs});
+
+    for (size_t idx = 0; idx < nonTopLevelIdxesForCurrentField.size(); ++idx) {
+        auto cellBlock = std::make_unique<MaterializedCellBlock>();
+        cellBlock->_deblocked = containers[idx].extractBlock();
+        cellBlock->_filterPosInfo = containers[idx].extractPositionInfo();
+        outCells[nonTopLevelIdxesForCurrentField[idx]] = std::move(cellBlock);
+    }
+
+    // All paths were handled with path-based decompression.
+    return true;
 }
 
 TsBlock::TsBlock(size_t ncells,
@@ -398,31 +561,25 @@ void TsBlock::deblockFromBsonObj() {
 void TsBlock::deblockFromBsonColumn() {
     const auto binData = getBinData();
 
-    std::vector<TypeTags> tags;
-    std::vector<Value> vals;
-    tags.reserve(_count);
-    vals.reserve(_count);
-
     // If we can guarantee there are no arrays nor objects in this column, and the feature flag is
     // enabled, use the faster block-based decoding API.
     if (_blockBasedDecompressionEnabled && hasNoObjsOrArrays()) {
         using SBEMaterializer = sbe::bsoncolumn::SBEColumnMaterializer;
         mongo::bsoncolumn::BSONColumnBlockBased col(binData);
-        boost::intrusive_ptr allocator{new mongo::bsoncolumn::ElementStorage()};
 
-        // The decoding API will put the decompressed elements directly into 'tags' and
-        // 'vals'.
-        BlockBasedDecompressAdaptor container(tags, vals);
-        col.decompress<SBEMaterializer, BlockBasedDecompressAdaptor>(container, allocator);
-        tassert(8751600,
-                "Must have same the number of decompressed tags and values",
-                tags.size() == vals.size());
-
-        _decompressedBlock = buildBlockFromStorage(std::move(tags), std::move(vals));
+        BlockBasedDecompressAdaptor container(_count);
+        col.decompress<SBEMaterializer, BlockBasedDecompressAdaptor>(container,
+                                                                     container.allocator());
+        _decompressedBlock = container.extractBlock();
     } else {
         // Use the old, less efficient decoder, if there may be objects or arrays.
         BSONColumn blockColumn(binData);
         auto it = blockColumn.begin();
+
+        std::vector<TypeTags> tags;
+        std::vector<Value> vals;
+        tags.reserve(_count);
+        vals.reserve(_count);
 
         // Generally when we're in this path, we expect to be decompressing deep types. Instead of
         // copying the values into an owned value block, we insert them into an
@@ -572,21 +729,17 @@ ValueBlock& TsCellBlockForTopLevelField::getValueBlock() {
 }
 
 std::unique_ptr<CellBlock> TsCellBlockForTopLevelField::clone() const {
-    auto precomputedCount = _unownedTsBlock->tryCount();
-    tassert(
-        7943900, "Assumes count() is available in O(1) time on TS Block type", precomputedCount);
+    auto precomputedCount = _unownedTsBlock->count();
     auto tsBlockClone = _unownedTsBlock->cloneStrongTyped();
 
     // Using raw new to access private constructor.
     return std::unique_ptr<TsCellBlockForTopLevelField>(
-        new TsCellBlockForTopLevelField(*precomputedCount, std::move(tsBlockClone)));
+        new TsCellBlockForTopLevelField(precomputedCount, std::move(tsBlockClone)));
 }
 
 TsCellBlockForTopLevelField::TsCellBlockForTopLevelField(TsBlock* block) : _unownedTsBlock(block) {
-    auto count = block->tryCount();
-    tassert(8182400, "Assumes count() is available in O(1) time on TS Block type", count);
     // Position info of 1111...
-    _positionInfo.resize(*count, 1);
+    _positionInfo.resize(block->count(), 1);
 }
 
 TsCellBlockForTopLevelField::TsCellBlockForTopLevelField(size_t count,

@@ -36,6 +36,7 @@ global:
     - "mongo/db/query/ce_mode_parameter.h"
     - "mongo/db/query/explain_version_validator.h"
     - "mongo/db/query/sbe_plan_cache_on_parameter_change.h"
+    - "mongo/db/query/query_knob_expressions.h"
     - "mongo/db/query/query_stats/query_stats_on_parameter_change.h"
     - "mongo/platform/atomic_proxy.h"
     - "mongo/platform/atomic_word.h"
@@ -308,7 +309,7 @@ server_parameters:
     cpp_varname: "internalPipelineLengthLimit"
     cpp_vartype: int
     default:
-      expr: 'kDebugBuild ? 200 : 1000'
+      expr: 'defaultInternalPipelineLengthLimit()'
     validator:
       gt: 0
     redact: false
@@ -420,6 +421,15 @@ server_parameters:
     cpp_vartype: AtomicWord<bool>
     default: false
     on_update: plan_cache_util::clearSbeCacheOnParameterChange
+    redact: false
+
+  internalQueryPlannerUseMultiplannerForSingleSolutions:
+    description: "Forces planner to use multiplanning even if there is only one solution present.
+    Used for testing to increase multiplanning and replanning test coverage."
+    set_at: startup
+    cpp_varname: "internalQueryPlannerUseMultiplannerForSingleSolutions"
+    cpp_vartype: bool
+    default: false
     redact: false
 
   internalQueryIgnoreUnknownJSONSchemaKeywords:
@@ -1654,14 +1664,12 @@ server_parameters:
     default: false
     redact: false
 
-  internalQueryMaxFirstLastRewrites:
-    description: "The maximum number of the $first/$last accumulators to be rewritten."
-    set_at: [ startup, runtime ]
-    cpp_varname: "internalQueryMaxFirstLastRewrites"
-    cpp_vartype: AtomicWord<int>
-    default: 2
-    validator:
-      gte: 0
+  internalQueryEnableAggressiveSpillsInGroup:
+    description: "Enable spilling in $group every time there is a duplicate id to stress merge logic."
+    set_at: [ startup ]
+    cpp_varname: "internalQueryEnableAggressiveSpillsInGroup"
+    cpp_vartype: bool
+    default: false
     redact: false
 
 # Note for adding additional query knobs:

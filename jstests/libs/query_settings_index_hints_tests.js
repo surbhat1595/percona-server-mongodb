@@ -1,10 +1,21 @@
 import {
+    everyWinningPlan,
+    flattenQueryPlanTree,
     getAggPlanStages,
+    getEngine,
     getPlanStages,
     getQueryPlanners,
-    getWinningPlan
+    getWinningPlan,
+    isAlwaysFalsePlan,
+    isEofPlan,
+    isIdhackOrExpress,
+    planHasStage,
 } from "jstests/libs/analyze_plan.js";
-import {checkSbeFullyEnabled, checkSbeRestrictedOrFullyEnabled} from "jstests/libs/sbe_util.js";
+import {getExplainCommand} from "jstests/libs/cmd_object_utils.js";
+import {
+    checkSbeFullFeatureFlagEnabled,
+    checkSbeRestrictedOrFullyEnabled
+} from "jstests/libs/sbe_util.js";
 
 /**
  * Class containing common test functions used in query_settings_index_application_* tests.
@@ -14,7 +25,9 @@ export class QuerySettingsIndexHintsTests {
      * Create a query settings utility class.
      */
     constructor(qsutils) {
+        // TODO SERVER-89927: Prefix private properties with '_'.
         this.qsutils = qsutils;
+        this.db = qsutils.db;
         this.indexA = {a: 1};
         this.indexB = {b: 1};
         this.indexAB = {a: 1, b: 1};
@@ -27,39 +40,80 @@ export class QuerySettingsIndexHintsTests {
     assertQuerySettingsInCacheForCommand(command,
                                          querySettings,
                                          collOrViewName = this.qsutils.collName) {
-        // Single solution plans are not cached in classic, therefore do not perform plan cache
-        // checks for classic.
-        const db = this.qsutils.db;
-        if (!checkSbeFullyEnabled(db)) {
-            return;
-        }
+        const explainCmd = getExplainCommand(command);
+        const explain = assert.commandWorked(
+            this.db.runCommand(explainCmd),
+            `Failed running explain command ${
+                tojson(explainCmd)} for checking the query settings plan cache check.`);
+        const isIdhackQuery =
+            everyWinningPlan(explain, (winningPlan) => isIdhackOrExpress(this.db, winningPlan));
+        const isMinMaxQuery = "min" in command || "max" in command;
+        const isTriviallyFalse = everyWinningPlan(
+            explain,
+            (winningPlan) => isEofPlan(this.db, winningPlan) || isAlwaysFalsePlan(winningPlan));
+        const {defaultReadPreference, defaultReadConcernLevel, networkErrorAndTxnOverrideConfig} =
+            TestData;
+        const performsSecondaryReads =
+            defaultReadPreference && defaultReadPreference.mode == "secondary";
+        const isInTxnPassthrough = networkErrorAndTxnOverrideConfig &&
+            networkErrorAndTxnOverrideConfig.wrapCRUDinTransactions;
+        const willRetryOnNetworkErrors = networkErrorAndTxnOverrideConfig &&
+            networkErrorAndTxnOverrideConfig.retryOnNetworkErrors;
+        const shouldCheckPlanCache =
+            // Single solution plans are not cached in classic, therefore do not perform plan cache
+            // checks for when the classic cache is used. Note that the classic cache is used
+            // by default for SBE, except when featureFlagSbeFull is on.
+            // TODO SERVER-90880: We can relax this check when we cache single-solution plans in the
+            // classic cache with SBE.
+            // TODO SERVER-13341: Relax this check to include the case where classic is being used.
+            (getEngine(explain) === "sbe" && checkSbeFullFeatureFlagEnabled(db)) &&
+            // Express or IDHACK optimized queries are not cached.
+            !isIdhackQuery &&
+            // Min/max queries are not cached.
+            !isMinMaxQuery &&
+            // Similarly, trivially false plans are not cached.
+            !isTriviallyFalse &&
+            // Subplans are cached differently from normal plans.
+            !planHasStage(this.db, explain, "OR") &&
+            // If query is executed on secondaries, do not assert the cache.
+            !performsSecondaryReads &&
+            // Do not check plan cache if causal consistency is enabled.
+            !this.db.getMongo().isCausalConsistency() &&
+            // $planCacheStats can not be run in transactions.
+            !isInTxnPassthrough &&
+            // Retrying on network errors most likely is related to stepdown, which does not go
+            // together with plan cache clear.
+            !willRetryOnNetworkErrors &&
+            // If read concern is explicitly set, avoid plan cache checks.
+            !defaultReadConcernLevel;
 
-        // Checking plan cache for query settings doesn't work reliably if collections are moved
-        // between shards randomly because that causes plan cache invalidation.
-        if (TestData.runningWithBalancer) {
+        if (!shouldCheckPlanCache) {
             return;
         }
 
         // If the collection used is a view, determine the underlying collection being used.
-        const collInfo = db.getCollectionInfos({name: collOrViewName})[0];
+        const collInfo = this.db.getCollectionInfos({name: collOrViewName})[0];
         const collName = collInfo.options.viewOn || collOrViewName;
 
         // Clear the plan cache before running any queries.
-        db[collName].getPlanCache().clear();
+        this.db[collName].getPlanCache().clear();
 
-        // Take the newest plan cache entry (based on 'timeOfCreation' sorting) and ensure that it
-        // contains the 'settings'.
-        assert.commandWorked(db.runCommand(command));
-        const planCacheStatsAfterRunningCmd = db[collName].getPlanCache().list();
+        // Take the plan cache entries and ensure that they contain the 'settings'.
+        assert.commandWorked(this.db.runCommand(command),
+                             `Failed to check the plan cache because the original command failed ${
+                                 tojson(command)}`);
+        const planCacheStatsAfterRunningCmd = this.db[collName].getPlanCache().list();
         assert.gte(planCacheStatsAfterRunningCmd.length,
                    1,
                    "Expecting at least 1 entry in query plan cache");
         planCacheStatsAfterRunningCmd.forEach(
-            plan => assert.docEq(querySettings, plan.querySettings, plan));
+            plan => assert.docEq(this.qsutils.wrapIndexHintsIntoArrayIfNeeded(querySettings),
+                                 plan.querySettings,
+                                 plan));
     }
 
     assertIndexUse(cmd, expectedIndex, stagesExtractor, expectedStrategy) {
-        const explain = assert.commandWorked(db.runCommand({explain: cmd}));
+        const explain = assert.commandWorked(this.db.runCommand({explain: cmd}));
         const stagesUsingIndex = stagesExtractor(explain);
         if (expectedIndex !== undefined) {
             assert.gte(stagesUsingIndex.length, 1, explain);
@@ -75,9 +129,10 @@ export class QuerySettingsIndexHintsTests {
         }
     }
 
-    assertIndexScanStage(cmd, expectedIndex) {
+    assertIndexScanStage(cmd, expectedIndex, ns) {
         return this.assertIndexUse(cmd, expectedIndex, (explain) => {
             return getQueryPlanners(explain)
+                .filter(queryPlanner => queryPlanner.namespace == `${ns.db}.${ns.coll}`)
                 .map(getWinningPlan)
                 .flatMap(winningPlan => getPlanStages(winningPlan, "IXSCAN"));
         });
@@ -86,8 +141,7 @@ export class QuerySettingsIndexHintsTests {
     assertLookupJoinStage(cmd, expectedIndex, isSecondaryCollAView, expectedStrategy) {
         // $lookup stage is only pushed down to find in SBE and not in classic and only for
         // collections (not views).
-        const db = this.qsutils.db;
-        const expectPushDown = checkSbeRestrictedOrFullyEnabled(db) && !isSecondaryCollAView;
+        const expectPushDown = checkSbeRestrictedOrFullyEnabled(this.db) && !isSecondaryCollAView;
         if (!expectPushDown && expectedIndex != undefined) {
             return this.assertLookupPipelineStage(cmd, expectedIndex);
         }
@@ -124,7 +178,7 @@ export class QuerySettingsIndexHintsTests {
     }
 
     assertCollScanStage(cmd, allowedDirections) {
-        const explain = assert.commandWorked(this.qsutils.db.runCommand({explain: cmd}));
+        const explain = assert.commandWorked(this.db.runCommand({explain: cmd}));
         const collscanStages = getQueryPlanners(explain)
                                    .map(getWinningPlan)
                                    .flatMap(winningPlan => getPlanStages(winningPlan, "COLLSCAN"));
@@ -142,8 +196,8 @@ export class QuerySettingsIndexHintsTests {
         for (const index of [this.indexA, this.indexB, this.indexAB]) {
             const settings = {indexHints: {ns, allowedIndexes: [index]}};
             this.qsutils.withQuerySettings(querySettingsQuery, settings, () => {
-                this.assertIndexScanStage(query, index);
-                this.assertQuerySettingsInCacheForCommand(query, settings);
+                this.assertIndexScanStage(query, index, ns);
+                this.assertQuerySettingsInCacheForCommand(query, settings, ns.coll);
             });
         }
     }
@@ -195,9 +249,9 @@ export class QuerySettingsIndexHintsTests {
             };
 
             this.qsutils.withQuerySettings(querySettingsQuery, settings, () => {
-                this.assertIndexScanStage(query, mainCollIndex);
+                this.assertIndexScanStage(query, mainCollIndex, mainNs);
                 this.assertLookupJoinStage(query, secondaryCollIndex, isSecondaryCollAView);
-                this.assertQuerySettingsInCacheForCommand(query, settings);
+                this.assertQuerySettingsInCacheForCommand(query, settings, mainNs.coll);
             });
         }
     }
@@ -232,9 +286,34 @@ export class QuerySettingsIndexHintsTests {
             };
 
             this.qsutils.withQuerySettings(querySettingsQuery, settings, () => {
-                this.assertIndexScanStage(query, mainCollIndex);
+                this.assertIndexScanStage(query, mainCollIndex, mainNs);
                 this.assertLookupPipelineStage(query, secondaryCollIndex);
-                this.assertQuerySettingsInCacheForCommand(query, settings);
+                this.assertQuerySettingsInCacheForCommand(query, settings, mainNs.coll);
+                this.assertQuerySettingsInCacheForCommand(query, settings, secondaryNs.coll);
+            });
+        }
+    }
+
+    /**
+     * Ensure query settings are applied for both collections, resulting in index scans using the
+     * hinted indexes.
+     */
+    assertQuerySettingsIndexApplications(querySettingsQuery, mainNs, secondaryNs) {
+        const query = this.qsutils.withoutDollarDB(querySettingsQuery);
+        for (const [mainCollIndex, secondaryCollIndex] of selfCrossProduct(
+                 [this.indexA, this.indexB, this.indexAB])) {
+            const settings = {
+                indexHints: [
+                    {ns: mainNs, allowedIndexes: [mainCollIndex]},
+                    {ns: secondaryNs, allowedIndexes: [secondaryCollIndex]},
+                ]
+            };
+
+            this.qsutils.withQuerySettings(querySettingsQuery, settings, () => {
+                this.assertIndexScanStage(query, mainCollIndex, mainNs);
+                this.assertIndexScanStage(query, secondaryCollIndex, secondaryNs);
+                this.assertQuerySettingsInCacheForCommand(query, settings, mainNs.coll);
+                this.assertQuerySettingsInCacheForCommand(query, settings, secondaryNs.coll);
             });
         }
     }
@@ -246,7 +325,10 @@ export class QuerySettingsIndexHintsTests {
      * - Only backward scans allowed.
      * - Both forward and backward scans allowed.
      */
-    assertQuerySettingsNaturalApplication(querySettingsQuery, ns, additionalHints = []) {
+    assertQuerySettingsNaturalApplication(querySettingsQuery,
+                                          ns,
+                                          additionalHints = [],
+                                          additionalAssertions = () => {}) {
         const query = this.qsutils.withoutDollarDB(querySettingsQuery);
         const naturalForwardScan = {$natural: 1};
         const naturalForwardSettings = {
@@ -255,6 +337,7 @@ export class QuerySettingsIndexHintsTests {
         this.qsutils.withQuerySettings(querySettingsQuery, naturalForwardSettings, () => {
             this.assertCollScanStage(query, ["forward"]);
             this.assertQuerySettingsInCacheForCommand(query, naturalForwardSettings);
+            additionalAssertions();
         });
 
         const naturalBackwardScan = {$natural: -1};
@@ -264,6 +347,7 @@ export class QuerySettingsIndexHintsTests {
         this.qsutils.withQuerySettings(querySettingsQuery, naturalBackwardSettings, () => {
             this.assertCollScanStage(query, ["backward"]);
             this.assertQuerySettingsInCacheForCommand(query, naturalBackwardSettings);
+            additionalAssertions();
         });
 
         const naturalAnyDirectionSettings = {
@@ -275,6 +359,7 @@ export class QuerySettingsIndexHintsTests {
         this.qsutils.withQuerySettings(querySettingsQuery, naturalAnyDirectionSettings, () => {
             this.assertCollScanStage(query, ["forward", "backward"]);
             this.assertQuerySettingsInCacheForCommand(query, naturalAnyDirectionSettings);
+            additionalAssertions();
         });
     }
 
@@ -286,7 +371,7 @@ export class QuerySettingsIndexHintsTests {
         const queryWithHint = {...query, hint: this.indexA};
         const settings = {indexHints: {ns, allowedIndexes: [this.indexAB]}};
         const getWinningPlansForQuery = (query) => {
-            const explain = assert.commandWorked(db.runCommand({explain: query}));
+            const explain = assert.commandWorked(this.db.runCommand({explain: query}));
             return getQueryPlanners(explain).map(getWinningPlan);
         };
 
@@ -315,7 +400,7 @@ export class QuerySettingsIndexHintsTests {
             let winningPlans = null;
             this.qsutils.withQuerySettings(
                 {...query, $db: querySettingsQuery.$db}, settings, () => {
-                    const explain = assert.commandWorked(db.runCommand({explain: query}));
+                    const explain = assert.commandWorked(this.db.runCommand({explain: query}));
                     winningPlans = getQueryPlanners(explain).map(getWinningPlan);
                 });
             return winningPlans;
@@ -333,15 +418,30 @@ export class QuerySettingsIndexHintsTests {
     assertQuerySettingsFallback(querySettingsQuery, ns) {
         const query = this.qsutils.withoutDollarDB(querySettingsQuery);
         const settings = {indexHints: {ns, allowedIndexes: ["doesnotexist"]}};
-        const explainWithoutQuerySettings = assert.commandWorked(db.runCommand({explain: query}));
+        const getWinningStages = (explain) =>
+            getQueryPlanners(explain).flatMap(getWinningPlan).flatMap(flattenQueryPlanTree);
 
+        // It's not guaranteed for all the queries to preserve the order of the stages when
+        // replanning (namely in the case of subplanning with $or statements). Flatten the plan tree
+        // & sort the stages according to 'bsonWoCompare()' to accommodate this behavior and avoid
+        // potential failures.
+        const explainCmd = getExplainCommand(query);
+        const explainWithoutQuerySettings = assert.commandWorked(
+            this.db.runCommand(explainCmd),
+            `Failed running ${tojson(explainCmd)} before setting query settings`);
+        const winningStagesWithoutQuerySettings = getWinningStages(explainWithoutQuerySettings);
+        winningStagesWithoutQuerySettings.sort(bsonWoCompare);
         this.qsutils.withQuerySettings(querySettingsQuery, settings, () => {
-            const explainWithQuerySettings = assert.commandWorked(db.runCommand({explain: query}));
-            const winningPlansWithQuerySettings =
-                getQueryPlanners(explainWithQuerySettings).map(getWinningPlan);
-            const winningPlansWithoutQuerySettings =
-                getQueryPlanners(explainWithoutQuerySettings).map(getWinningPlan);
-            assert.eq(winningPlansWithQuerySettings, winningPlansWithoutQuerySettings);
+            const explainWithQuerySettings = assert.commandWorked(
+                this.db.runCommand(explainCmd),
+                `Failed running ${tojson(explainCmd)} after settings query settings`);
+            const winningStagesWithQuerySettings = getWinningStages(explainWithQuerySettings);
+            winningStagesWithQuerySettings.sort(bsonWoCompare);
+            assert.eq(
+                winningStagesWithQuerySettings,
+                winningStagesWithoutQuerySettings,
+                "Expected the query without query settings and the one with settings to have " +
+                    "identical plan stages.");
             this.assertQuerySettingsInCacheForCommand(query, settings);
         });
     }
@@ -353,8 +453,8 @@ export class QuerySettingsIndexHintsTests {
         const query = this.qsutils.withoutDollarDB(querySettingsQuery);
         const settings = {indexHints: {ns, allowedIndexes: [this.indexAB]}};
         const expectedErrorCodes = [7746900, 7746901, 7923000, 7923001, 7708000, 7708001];
-        assert.commandFailedWithCode(
-            this.qsutils.db.runCommand({...query, querySettings: settings}), expectedErrorCodes);
+        assert.commandFailedWithCode(this.db.runCommand({...query, querySettings: settings}),
+                                     expectedErrorCodes);
     }
 
     testAggregateQuerySettingsNaturalHintEquiJoinStrategy(query, mainNs, secondaryNs) {
@@ -381,13 +481,52 @@ export class QuerySettingsIndexHintsTests {
             });
     }
 
-    testAggregateQuerySettingsNaturalHintDirectionWhenSecondaryHinted(query, mainNs, secondaryNs) {
-        // Verify main collection scan direction is not affected by hint for secondary collection.
-        for (const hint
-                 of [[{"$natural": 1}], [{"$natural": -1}], [{"$natural": 1}, {"$natural": -1}]]) {
+    testAggregateQuerySettingsNaturalHintDirectionWhenSecondaryHinted(
+        query, mainNs, secondaryNs, lookupResultExtractor = (doc) => doc.output) {
+        let params = [
+            {hint: [{"$natural": 1}], cmp: (a, b) => a <= b},
+            {hint: [{"$natural": -1}], cmp: (a, b) => a >= b},
+            {hint: [{"$natural": 1}, {"$natural": -1}], cmp: () => true},
+        ];
+
+        for (const {hint, cmp} of params) {
             this.assertQuerySettingsNaturalApplication(
-                query, mainNs, [{ns: secondaryNs, allowedIndexes: hint}]);
+                query, mainNs, [{ns: secondaryNs, allowedIndexes: hint}], () => {
+                    // The order of the documents in output should correspond to the $natural hint
+                    // direction set for the secondary collection.
+                    const res = assert.commandWorked(
+                        this.db.runCommand(this.qsutils.withoutDollarDB(query)));
+                    const docs = getAllDocuments(this.db, res);
+
+                    for (const doc of docs) {
+                        for (const [a, b] of pairwise(lookupResultExtractor(doc))) {
+                            assert(cmp(a, b), {
+                                msg: "$lookup result not in expected order",
+                                docs: docs,
+                                doc: doc
+                            });
+                        }
+                    }
+                });
         }
+    }
+}
+
+function getAllDocuments(db, commandResult) {
+    return (new DBCommandCursor(db, commandResult)).toArray();
+}
+
+function* pairwise(iterable) {
+    const iterator = iterable[Symbol.iterator]();
+    let a = iterator.next();
+    if (a.done) {
+        return;
+    }
+    let b = iterator.next();
+    while (!b.done) {
+        yield [a.value, b.value];
+        a = b;
+        b = iterator.next();
     }
 }
 

@@ -38,6 +38,7 @@ TimeseriesTest.run((insert) => {
         [metaFieldName]: "cpu",
         topLevelScalar: 123,
         topLevelScalarDouble: 123.8778645,
+        topLevelLargeNumber: 12345678912345,
         topLevelArray: [1, 2, 3, 4],
         arrOfObj: [{x: 1}, {x: 2}, {x: 3}, {x: 4}],
         obj: {a: 123},
@@ -751,6 +752,14 @@ TimeseriesTest.run((insert) => {
                      coll.aggregate(pipeline).toArray());
     }
     {
+        let pipeline = [{$match: {topLevelLargeNumber: {$mod: [1, 0]}}}, {$count: "count"}];
+
+        const res = coll.aggregate(pipeline).toArray();
+
+        assert.eq(res.length, 1, res);
+        assert.eq(res[0].count, 1, res);
+    }
+    {
         const res =
             coll.aggregate([
                     {
@@ -783,6 +792,28 @@ TimeseriesTest.run((insert) => {
                         .toArray();
         assert.eq(res.length, 1, res);
         assert.eq(res[0].count, 1, res);
+    }
+
+    {
+        // Test the case where a computed meta field is computed to missing.
+        const res =
+            coll.aggregate([{"$project": {"_id": 0, [metaFieldName]: "$$REMOVE"}}]).toArray();
+        assert.eq(res.length, coll.count(), res);
+        for (let doc of res) {
+            assert.eq(doc, {}, res);
+        }
+    }
+
+    {
+        // Test the case where a computed meta field is computed to missing because of a project
+        // out.
+        const res = coll.aggregate([
+                            {"$project": {[metaFieldName]: 0}},
+                            {"$project": {[metaFieldName]: "$" + metaFieldName}},
+                            {$match: {a: 1}}
+                        ])
+                        .toArray();
+        assert.eq(res.length, 0, res);
     }
 
     {

@@ -33,8 +33,8 @@
 #include "mongo/bson/json.h"
 #include "mongo/db/dbdirectclient.h"
 #include "mongo/db/op_observer/op_observer_registry.h"
+#include "mongo/db/repl/oplog_applier_batcher_test_fixture.h"
 #include "mongo/db/repl/oplog_applier_impl_test_fixture.h"
-#include "mongo/db/repl/oplog_batcher_test_fixture.h"
 #include "mongo/db/repl/oplog_entry_test_helpers.h"
 #include "mongo/db/repl/repl_server_parameters_gen.h"
 #include "mongo/db/repl/replication_coordinator_mock.h"
@@ -61,8 +61,6 @@
 
 namespace mongo {
 
-using executor::TaskExecutor;
-using executor::ThreadPoolExecutorTest;
 
 namespace repl {
 
@@ -177,7 +175,7 @@ public:
             std::make_shared<TenantMigrationRecipientAccessBlocker>(service, kMigrationUuid);
         TenantMigrationAccessBlockerRegistry::get(service).add(kTenantId, std::move(recipientMtab));
 
-        _writerPool = makeTenantMigrationWriterPool(1);
+        _workerPool = makeTenantMigrationWorkerPool(1);
         _applier = std::make_shared<TenantOplogApplier>(kMigrationUuid,
                                                         MigrationProtocolEnum::kShardMerge,
                                                         OpTime(),
@@ -185,15 +183,15 @@ public:
                                                         boost::none,
                                                         &_oplogBuffer,
                                                         _executor,
-                                                        _writerPool.get());
+                                                        _workerPool.get());
     }
 
     void tearDown() override {
         _applier->shutdown();
         _applier->join();
 
-        _writerPool->shutdown();
-        _writerPool->join();
+        _workerPool->shutdown();
+        _workerPool->join();
 
         _executor->shutdown();
         _executor->join();
@@ -230,7 +228,7 @@ protected:
     std::shared_ptr<executor::ThreadPoolTaskExecutor> _executor;
     ServiceContext::UniqueOperationContext _opCtx;
     TenantOplogApplierTestOpObserver* _opObserver;  // Owned by service context opObserverRegistry
-    std::unique_ptr<ThreadPool> _writerPool;
+    std::unique_ptr<ThreadPool> _workerPool;
     std::shared_ptr<TenantOplogApplier> _applier;
 
 

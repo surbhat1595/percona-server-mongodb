@@ -61,8 +61,8 @@
 #include "mongo/db/record_id.h"
 #include "mongo/db/repl/oplog.h"
 #include "mongo/db/repl/oplog_applier.h"
+#include "mongo/db/repl/oplog_applier_batcher.h"
 #include "mongo/db/repl/oplog_applier_impl.h"
-#include "mongo/db/repl/oplog_batcher.h"
 #include "mongo/db/repl/oplog_buffer.h"
 #include "mongo/db/repl/oplog_entry.h"
 #include "mongo/db/repl/oplog_interface.h"
@@ -185,6 +185,8 @@ public:
             : BSON("$gte" << _oplogApplicationStartPoint);
         FindCommandRequest findRequest{NamespaceString::kRsOplogNamespace};
         findRequest.setFilter(BSON("ts" << predicate));
+        // Don't kill the cursor just because applying a batch oplog takes a long time.
+        findRequest.setNoCursorTimeout(true);
         _cursor = _client->find(std::move(findRequest));
 
         // Check that the first document matches our appliedThrough point then skip it since it's
@@ -411,14 +413,21 @@ void ReplicationRecoveryImpl::recoverFromOplogUpTo(OperationContext* opCtx, Time
                             "Cannot use 'recoverToOplogTimestamp' without a stable checkpoint");
     }
 
+    const auto serviceCtx = opCtx->getServiceContext();
+    inReplicationRecovery(serviceCtx).store(true);
+    ON_BLOCK_EXIT([serviceCtx] {
+        invariant(
+            inReplicationRecovery(serviceCtx).load(),
+            "replication recovery flag is unexpectedly unset when exiting recoverFromOplogUpTo()");
+        inReplicationRecovery(serviceCtx).store(false);
+    });
+
     // This may take an IS lock on the oplog collection.
     _truncateOplogIfNeededAndThenClearOplogTruncateAfterPoint(opCtx, &recoveryTS);
 
     boost::optional<Timestamp> startPoint =
         _storageInterface->getRecoveryTimestamp(opCtx->getServiceContext());
-    if (!startPoint) {
-        fassert(31436, "No recovery timestamp, cannot recover from the oplog");
-    }
+    fassert(31436, !!startPoint);  // No recovery timestamp, cannot recover from the oplog
 
     startPoint = _adjustStartPointIfNecessary(opCtx, startPoint.value());
 
@@ -749,7 +758,7 @@ Timestamp ReplicationRecoveryImpl::_applyOplogOperations(OperationContext* opCtx
                                  recoveryMode == RecoveryMode::kRollbackFromStableTimestamp)
         ? OplogApplication::Mode::kStableRecovering
         : OplogApplication::Mode::kUnstableRecovering;
-    auto writerPool = makeReplWriterPool();
+    auto workerPool = makeReplWorkerPool();
     auto* replCoord = ReplicationCoordinator::get(opCtx);
     OplogApplierImpl oplogApplier(nullptr,
                                   &oplogBuffer,
@@ -758,7 +767,7 @@ Timestamp ReplicationRecoveryImpl::_applyOplogOperations(OperationContext* opCtx
                                   _consistencyMarkers,
                                   _storageInterface,
                                   OplogApplier::Options(oplogApplicationMode),
-                                  writerPool.get());
+                                  workerPool.get());
 
     OplogApplier::BatchLimits batchLimits;
     batchLimits.bytes = getBatchLimitOplogBytes(opCtx, _storageInterface);
@@ -958,7 +967,7 @@ void ReplicationRecoveryImpl::_truncateOplogIfNeededAndThenClearOplogTruncateAft
 Timestamp ReplicationRecoveryImpl::_adjustStartPointIfNecessary(OperationContext* opCtx,
                                                                 Timestamp startPoint) {
     // Set up read on oplog collection.
-    AutoGetOplogFastPath oplogRead(opCtx, OplogAccessMode::kRead);
+    AutoGetOplog oplogRead(opCtx, OplogAccessMode::kRead);
     const auto& oplogCollection = oplogRead.getCollection();
     if (!oplogCollection) {
         LOGV2_FATAL_NOTRACE(

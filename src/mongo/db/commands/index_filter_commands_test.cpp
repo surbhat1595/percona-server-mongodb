@@ -299,17 +299,20 @@ private:
 
         auto cacheData = std::make_unique<SolutionCacheData>();
         cacheData->tree = std::make_unique<PlanCacheIndexTree>();
-        auto decision = createDecision(1U);
-        auto decisionPtr = decision.get();
+        const size_t nWorks = 1;
+        auto decision = createDecision(nWorks);
         auto buildDebugInfoFn = [&]() -> plan_cache_debug_info::DebugInfo {
             return plan_cache_util::buildDebugInfo(*cq, std::move(decision));
         };
+        auto printCachedPlanFn = [](const SolutionCacheData& plan) {
+            return plan.toString();
+        };
         PlanCacheCallbacksImpl<PlanCacheKey, SolutionCacheData, plan_cache_debug_info::DebugInfo>
-            callbacks{*cq, buildDebugInfoFn};
+            callbacks{*cq, buildDebugInfoFn, printCachedPlanFn};
         ASSERT_OK(_classicPlanCache->set(
             makeClassicKey(*cq),
             std::move(cacheData),
-            *decisionPtr,
+            NumWorks{nWorks},
             _operationContext.get()->getServiceContext()->getPreciseClockSource()->now(),
             &callbacks,
             PlanSecurityLevel::kNotSensitive,
@@ -335,22 +338,27 @@ private:
                 stage_builder::Environment(std::make_unique<sbe::RuntimeEnvironment>()),
                 std::make_unique<stage_builder::PlanStageStaticData>()),
             0 /*hash*/);
-        auto decision = createDecision(1U);
+        const size_t nWorks = 1;
+        auto decision = createDecision(nWorks);
         auto querySolution = std::make_unique<QuerySolution>();
 
         auto buildDebugInfoFn = [soln =
                                      querySolution.get()]() -> plan_cache_debug_info::DebugInfoSBE {
             return plan_cache_util::buildDebugInfo(soln);
         };
+        auto printCachedPlanFn = [](const sbe::CachedSbePlan& plan) {
+            sbe::DebugPrinter p;
+            return p.print(*plan.root.get());
+        };
         PlanCacheCallbacksImpl<sbe::PlanCacheKey,
                                sbe::CachedSbePlan,
                                plan_cache_debug_info::DebugInfoSBE>
-            callbacks{*cq, buildDebugInfoFn};
+            callbacks{*cq, buildDebugInfoFn, printCachedPlanFn};
 
         ASSERT_OK(_sbePlanCache->set(
             makeSbeKey(*cq),
             std::move(cacheData),
-            *decision,
+            NumWorks{nWorks},
             _operationContext.get()->getServiceContext()->getPreciseClockSource()->now(),
             &callbacks,
             PlanSecurityLevel::kNotSensitive,

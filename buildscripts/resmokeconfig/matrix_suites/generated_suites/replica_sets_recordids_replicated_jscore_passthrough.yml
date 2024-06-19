@@ -22,7 +22,6 @@ executor:
     class: ReplicaSetFixture
     mongod_options:
       set_parameters:
-        enableAutoCompaction: 1
         enableTestCommands: 1
     num_nodes: 2
   hooks:
@@ -52,6 +51,9 @@ selector:
   - jstests/core/administrative/validate_db_metadata_command.js
   - jstests/core/catalog/list_catalog.js
   - jstests/core/write/bulk/bulk_write_timeseries_basic.js
+  - jstests/core/ddl/convert_to_capped.js
+  - jstests/core/rename_system_buckets_collections.js
+  - jstests/core/write/bypass_empty_ts_replacement_timeseries.js
   - jstests/core/version_api_v1_command_coverage.js
   - jstests/core/api/*.js
   - jstests/core/query/distinct/*.*

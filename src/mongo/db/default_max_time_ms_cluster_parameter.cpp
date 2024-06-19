@@ -29,36 +29,66 @@
 
 #include "mongo/db/default_max_time_ms_cluster_parameter.h"
 
+#include "mongo/db/auth/authorization_session.h"
 #include "mongo/db/default_max_time_ms_cluster_parameter_gen.h"
 
 namespace mongo {
-boost::optional<Milliseconds> getRequestOrDefaultMaxTimeMS(
+std::pair<boost::optional<Milliseconds>, bool> getRequestOrDefaultMaxTimeMS(
     OperationContext* opCtx,
     const boost::optional<mongo::IDLAnyType>& requestMaxTimeMS,
-    Command* command) {
+    const bool isReadOperation) {
+
     // Always uses the user-defined value if it's passed in.
     if (requestMaxTimeMS) {
-        return Milliseconds{uassertStatusOK(parseMaxTimeMS(requestMaxTimeMS->getElement()))};
+        return {Milliseconds{uassertStatusOK(parseMaxTimeMS(requestMaxTimeMS->getElement()))},
+                false};
     }
-    // TODO (SERVER-87886): Remove this block. This is a temporary hack before the privilege-based
-    // checking is implemented.
-    if (opCtx->getClient()->isInDirectClient()) {
-        return boost::none;
+
+    // Currently, defaultMaxTimeMS is only applicable to read operations.
+    if (!isReadOperation) {
+        return {boost::none, false};
     }
-    // Next uses the default maxTimeMS cluster parameter if the command is a read operation.
+
+    // If the feature flag is disabled, return early.
     const auto fcvSnapshot = serverGlobalParams.featureCompatibility.acquireFCVSnapshot();
-    if (fcvSnapshot.isVersionInitialized() &&
-        gFeatureFlagDefaultReadMaxTimeMS.isEnabled(fcvSnapshot) &&
-        command->getReadWriteType() == Command::ReadWriteType::kRead) {
-        auto defaultReadMaxTimeMS = [&]() {
-            auto* clusterParameters = ServerParameterSet::getClusterParameterSet();
-            auto* defaultMaxTimeMSParam =
-                clusterParameters->get<ClusterParameterWithStorage<DefaultMaxTimeMSParam>>(
-                    "defaultMaxTimeMS");
-            return defaultMaxTimeMSParam->getValue(boost::none).getReadOperations();
-        }();
-        return Milliseconds{defaultReadMaxTimeMS};
+    if (!fcvSnapshot.isVersionInitialized() ||
+        !gFeatureFlagDefaultReadMaxTimeMS.isEnabled(fcvSnapshot)) {
+        return {boost::none, false};
     }
-    return boost::none;
+
+    const boost::optional<auth::ValidatedTenancyScope>& vts =
+        auth::ValidatedTenancyScope::get(opCtx);
+    auto tenantId = vts && vts->hasTenantId() ? boost::make_optional(vts->tenantId()) : boost::none;
+
+    // Check if the defaultMaxTimeMS can be bypassed.
+    const auto bypassDefaultMaxTimeMS =
+        AuthorizationSession::get(opCtx->getClient())
+            ->isAuthorizedForClusterAction(ActionType::bypassDefaultMaxTimeMS, tenantId);
+
+    if (bypassDefaultMaxTimeMS) {
+        return {boost::none, false};
+    }
+
+    auto* clusterParameters = ServerParameterSet::getClusterParameterSet();
+    auto* defaultMaxTimeMSParam =
+        clusterParameters->get<ClusterParameterWithStorage<DefaultMaxTimeMSParam>>(
+            "defaultMaxTimeMS");
+    // Uses the tenant specific default value if one was set.
+    if (tenantId) {
+        auto tenantDefaultReadMaxTimeMS =
+            defaultMaxTimeMSParam->getValue(tenantId).getReadOperations();
+        if (tenantDefaultReadMaxTimeMS) {
+            return {Milliseconds{tenantDefaultReadMaxTimeMS}, true};
+        }
+    }
+
+    // Uses the global default maxTimeMS for read operations.
+    auto globalDefaultReadMaxTimeMS =
+        defaultMaxTimeMSParam->getValue(boost::none).getReadOperations();
+    if (globalDefaultReadMaxTimeMS) {
+        return {Milliseconds{globalDefaultReadMaxTimeMS}, true};
+    }
+
+    return {boost::none, false};
 }
 }  // namespace mongo

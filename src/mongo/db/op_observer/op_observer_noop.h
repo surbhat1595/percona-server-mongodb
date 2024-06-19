@@ -156,7 +156,9 @@ public:
                    const CollectionOptions& oldCollOptions,
                    boost::optional<IndexCollModInfo> indexInfo) override {}
 
-    void onDropDatabase(OperationContext* opCtx, const DatabaseName& dbName) override {}
+    void onDropDatabase(OperationContext* opCtx,
+                        const DatabaseName& dbName,
+                        bool markFromMigrate) override {}
 
     repl::OpTime onDropCollection(OperationContext* opCtx,
                                   const NamespaceString& collectionName,
@@ -239,6 +241,7 @@ public:
 
     void preTransactionPrepare(
         OperationContext* opCtx,
+        const std::vector<OplogSlot>& reservedSlots,
         const TransactionOperations& transactionOperations,
         const ApplyOpsOplogSlotAndOperationAssignment& applyOpsOperationAssignment,
         Date_t wallClockTime) override {}

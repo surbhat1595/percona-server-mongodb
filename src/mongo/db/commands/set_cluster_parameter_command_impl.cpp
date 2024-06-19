@@ -80,20 +80,7 @@ const WriteConcernOptions kMajorityWriteConcern{WriteConcernOptions::kMajority,
                                                 WriteConcernOptions::kNoTimeout};
 
 void hangInSetClusterParameterFailPointCheck(const SetClusterParameter& request) {
-    // The failpoint will block the thread unless the 'data' parameter contains a pattern
-    // that does not match the 'cmdObject'.
-    if (MONGO_unlikely(hangInSetClusterParameter.shouldFail(
-            [cmdObject = request.getCommandParameter()](const BSONObj& data) {
-                if (data.isEmpty()) {
-                    return true;
-                }
-                BSONElementMultiSet bSet;
-                dotted_path_support::extractAllElementsAlongPath(
-                    cmdObject, data.firstElementFieldNameStringData(), bSet, false);
-                return std::any_of(bSet.begin(), bSet.end(), [data](const BSONElement& elem) {
-                    return elem.Obj().woCompare(data.firstElement().Obj()) == 0;
-                });
-            }))) {
+    if (MONGO_unlikely(hangInSetClusterParameter.shouldFail())) {
         hangInSetClusterParameter.pauseWhileSet();
     }
 }
@@ -106,8 +93,11 @@ void setClusterParameterImplShard(OperationContext* opCtx,
             "setClusterParameter can only run on mongos in sharded clusters",
             (serverGlobalParams.clusterRole.has(ClusterRole::None)));
 
+    // setClusterParameter is serialized against setFeatureCompatibilityVersion.
+    FixedFCVRegion fcvRegion(opCtx);
+
     if (!feature_flags::gFeatureFlagAuditConfigClusterParameter.isEnabled(
-            serverGlobalParams.featureCompatibility.acquireFCVSnapshot())) {
+            fcvRegion->acquireFCVSnapshot())) {
         uassert(ErrorCodes::IllegalOperation,
                 str::stream() << SetClusterParameter::kCommandName
                               << " cannot be run on standalones",
@@ -115,9 +105,6 @@ void setClusterParameterImplShard(OperationContext* opCtx,
     }
 
     hangInSetClusterParameterFailPointCheck(request);
-
-    // setClusterParameter is serialized against setFeatureCompatibilityVersion.
-    FixedFCVRegion fcvRegion(opCtx);
 
     std::unique_ptr<ServerParameterService> parameterService =
         std::make_unique<ClusterParameterService>();

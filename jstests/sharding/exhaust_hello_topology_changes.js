@@ -21,11 +21,11 @@ import {awaitRSClientHosts} from "jstests/replsets/rslib.js";
 let overrideMaxAwaitTimeMS = {'mode': 'alwaysOn', 'data': {maxAwaitTimeMS: 5 * 60 * 1000}};
 let st = new ShardingTest({
     mongos:
-        {s0: {setParameter: "failpoint.overrideMaxAwaitTimeMS=" + tojson(overrideMaxAwaitTimeMS)}},
+        {s0: {setParameter: {"failpoint.overrideMaxAwaitTimeMS": tojson(overrideMaxAwaitTimeMS)}}},
     shards: {rs0: {nodes: [{}, {}, {rsConfig: {priority: 0}}]}}
 });
 
-let timeoutMS = 10000;
+let timeoutMS = 20000;
 let mongos = st.s;
 let rsPrimary = st.rs0.getPrimary();
 let electableRsSecondary;

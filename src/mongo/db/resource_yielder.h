@@ -54,7 +54,7 @@ public:
         return Status::OK();
     };
 
-    Status unyieldNoThrow(OperationContext* opCtx) noexcept {
+    virtual Status unyieldNoThrow(OperationContext* opCtx) noexcept {
         try {
             unyield(opCtx);
         } catch (const DBException& e) {

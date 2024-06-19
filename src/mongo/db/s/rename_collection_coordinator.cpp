@@ -322,7 +322,7 @@ void renameIndexMetadataInShards(OperationContext* opCtx,
         {doc->getNewTargetCollectionUuid().get_value_or(doc->getSourceUUID().value()),
          newIndexVersion});
     renameIndexCatalogReq.setDbName(toNss.dbName());
-    async_rpc::GenericArgs args;
+    GenericArguments args;
     async_rpc::AsyncRPCCommandHelpers::appendMajorityWriteConcern(args);
     async_rpc::AsyncRPCCommandHelpers::appendOSI(args, osi);
     auto opts = std::make_shared<async_rpc::AsyncRPCOptions<ShardsvrRenameIndexMetadata>>(
@@ -861,6 +861,12 @@ ExecutorFuture<void> RenameCollectionCoordinator::_runImpl(
                                 str::stream()
                                     << "Can't rename source collection `"
                                     << fromNss.toStringForErrorMsg() << "` because it is a view.",
+                                !CollectionCatalog::get(opCtx)->lookupView(opCtx, originalNss()));
+
+                        uassert(ErrorCodes::CommandNotSupportedOnView,
+                                str::stream()
+                                    << "Can't rename source collection `"
+                                    << fromNss.toStringForErrorMsg() << "` because it is a view.",
                                 !CollectionCatalog::get(opCtx)->lookupView(opCtx, fromNss));
 
                         checkCollectionUUIDMismatch(
@@ -875,6 +881,17 @@ ExecutorFuture<void> RenameCollectionCoordinator::_runImpl(
                                 "Cannot rename an encrypted collection",
                                 !coll || !coll->getCollectionOptions().encryptedFieldConfig ||
                                     _doc.getAllowEncryptedCollectionRename().value_or(false));
+
+                        // TODO SERVER-89089 adapt this check once we have the guarantee that bucket
+                        // collection always have timeseries options
+                        uassert(ErrorCodes::IllegalOperation,
+                                str::stream() << "Cannot rename timeseries buckets collection '"
+                                              << fromNss.toStringForErrorMsg()
+                                              << "' to a namespace that is not timeseries buckets '"
+                                              << toNss.toStringForErrorMsg() << "'.",
+                                !fromNss.isTimeseriesBucketsCollection() ||
+                                    !coll->getTimeseriesOptions() ||
+                                    toNss.isTimeseriesBucketsCollection());
                     }
 
                     // Make sure the source collection exists
@@ -1071,7 +1088,7 @@ ExecutorFuture<void> RenameCollectionCoordinator::_runImpl(
                     std::remove(participants.begin(), participants.end(), primaryShardId),
                     participants.end());
 
-                async_rpc::GenericArgs args;
+                GenericArguments args;
                 async_rpc::AsyncRPCCommandHelpers::appendMajorityWriteConcern(args);
                 async_rpc::AsyncRPCCommandHelpers::appendOSI(args, getNewSession(opCtx));
                 auto opts = std::make_shared<
@@ -1157,7 +1174,7 @@ ExecutorFuture<void> RenameCollectionCoordinator::_runImpl(
                 unblockParticipantRequest.setRenameCollectionRequest(_request);
                 auto participants = getAllShardsAndConfigServerIds(opCtx);
 
-                async_rpc::GenericArgs args;
+                GenericArguments args;
                 async_rpc::AsyncRPCCommandHelpers::appendMajorityWriteConcern(args);
                 async_rpc::AsyncRPCCommandHelpers::appendOSI(args, getNewSession(opCtx));
                 auto opts = std::make_shared<

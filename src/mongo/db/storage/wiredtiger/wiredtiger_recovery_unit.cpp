@@ -107,18 +107,6 @@ WiredTigerRecoveryUnit::WiredTigerRecoveryUnit(WiredTigerSessionCache* sc,
 WiredTigerRecoveryUnit::~WiredTigerRecoveryUnit() {
     invariant(!_inUnitOfWork(), toString(_getState()));
     _abort();
-
-    // If the session has non zero timeout then reset it back to 0 before returning the session back
-    // to the cache.
-    if (durationCount<Milliseconds>(_cacheMaxWaitTimeout)) {
-        auto wtSession = getSessionNoTxn()->getSession();
-        invariantWTOK(wtSession->reconfigure(wtSession, "cache_max_wait_ms=0"), wtSession);
-    }
-
-    if (_prefetchingSet) {
-        auto wtSession = getSessionNoTxn()->getSession();
-        invariantWTOK(wtSession->reconfigure(wtSession, "prefetch=(enabled=false)"), wtSession);
-    }
 }
 
 void WiredTigerRecoveryUnit::_commit() {
@@ -204,13 +192,10 @@ void WiredTigerRecoveryUnit::setPrefetching(bool enable) {
     invariant(!_inUnitOfWork(), toString(_getState()));
     invariant(getSessionNoTxn()->cursorsOut() == 0);
 
-    auto wtSession = getSessionNoTxn()->getSession();
-
-    _prefetchingSet = enable;
-
+    auto session = getSessionNoTxn();
     StringBuilder config;
     config << "prefetch=(enabled=" << (enable ? "true" : "false") << ")";
-    invariantWTOK(wtSession->reconfigure(wtSession, config.str().c_str()), wtSession);
+    session->reconfigure(config.str(), "prefetch=(enabled=false)");
 }
 
 bool WiredTigerRecoveryUnit::waitUntilDurable(OperationContext* opCtx) {
@@ -515,6 +500,8 @@ void WiredTigerRecoveryUnit::_txnOpen() {
     invariant(!_isCommittingOrAborting(),
               str::stream() << "commit or rollback handler reopened transaction: "
                             << toString(_getState()));
+
+    ensureSnapshot();
     _ensureSession();
 
     // Only start a timer for transaction's lifetime if we're going to log it.
@@ -960,13 +947,10 @@ void WiredTigerRecoveryUnit::storeWriteContextForDebugging(const BSONObj& info) 
 
 void WiredTigerRecoveryUnit::setCacheMaxWaitTimeout(Milliseconds timeout) {
     _cacheMaxWaitTimeout = timeout;
+    auto session = getSessionNoTxn();
 
-    auto wtSession = getSessionNoTxn()->getSession();
-    invariantWTOK(
-        wtSession->reconfigure(
-            wtSession,
-            fmt::format("cache_max_wait_ms={}", durationCount<Milliseconds>(_cacheMaxWaitTimeout))
-                .c_str()),
-        wtSession);
+    session->reconfigure(
+        fmt::format("cache_max_wait_ms={}", durationCount<Milliseconds>(_cacheMaxWaitTimeout)),
+        "cache_max_wait_ms=0");
 }
 }  // namespace mongo

@@ -29,6 +29,7 @@
 
 #include "mongo/db/s/shard_key_util.h"
 
+#include "mongo/base/error_extra_info.h"
 #include <absl/container/node_hash_map.h>
 #include <boost/container/small_vector.hpp>
 // IWYU pragma: no_include "boost/intrusive/detail/iterator.hpp"
@@ -336,6 +337,35 @@ bool validateShardKeyIndexExistsOrCreateIfPossible(OperationContext* opCtx,
     return true;
 }
 
+void validateTimeseriesShardKey(StringData timeFieldName,
+                                boost::optional<StringData> metaFieldName,
+                                const BSONObj& shardKeyPattern) {
+    BSONObjIterator shardKeyElems{shardKeyPattern};
+    while (auto elem = shardKeyElems.next()) {
+        if (elem.fieldNameStringData() == timeFieldName) {
+            uassert(5914000,
+                    str::stream() << "the time field '" << timeFieldName
+                                  << "' can be only at the end of the shard key pattern",
+                    !shardKeyElems.more());
+
+            uassert(880031,
+                    str::stream() << "Invalid shard key"
+                                  << " for time-series collection: " << redact(shardKeyPattern)
+                                  << ". Shard keys"
+                                  << " on the time field must be ascending or descending "
+                                     "(numbers only).",
+                    elem.isNumber());
+        } else {
+            uassert(5914001,
+                    str::stream() << "only the time field or meta field can be "
+                                     "part of shard key pattern",
+                    metaFieldName &&
+                        (elem.fieldNameStringData() == *metaFieldName ||
+                         elem.fieldNameStringData().startsWith(*metaFieldName + ".")));
+        }
+    }
+}
+
 // TODO: SERVER-64187 move calls to validateShardKeyIsNotEncrypted into
 // validateShardKeyIndexExistsOrCreateIfPossible
 void validateShardKeyIsNotEncrypted(OperationContext* opCtx,
@@ -390,7 +420,7 @@ std::vector<BSONObj> ValidationBehaviorsShardCollection::loadIndexes(
 
 void ValidationBehaviorsShardCollection::verifyUsefulNonMultiKeyIndex(
     const NamespaceString& nss, const BSONObj& proposedKey) const {
-    auto res = Shard::CommandResponse::getEffectiveStatus(_dataShard->runCommand(
+    auto res = uassertStatusOK(_dataShard->runCommand(
         _opCtx,
         ReadPreferenceSetting(ReadPreference::PrimaryOnly),
         DatabaseName::kAdmin,
@@ -398,7 +428,14 @@ void ValidationBehaviorsShardCollection::verifyUsefulNonMultiKeyIndex(
              << NamespaceStringUtil::serialize(nss, SerializationContext::stateDefault())
              << kKeyPatternField << proposedKey),
         Shard::RetryPolicy::kIdempotent));
-    uassert(ErrorCodes::InvalidOptions, res.reason(), res.isOK());
+
+    // checkShardingIndex may return UnknownError if a compatible shard key index cannot be
+    // found when the command is executed on a node with an old binary. In this case, we should
+    // return InvalidOptions to correspond with the shardCollection behavior.
+    if (res.commandStatus == ErrorCodes::UnknownError) {
+        uasserted(ErrorCodes::InvalidOptions, res.response["errmsg"].str());
+    }
+    uassertStatusOK(Shard::CommandResponse::getEffectiveStatus(res));
 }
 
 void ValidationBehaviorsShardCollection::verifyCanCreateShardKeyIndex(const NamespaceString& nss,
@@ -461,7 +498,7 @@ std::vector<BSONObj> ValidationBehaviorsRefineShardKey::loadIndexes(
 
 void ValidationBehaviorsRefineShardKey::verifyUsefulNonMultiKeyIndex(
     const NamespaceString& nss, const BSONObj& proposedKey) const {
-    auto checkShardingIndexRes = uassertStatusOK(_indexShard->runCommand(
+    auto res = uassertStatusOK(_indexShard->runCommand(
         _opCtx,
         ReadPreferenceSetting(ReadPreference::PrimaryOnly),
         DatabaseName::kAdmin,
@@ -471,13 +508,14 @@ void ValidationBehaviorsRefineShardKey::verifyUsefulNonMultiKeyIndex(
                  << kKeyPatternField << proposedKey),
             _cri.getShardVersion(_indexShard->getId())),
         Shard::RetryPolicy::kIdempotent));
-    if (checkShardingIndexRes.commandStatus == ErrorCodes::UnknownError) {
-        // CheckShardingIndex returns UnknownError if a compatible shard key index cannot be found,
-        // but we return InvalidOptions to correspond with the shardCollection behavior.
-        uasserted(ErrorCodes::InvalidOptions, checkShardingIndexRes.response["errmsg"].str());
+
+    // checkShardingIndex may return UnknownError if a compatible shard key index cannot be
+    // found when the command is executed on a node with an old binary. In this case, we should
+    // return InvalidOptions to correspond with the shardCollection behavior.
+    if (res.commandStatus == ErrorCodes::UnknownError) {
+        uasserted(ErrorCodes::InvalidOptions, res.response["errmsg"].str());
     }
-    // Rethrow any other error to allow retries on retryable errors.
-    uassertStatusOK(checkShardingIndexRes.commandStatus);
+    uassertStatusOK(Shard::CommandResponse::getEffectiveStatus(res));
 }
 
 void ValidationBehaviorsRefineShardKey::verifyCanCreateShardKeyIndex(const NamespaceString& nss,
@@ -571,7 +609,7 @@ void ValidationBehaviorsReshardingBulkIndex::verifyUsefulNonMultiKeyIndex(
     auto cri = catalogCache->getTrackedCollectionRoutingInfo(_opCtx, nss);
     auto shard = uassertStatusOK(Grid::get(_opCtx)->shardRegistry()->getShard(
         _opCtx, cri.cm.getMinKeyShardIdWithSimpleCollation()));
-    auto checkShardingIndexRes = uassertStatusOK(shard->runCommand(
+    auto res = uassertStatusOK(shard->runCommand(
         _opCtx,
         ReadPreferenceSetting(ReadPreference::PrimaryOnly),
         DatabaseName::kAdmin,
@@ -581,13 +619,14 @@ void ValidationBehaviorsReshardingBulkIndex::verifyUsefulNonMultiKeyIndex(
                  << kKeyPatternField << proposedKey),
             cri.getShardVersion(shard->getId())),
         Shard::RetryPolicy::kIdempotent));
-    if (checkShardingIndexRes.commandStatus == ErrorCodes::UnknownError) {
-        // CheckShardingIndex returns UnknownError if a compatible shard key index cannot be found,
-        // but we return InvalidOptions to correspond with the shardCollection behavior.
-        uasserted(ErrorCodes::InvalidOptions, checkShardingIndexRes.response["errmsg"].str());
+
+    // checkShardingIndex may return UnknownError if a compatible shard key index cannot be
+    // found when the command is executed on a node with an old binary. In this case, we should
+    // return InvalidOptions to correspond with the shardCollection behavior.
+    if (res.commandStatus == ErrorCodes::UnknownError) {
+        uasserted(ErrorCodes::InvalidOptions, res.response["errmsg"].str());
     }
-    // Rethrow any other error to allow retries on retryable errors.
-    uassertStatusOK(checkShardingIndexRes.commandStatus);
+    uassertStatusOK(Shard::CommandResponse::getEffectiveStatus(res));
 }
 
 void ValidationBehaviorsReshardingBulkIndex::verifyCanCreateShardKeyIndex(
@@ -599,11 +638,6 @@ void ValidationBehaviorsReshardingBulkIndex::createShardKeyIndex(
     const boost::optional<BSONObj>& defaultCollation,
     bool unique,
     boost::optional<TimeseriesOptions> tsOpts) const {
-    tassert(7711203,
-            "Resharding isn't supported on time-series collection, so 'tsOpts' should never hold a "
-            "value",
-            !tsOpts);
-
     BSONObj collation =
         defaultCollation && !defaultCollation->isEmpty() ? CollationSpec::kSimpleSpec : BSONObj();
     _shardKeyIndexSpec = makeIndexSpec(nss, proposedKey, collation, unique, tsOpts);

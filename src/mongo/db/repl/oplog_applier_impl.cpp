@@ -64,9 +64,10 @@
 #include "mongo/db/repl/apply_ops_command_info.h"
 #include "mongo/db/repl/initial_syncer.h"
 #include "mongo/db/repl/member_state.h"
+#include "mongo/db/repl/oplog_applier_batcher.h"
 #include "mongo/db/repl/oplog_applier_utils.h"
-#include "mongo/db/repl/oplog_batcher.h"
 #include "mongo/db/repl/oplog_entry_gen.h"
+#include "mongo/db/repl/oplog_writer_impl.h"
 #include "mongo/db/repl/replication_metrics.h"
 #include "mongo/db/repl/split_prepare_session_manager.h"
 #include "mongo/db/repl/transaction_oplog_application.h"
@@ -341,58 +342,6 @@ void _addOplogChainOpsToWriterVectors(OperationContext* opCtx,
         opCtx, &extractedOps, writerVectors, collPropertiesCache, shouldSerialize);
 }
 
-Status _insertDocumentsToOplogAndChangeCollections(
-    OperationContext* opCtx,
-    std::vector<InsertStatement>::const_iterator begin,
-    std::vector<InsertStatement>::const_iterator end,
-    bool skipWritesToOplog) {
-    WriteUnitOfWork wunit(opCtx);
-    boost::optional<AutoGetOplogFastPath> autoOplog;
-    boost::optional<ChangeStreamChangeCollectionManager::ChangeCollectionsWriter>
-        changeCollectionWriter;
-
-    // Acquire locks. We must acquire the locks for all collections we intend to write to before
-    // performing any writes. This avoids potential deadlocks created by waiting for locks while
-    // having generated oplog holes.
-    if (!skipWritesToOplog) {
-        autoOplog.emplace(opCtx, OplogAccessMode::kWrite);
-    }
-    const bool changeCollectionsMode =
-        change_stream_serverless_helpers::isChangeCollectionsModeActive();
-    if (changeCollectionsMode) {
-        changeCollectionWriter = boost::make_optional(
-            ChangeStreamChangeCollectionManager::get(opCtx).createChangeCollectionsWriter(
-                opCtx, begin, end, nullptr /* opDebug */));
-        changeCollectionWriter->acquireLocks();
-    }
-
-    // Write entries to the oplog.
-    if (!skipWritesToOplog) {
-        auto& oplogColl = autoOplog->getCollection();
-        if (!oplogColl) {
-            return {ErrorCodes::NamespaceNotFound, "Oplog collection does not exist"};
-        }
-        auto status = collection_internal::insertDocuments(
-            opCtx, oplogColl, begin, end, nullptr /* OpDebug */, false /* fromMigrate */);
-        if (!status.isOK()) {
-            return status;
-        }
-    }
-
-    // Write the corresponding oplog entries to tenants respective change
-    // collections in the serverless.
-    if (changeCollectionsMode) {
-        auto status = changeCollectionWriter->write();
-        if (!status.isOK()) {
-            return status;
-        }
-    }
-
-    wunit.commit();
-
-    return Status::OK();
-}
-
 void _setOplogApplicationWorkerOpCtxStates(OperationContext* opCtx) {
     // Do not enforce constraints.
     opCtx->setEnforceConstraints(false);
@@ -522,13 +471,29 @@ OplogApplierImpl::OplogApplierImpl(executor::TaskExecutor* executor,
                                    ReplicationConsistencyMarkers* consistencyMarkers,
                                    StorageInterface* storageInterface,
                                    const OplogApplier::Options& options,
-                                   ThreadPool* writerPool)
+                                   ThreadPool* workerPool)
     : OplogApplier(executor, oplogBuffer, observer, options),
       _replCoord(replCoord),
-      _writerPool(writerPool),
+      _workerPool(workerPool),
       _storageInterface(storageInterface),
-      _consistencyMarkers(consistencyMarkers),
-      _beginApplyingOpTime(options.beginApplyingOpTime) {}
+      _consistencyMarkers(consistencyMarkers) {
+
+    // Change collections are always written as part of oplog application, even though
+    // in steady state mode where a separate OplogWriter thread is responsible for
+    // writing oplog entries. This is because the OplogWriter thread can be ahead of
+    // oplog application, but DDL ops on change collections (e.g. create/drop) must be
+    // first applied before we can perform writes on those collections.
+    _oplogWriter = std::make_unique<OplogWriterImpl>(
+        nullptr /* executor */,
+        nullptr /* writeBuffer */,
+        nullptr /* applyBuffer */,
+        workerPool,
+        replCoord,
+        storageInterface,
+        consistencyMarkers,
+        &noopOplogWriterObserver,
+        OplogWriter::Options(options.skipWritesToOplog, false /* skipWritesToChangeColl */));
+}
 
 void OplogApplierImpl::_run(OplogBuffer* oplogBuffer) {
     // Start up a thread from the batcher to pull from the oplog buffer into the batcher's oplog
@@ -551,7 +516,7 @@ void OplogApplierImpl::_run(OplogBuffer* oplogBuffer) {
             ? new ApplyBatchFinalizer(_replCoord)
             : new ApplyBatchFinalizerForJournal(_replCoord)};
 
-    while (true) {  // Exits on message from OplogBatcher.
+    while (true) {  // Exits on message from OplogApplierBatcher.
         // Use a new operation context each iteration, as otherwise we may appear to use a single
         // collection name to refer to collections with different UUIDs.
         const ServiceContext::UniqueOperationContext opCtxPtr = cc().makeOperationContext();
@@ -571,9 +536,6 @@ void OplogApplierImpl::_run(OplogBuffer* oplogBuffer) {
             rsSyncApplyStop.pauseWhileSet(&opCtx);
         }
 
-        // Transition to SECONDARY state, if possible.
-        _replCoord->finishRecoveryIfEligible(&opCtx);
-
         // Blocks up to a second waiting for a batch to be ready to apply. If one doesn't become
         // ready in time, we'll loop again so we can do the above checks periodically.
         OplogApplierBatch ops = _oplogBatcher->getNextBatch(Seconds(1));
@@ -591,7 +553,7 @@ void OplogApplierImpl::_run(OplogBuffer* oplogBuffer) {
                 // they can be stale. We make sure the applier is still draining in the given term
                 // before and after the check, so that if the oplog buffer was exhausted, then
                 // it still will be.
-                _replCoord->signalDrainComplete(&opCtx, *ops.termWhenExhausted());
+                _replCoord->signalApplierDrainComplete(&opCtx, *ops.termWhenExhausted());
             }
             continue;  // Try again.
         }
@@ -614,7 +576,7 @@ void OplogApplierImpl::_run(OplogBuffer* oplogBuffer) {
         }
 
         // Don't allow the fsync+lock thread to see intermediate states of batch application.
-        stdx::lock_guard<SimpleMutex> fsynclk(filesLockedFsync);
+        stdx::lock_guard<SimpleMutex> fsynclk(oplogApplierLockedFsync);
 
         // Apply the operations in this batch. '_applyOplogBatch' returns the optime of the
         // last op that was applied, which should be the last optime in the batch.
@@ -654,93 +616,13 @@ void OplogApplierImpl::_run(OplogBuffer* oplogBuffer) {
     }
 }
 
-
-// Schedules the writes to the oplog and the change collection for 'ops' into threadPool. The caller
-// must guarantee that 'ops' stays valid until all scheduled work in the thread pool completes.
-void OplogApplierImpl::scheduleWritesToOplogAndChangeCollection(OperationContext* opCtx,
-                                                                StorageInterface* storageInterface,
-                                                                ThreadPool* writerPool,
-                                                                const std::vector<OplogEntry>& ops,
-                                                                bool skipWritesToOplog) {
-    // Skip performing any writes during the startup recovery when running in the non-serverless
-    // environment.
-    if (skipWritesToOplog && !change_stream_serverless_helpers::isChangeCollectionsModeActive()) {
-        return;
-    }
-
-    auto makeOplogWriterForRange = [storageInterface, &ops, skipWritesToOplog](size_t begin,
-                                                                               size_t end) {
-        // The returned function will be run in a separate thread after this returns. Therefore
-        // all captures other than 'ops' must be by value since they will not be available. The
-        // caller guarantees that 'ops' will stay in scope until the spawned threads complete.
-        return [storageInterface, &ops, begin, end, skipWritesToOplog](auto status) {
-            invariant(status);
-            auto opCtx = cc().makeOperationContext();
-
-            // Oplog writes are crucial to the stability of the replica set. We mark the operations
-            // as having Immediate priority so that it skips waiting for ticket acquisition and flow
-            // control.
-            ScopedAdmissionPriority<ExecutionAdmissionContext> priority(
-                opCtx.get(), AdmissionContext::Priority::kExempt);
-
-            UnreplicatedWritesBlock uwb(opCtx.get());
-
-            std::vector<InsertStatement> docs;
-            docs.reserve(end - begin);
-            for (size_t i = begin; i < end; i++) {
-                docs.emplace_back(InsertStatement{ops[i].getEntry().getRaw(),
-                                                  ops[i].getOpTime().getTimestamp(),
-                                                  ops[i].getOpTime().getTerm()});
-            }
-
-            // The 'nsOrUUID' is used only to log the debug message when retrying inserts on the
-            // oplog and change collections. The 'writeConflictRetry' assumes operations are done on
-            // a single namespace. But the method '_insertDocumentsToOplogAndChangeCollections' can
-            // perform inserts on the oplog and multiple change collections, ie. several namespaces.
-            // As such 'writeConflictRetry' will not log the correct namespace when retrying.
-            NamespaceStringOrUUID nsOrUUID = !skipWritesToOplog
-                ? NamespaceString::kRsOplogNamespace
-                : NamespaceString::makeChangeCollectionNSS(boost::none /* tenantId */);
-
-            fassert(6663400,
-                    storage_helpers::insertBatchAndHandleRetry(
-                        opCtx.get(), nsOrUUID, docs, [&](auto* opCtx, auto begin, auto end) {
-                            return _insertDocumentsToOplogAndChangeCollections(
-                                opCtx, begin, end, skipWritesToOplog);
-                        }));
-        };
-    };
-
-    // We want to be able to take advantage of bulk inserts so we don't use multiple threads if it
-    // would result too little work per thread. This also ensures that we can amortize the
-    // setup/teardown overhead across many writes.
-    const size_t kMinOplogEntriesPerThread = 16;
-    const bool enoughToMultiThread =
-        ops.size() >= kMinOplogEntriesPerThread * writerPool->getStats().options.maxThreads;
-
-    // Storage engines support parallel writes to the oplog because they are required to ensure that
-    // oplog entries are ordered correctly, even if inserted out-of-order.
-    if (!enoughToMultiThread) {
-        writerPool->schedule(makeOplogWriterForRange(0, ops.size()));
-        return;
-    }
-
-    const size_t numOplogThreads = writerPool->getStats().options.maxThreads;
-    const size_t numOpsPerThread = ops.size() / numOplogThreads;
-    for (size_t thread = 0; thread < numOplogThreads; thread++) {
-        size_t begin = thread * numOpsPerThread;
-        size_t end = (thread == numOplogThreads - 1) ? ops.size() : begin + numOpsPerThread;
-        writerPool->schedule(makeOplogWriterForRange(begin, end));
-    }
-}
-
 StatusWith<OpTime> OplogApplierImpl::_applyOplogBatch(OperationContext* opCtx,
                                                       std::vector<OplogEntry> ops) {
     invariant(!ops.empty());
 
     LOGV2_DEBUG(21230, 2, "Oplog application batch size", "size"_attr = ops.size());
 
-    if (_replCoord->getApplierState() == ReplicationCoordinator::ApplierState::Stopped) {
+    if (_replCoord->getOplogSyncState() == ReplicationCoordinator::OplogSyncState::Stopped) {
         LOGV2_FATAL_CONTINUE(21234, "Attempting to replicate ops while primary");
         return {ErrorCodes::CannotApplyOplogWhilePrimary,
                 "attempting to replicate ops while primary"};
@@ -749,25 +631,28 @@ StatusWith<OpTime> OplogApplierImpl::_applyOplogBatch(OperationContext* opCtx,
     // Increment the batch size stat.
     oplogApplicationBatchSize.increment(ops.size());
 
-    std::vector<WorkerMultikeyPathInfo> multikeyVector(_writerPool->getStats().options.maxThreads);
+    std::vector<WorkerMultikeyPathInfo> multikeyVector(_workerPool->getStats().options.maxThreads);
     {
         // Each node records cumulative batch application stats for itself using this timer.
         TimerHolder timer(&applyBatchStats);
 
         // We must wait for the all work we've dispatched to complete before leaving this block
         // because the spawned threads refer to objects on the stack
-        ON_BLOCK_EXIT([&] { _writerPool->waitForIdle(); });
+        ON_BLOCK_EXIT([&] { _workerPool->waitForIdle(); });
 
-        // Write batch of ops into oplog.
-        if (!getOptions().skipWritesToOplog) {
-            _consistencyMarkers->setOplogTruncateAfterPoint(
-                opCtx, _replCoord->getMyLastAppliedOpTime().getTimestamp());
-        }
-
-        if (!getOptions().skipWritesToOplog || !getOptions().skipWritesToChangeCollection) {
-            scheduleWritesToOplogAndChangeCollection(
-                opCtx, _storageInterface, _writerPool, ops, getOptions().skipWritesToOplog);
-        }
+        // Write ops into the oplog collection and change collections if needed.
+        //
+        // - In steady state mode, a separate OplogWriter is responsible for writing the oplog
+        // collection, but the change collections must be written as part of oplog application
+        // because DDL ops (e.g. create/drop) on change collections are explicitly replicated,
+        // and so must be first applied before writes are performed to those collections.
+        //
+        // - In initial sync mode, the applier is responsible for writing the oplog collection
+        // as well as the change collections.
+        //
+        // - In recovering modes, there is no need to write to the oplog collection, and the
+        // applier is responsible for writing the change collections.
+        bool writtenOplog = _oplogWriter->scheduleWriteOplogBatch(opCtx, ops);
 
         // Holds 'pseudo operations' generated by secondaries to aid in replication.
         // Keep in scope until all operations in 'ops' and 'derivedOps' have been applied.
@@ -779,11 +664,13 @@ StatusWith<OpTime> OplogApplierImpl::_applyOplogBatch(OperationContext* opCtx,
         std::vector<std::vector<OplogEntry>> derivedOps;
 
         std::vector<std::vector<ApplierOperation>> writerVectors(
-            _writerPool->getStats().options.maxThreads);
+            _workerPool->getStats().options.maxThreads);
         _fillWriterVectors(opCtx, &ops, &writerVectors, &derivedOps);
 
-        // Wait for writes to finish before applying ops.
-        _writerPool->waitForIdle();
+        // Wait for oplog writes to finish.
+        if (writtenOplog) {
+            _oplogWriter->waitForScheduledWrites(opCtx);
+        }
 
         // Use this fail point to hang after we have written the oplog entries but before we have
         // applied them.
@@ -798,13 +685,8 @@ StatusWith<OpTime> OplogApplierImpl::_applyOplogBatch(OperationContext* opCtx,
         const bool isDataConsistent =
             _consistencyMarkers->getMinValid(opCtx) < ops.front().getOpTime();
 
-        // Reset consistency markers in case the node fails while applying ops.
-        if (!getOptions().skipWritesToOplog) {
-            _consistencyMarkers->setOplogTruncateAfterPoint(opCtx, Timestamp());
-        }
-
         {
-            std::vector<Status> statusVector(_writerPool->getStats().options.maxThreads,
+            std::vector<Status> statusVector(_workerPool->getStats().options.maxThreads,
                                              Status::OK());
             // Doles out all the work to the writer pool threads. writerVectors is not modified,
             // but applyOplogBatchPerWorker will modify the vectors that it contains.
@@ -813,7 +695,7 @@ StatusWith<OpTime> OplogApplierImpl::_applyOplogBatch(OperationContext* opCtx,
                 if (writerVectors[i].empty())
                     continue;
 
-                _writerPool->schedule([this,
+                _workerPool->schedule([this,
                                        &writer = writerVectors.at(i),
                                        &status = statusVector.at(i),
                                        &multikeyVector = multikeyVector.at(i),
@@ -828,7 +710,7 @@ StatusWith<OpTime> OplogApplierImpl::_applyOplogBatch(OperationContext* opCtx,
                 });
             }
 
-            _writerPool->waitForIdle();
+            _workerPool->waitForIdle();
 
             // If any of the statuses is not ok, return error.
             for (auto it = statusVector.cbegin(); it != statusVector.cend(); ++it) {

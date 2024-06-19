@@ -96,7 +96,7 @@ void notifyChangeStreamsOnRefineCollectionShardKeyComplete(OperationContext* opC
     auto const serviceContext = opCtx->getClient()->getServiceContext();
 
     writeConflictRetry(opCtx, "RefineCollectionShardKey", NamespaceString::kRsOplogNamespace, [&] {
-        AutoGetOplogFastPath oplogWrite(opCtx, OplogAccessMode::kWrite);
+        AutoGetOplog oplogWrite(opCtx, OplogAccessMode::kWrite);
         WriteUnitOfWork uow(opCtx);
         serviceContext->getOpObserver()->onInternalOpMessage(opCtx,
                                                              collNss,
@@ -296,7 +296,7 @@ ExecutorFuture<void> RefineCollectionShardKeyCoordinator::_runImpl(
                 blockCRUDOperationsRequest.setBlockType(
                     CriticalSectionBlockTypeEnum::kReadsAndWrites);
                 blockCRUDOperationsRequest.setReason(_critSecReason);
-                async_rpc::GenericArgs args;
+                GenericArguments args;
                 async_rpc::AsyncRPCCommandHelpers::appendMajorityWriteConcern(args);
                 async_rpc::AsyncRPCCommandHelpers::appendOSI(args, getNewSession(opCtx));
                 auto opts = std::make_shared<async_rpc::AsyncRPCOptions<ShardsvrParticipantBlock>>(
@@ -378,7 +378,7 @@ ExecutorFuture<void> RefineCollectionShardKeyCoordinator::_runImpl(
                 unblockCRUDOperationsRequest.setReason(_critSecReason);
                 unblockCRUDOperationsRequest.setClearFilteringMetadata(true);
 
-                async_rpc::GenericArgs args;
+                GenericArguments args;
                 async_rpc::AsyncRPCCommandHelpers::appendMajorityWriteConcern(args);
                 async_rpc::AsyncRPCCommandHelpers::appendOSI(args, getNewSession(opCtx));
                 auto opts = std::make_shared<async_rpc::AsyncRPCOptions<ShardsvrParticipantBlock>>(

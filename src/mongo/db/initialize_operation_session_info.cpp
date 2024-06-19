@@ -47,6 +47,7 @@
 #include "mongo/db/operation_context.h"
 #include "mongo/db/session/logical_session_cache.h"
 #include "mongo/db/session/logical_session_id_helpers.h"
+#include "mongo/db/stats/counters.h"
 #include "mongo/idl/idl_parser.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/str.h"
@@ -66,6 +67,15 @@ bool isAuthorizedForInternalClusterAction(OperationContext* opCtx,
     return *cachedResult;
 }
 }  // namespace
+
+/**
+ * A client is internal if the connection is a self connection, a connection from a mongos or
+ * different mongod or a direct client connection.
+ */
+bool isInternalClient(OperationContext* opCtx) {
+    return !opCtx->getClient()->session() || opCtx->getClient()->isInternalClient() ||
+        opCtx->getClient()->isInDirectClient();
+}
 
 OperationSessionInfoFromClient initializeOperationSessionInfo(
     OperationContext* opCtx,
@@ -191,6 +201,20 @@ OperationSessionInfoFromClient initializeOperationSessionInfo(
         uassert(ErrorCodes::InvalidOptions,
                 "Specifying startTransaction=false is not allowed.",
                 osi.getStartTransaction().value());
+    }
+
+    if (osi.getTxnNumber()) {
+        if (!osi.getAutocommit()) {
+            if (isInternalClient(opCtx)) {
+                internalRetryableWriteCount.increment(1);
+            } else {
+                externalRetryableWriteCount.increment(1);
+            }
+        } else {
+            if (osi.getSessionId()->getTxnNumber() && osi.getSessionId()->getTxnUUID()) {
+                retryableInternalTransactionCount.increment(1);
+            }
+        }
     }
 
     return OperationSessionInfoFromClient(std::move(osi));

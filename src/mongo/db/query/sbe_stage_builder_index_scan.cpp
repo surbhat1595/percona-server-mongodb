@@ -266,6 +266,10 @@ PlanStageSlots buildPlanStageSlots(StageBuilderState& state,
         }
     }
 
+    if (reqs.has(PlanStageSlots::kPrefetchedResult)) {
+        outputs.set(PlanStageSlots::kPrefetchedResult, state.getNothingSlot());
+    }
+
     return outputs;
 }
 
@@ -575,12 +579,10 @@ generateSingleIntervalIndexScanAndSlots(StageBuilderState& state,
 
     auto lowKeyExpr = !lowKey
         ? makeVariable(*lowKeySlot)
-        : makeConstant(sbe::value::TypeTags::ksValue,
-                       sbe::value::bitcastFrom<key_string::Value*>(lowKey.release()));
+        : makeConstant(sbe::value::TypeTags::keyString, sbe::value::makeKeyString(*lowKey).second);
     auto highKeyExpr = !highKey
         ? makeVariable(*highKeySlot)
-        : makeConstant(sbe::value::TypeTags::ksValue,
-                       sbe::value::bitcastFrom<key_string::Value*>(highKey.release()));
+        : makeConstant(sbe::value::TypeTags::keyString, sbe::value::makeKeyString(*highKey).second);
 
     auto [stage, outputs] = generateSingleIntervalIndexScan(state,
                                                             collection,
@@ -684,8 +686,7 @@ std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> generateIndexScan(
     const sbe::IndexKeysInclusionSet& originalFieldBitset,
     const sbe::IndexKeysInclusionSet& sortKeyBitset,
     PlanYieldPolicy* yieldPolicy,
-    bool doIndexConsistencyCheck,
-    bool needsCorruptionCheck) {
+    const PlanStageReqs& reqs) {
     auto indexName = ixn->index.identifier.catalogName;
     auto descriptor = collection->getIndexCatalog()->findIndexByName(state.opCtx, indexName);
     tassert(5483200,
@@ -719,15 +720,6 @@ std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> generateIndexScan(
 
     auto fieldAndSortKeySlots =
         state.slotIdGenerator->generateMultiple(fieldAndSortKeyBitset.count());
-
-    // Generate the various slots needed for a consistency check and/or a corruption check if
-    // requested.
-    PlanStageReqs reqs;
-    reqs.set(PlanStageSlots::kRecordId)
-        .setIf(PlanStageSlots::kSnapshotId, doIndexConsistencyCheck)
-        .setIf(PlanStageSlots::kIndexIdent, doIndexConsistencyCheck)
-        .setIf(PlanStageSlots::kIndexKey, doIndexConsistencyCheck)
-        .setIf(PlanStageSlots::kIndexKeyPattern, needsCorruptionCheck);
 
     PlanStageSlots outputs;
 
@@ -868,12 +860,10 @@ std::pair<sbe::value::TypeTags, sbe::value::Value> packIndexIntervalsInSbeArray(
         auto obj = sbe::value::getObjectView(val);
         sbe::value::ValueGuard guard{tag, val};
         obj->reserve(2);
-        obj->push_back("l"_sd,
-                       sbe::value::TypeTags::ksValue,
-                       sbe::value::bitcastFrom<key_string::Value*>(lowKey.release()));
-        obj->push_back("h"_sd,
-                       sbe::value::TypeTags::ksValue,
-                       sbe::value::bitcastFrom<key_string::Value*>(highKey.release()));
+        obj->push_back(
+            "l"_sd, sbe::value::TypeTags::keyString, sbe::value::makeKeyString(*lowKey).second);
+        obj->push_back(
+            "h"_sd, sbe::value::TypeTags::keyString, sbe::value::makeKeyString(*highKey).second);
         guard.reset();
         arr->push_back(tag, val);
     }
@@ -888,8 +878,7 @@ std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> generateIndexScanWith
     const sbe::IndexKeysInclusionSet& originalFieldBitset,
     const sbe::IndexKeysInclusionSet& sortKeyBitset,
     PlanYieldPolicy* yieldPolicy,
-    bool doIndexConsistencyCheck,
-    bool needsCorruptionCheck) {
+    const PlanStageReqs& reqs) {
     const bool forward = ixn->direction == 1;
     auto indexName = ixn->index.identifier.catalogName;
     auto descriptor = collection->getIndexCatalog()->findIndexByName(state.opCtx, indexName);
@@ -922,15 +911,6 @@ std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> generateIndexScanWith
 
     auto outputFieldAndSortKeySlots =
         state.slotIdGenerator->generateMultiple(fieldAndSortKeyBitset.count());
-
-    // Generate the various slots needed for a consistency check and/or a corruption check if
-    // requested.
-    PlanStageReqs reqs;
-    reqs.set(PlanStageSlots::kRecordId)
-        .setIf(PlanStageSlots::kSnapshotId, doIndexConsistencyCheck)
-        .setIf(PlanStageSlots::kIndexIdent, doIndexConsistencyCheck)
-        .setIf(PlanStageSlots::kIndexKey, doIndexConsistencyCheck)
-        .setIf(PlanStageSlots::kIndexKeyPattern, needsCorruptionCheck);
 
     PlanStageSlots outputs;
 
@@ -1016,14 +996,20 @@ std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> generateIndexScanWith
         mergeThenElseBranches(PlanStageSlots::kRecordId);
         recordIdSlot = outputs.get(PlanStageSlots::kRecordId).slotId;
 
-        if (doIndexConsistencyCheck) {
+        if (reqs.has(PlanStageSlots::kSnapshotId)) {
             mergeThenElseBranches(PlanStageSlots::kSnapshotId);
+        }
+        if (reqs.has(PlanStageSlots::kIndexIdent)) {
             mergeThenElseBranches(PlanStageSlots::kIndexIdent);
+        }
+        if (reqs.has(PlanStageSlots::kIndexKey)) {
             mergeThenElseBranches(PlanStageSlots::kIndexKey);
         }
-
-        if (needsCorruptionCheck) {
+        if (reqs.has(PlanStageSlots::kIndexKeyPattern)) {
             mergeThenElseBranches(PlanStageSlots::kIndexKeyPattern);
+        }
+        if (reqs.has(PlanStageSlots::kPrefetchedResult)) {
+            mergeThenElseBranches(PlanStageSlots::kPrefetchedResult);
         }
 
         // Generate a branch stage that will either execute an optimized or a generic index scan

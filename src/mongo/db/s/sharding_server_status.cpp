@@ -99,13 +99,13 @@ public:
             const auto vcConfigTimeTs = vcTime.configTime().asTimestamp();
             return mongo::repl::OpTime(vcConfigTimeTs, mongo::repl::OpTime::kUninitializedTerm);
         }();
-        configOpTime.append(&result, "lastSeenConfigServerOpTime");
+        configOpTime.append("lastSeenConfigServerOpTime", &result);
 
         const auto topologyOpTime = [&]() {
             const auto vcTopologyTimeTs = vcTime.topologyTime().asTimestamp();
             return mongo::repl::OpTime(vcTopologyTimeTs, mongo::repl::OpTime::kUninitializedTerm);
         }();
-        topologyOpTime.append(&result, "lastSeenTopologyOpTime");
+        topologyOpTime.append("lastSeenTopologyOpTime", &result);
 
         const long long maxChunkSizeInBytes =
             grid->getBalancerConfiguration()->getMaxChunkSizeBytes();
@@ -166,16 +166,9 @@ public:
                 }
             }();
             result.appendNumber("rangeDeleterTasks", nRangeDeletions);
-        }
 
-        // To calculate the number of sharded collection we simply get the number of records from
-        // `config.collections` collection. This count must only be appended when serverStatus is
-        // invoked on the config server.
-        if (serverGlobalParams.clusterRole.has(ClusterRole::ConfigServer)) {
-            AutoGetCollectionForReadLockFree autoColl(opCtx, CollectionType::ConfigNS);
-            const auto& collection = autoColl.getCollection();
-            const auto numShardedCollections = collection ? collection->numRecords(opCtx) : 0;
-            result.append("numShardedCollections", numShardedCollections);
+            auto configServerInShardCache = grid->shardRegistry()->cachedClusterHasConfigShard();
+            result.appendBool("configServerInShardCache", configServerInShardCache);
         }
 
         reportDataTransformMetrics(opCtx, &result);

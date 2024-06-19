@@ -117,6 +117,13 @@ using ResolvedNamespaceOrViewAcquisitionRequests =
     absl::InlinedVector<ResolvedNamespaceOrViewAcquisitionRequest,
                         kDefaultAcquisitionContainerSize>;
 
+template <typename List, typename T>
+void removeByPtr(List& l, T* p) {
+    auto it = std::find_if(l.begin(), l.end(), [&](auto& e) { return &e == p; });
+    if (it != l.end())
+        l.erase(it);
+}
+
 void validateResolvedCollectionByUUID(OperationContext* opCtx,
                                       CollectionOrViewAcquisitionRequest ar,
                                       const Collection* coll) {
@@ -357,7 +364,7 @@ const Lock::GlobalLockSkipOptions kLockFreeReadsGlobalLockOptions{[] {
 CollectionOrViewAcquisitions acquireResolvedCollectionsOrViewsWithoutTakingLocks(
     OperationContext* opCtx,
     const CollectionCatalog& catalog,
-    ResolvedNamespaceOrViewAcquisitionRequests sortedAcquisitionRequests) {
+    ResolvedNamespaceOrViewAcquisitionRequests& sortedAcquisitionRequests) {
     CollectionOrViewAcquisitions acquisitions;
 
     auto& txnResources = TransactionResources::get(opCtx);
@@ -401,7 +408,7 @@ CollectionOrViewAcquisitions acquireResolvedCollectionsOrViewsWithoutTakingLocks
                     collectionPtr);
             }
 
-            invariant(!prerequisites.uuid || prerequisites.uuid == collectionPtr->uuid());
+            dassert(!prerequisites.uuid || prerequisites.uuid == collectionPtr->uuid());
             if (!prerequisites.uuid && collectionPtr) {
                 // If the uuid wasn't originally set on the AcquisitionRequest, set it now on the
                 // prerequisites so that on restore from yield we can check we are restoring the
@@ -449,8 +456,8 @@ CollectionOrViewAcquisitions acquireResolvedCollectionsOrViewsWithoutTakingLocks
     }
 
     // Check if this operation is a direct connection and if it is authorized to be one.
-    const auto& dbName = sortedAcquisitionRequests.begin()->prerequisites.nss.dbName();
-    direct_connection_util::checkDirectShardOperationAllowed(opCtx, dbName);
+    const auto& nss = sortedAcquisitionRequests.begin()->prerequisites.nss;
+    direct_connection_util::checkDirectShardOperationAllowed(opCtx, nss);
 
     return acquisitions;
 }
@@ -643,37 +650,35 @@ CollectionAcquisition::CollectionAcquisition(const CollectionAcquisition& other)
     _acquiredCollection->refCount++;
 }
 
-CollectionAcquisition::CollectionAcquisition(CollectionAcquisition&& other)
-    : _txnResources(other._txnResources), _acquiredCollection(other._acquiredCollection) {
-    other._txnResources = nullptr;
-    other._acquiredCollection = nullptr;
-}
+CollectionAcquisition::CollectionAcquisition(CollectionAcquisition&& other) noexcept
+    : _txnResources(std::exchange(other._txnResources, {})),
+      _acquiredCollection(std::exchange(other._acquiredCollection, {})) {}
 
 CollectionAcquisition& CollectionAcquisition::operator=(const CollectionAcquisition& other) {
-    this->~CollectionAcquisition();
-    _txnResources = other._txnResources;
-    _acquiredCollection = other._acquiredCollection;
-    _txnResources->collectionAcquisitionReferences++;
-    _acquiredCollection->refCount++;
+    if (this != &other) {
+        auto tmp{std::move(*this)};
+        _txnResources = other._txnResources;
+        _acquiredCollection = other._acquiredCollection;
+        _txnResources->collectionAcquisitionReferences++;
+        _acquiredCollection->refCount++;
+    }
     return *this;
 }
 
-CollectionAcquisition& CollectionAcquisition::operator=(CollectionAcquisition&& other) {
-    this->~CollectionAcquisition();
-    _txnResources = other._txnResources;
-    other._txnResources = nullptr;
-    _acquiredCollection = other._acquiredCollection;
-    other._acquiredCollection = nullptr;
+CollectionAcquisition& CollectionAcquisition::operator=(CollectionAcquisition&& other) noexcept {
+    if (this != &other) {
+        auto tmp{std::move(*this)};
+        _txnResources = std::exchange(other._txnResources, {});
+        _acquiredCollection = std::exchange(other._acquiredCollection, {});
+    }
     return *this;
 }
 
 CollectionAcquisition::CollectionAcquisition(CollectionOrViewAcquisition&& other) {
     invariant(other.isCollection());
     auto& acquisition = get<CollectionAcquisition>(other._collectionOrViewAcquisition);
-    _txnResources = acquisition._txnResources;
-    acquisition._txnResources = nullptr;
-    _acquiredCollection = acquisition._acquiredCollection;
-    acquisition._acquiredCollection = nullptr;
+    _txnResources = std::exchange(acquisition._txnResources, {});
+    _acquiredCollection = std::exchange(acquisition._acquiredCollection, {});
     other._collectionOrViewAcquisition = std::monostate();
 }
 
@@ -690,10 +695,7 @@ CollectionAcquisition::~CollectionAcquisition() {
     if (transactionResources.state == shard_role_details::TransactionResources::State::ACTIVE) {
         auto currentRefCount = --_acquiredCollection->refCount;
         if (currentRefCount == 0) {
-            transactionResources.acquiredCollections.remove_if(
-                [&](const shard_role_details::AcquiredCollection& txnResourceAcquiredColl) {
-                    return &txnResourceAcquiredColl == _acquiredCollection;
-                });
+            removeByPtr(transactionResources.acquiredCollections, _acquiredCollection);
         }
     }
 
@@ -757,27 +759,28 @@ ViewAcquisition::ViewAcquisition(const ViewAcquisition& other)
     _acquiredView->refCount++;
 }
 
-ViewAcquisition::ViewAcquisition(ViewAcquisition&& other)
-    : _txnResources(other._txnResources), _acquiredView(other._acquiredView) {
-    other._txnResources = nullptr;
-    other._acquiredView = nullptr;
-}
+ViewAcquisition::ViewAcquisition(ViewAcquisition&& other) noexcept
+    : _txnResources(std::exchange(other._txnResources, {})),
+      _acquiredView(std::exchange(other._acquiredView, {})) {}
+
 
 ViewAcquisition& ViewAcquisition::operator=(const ViewAcquisition& other) {
-    this->~ViewAcquisition();
-    _txnResources = other._txnResources;
-    _acquiredView = other._acquiredView;
-    _txnResources->viewAcquisitionReferences++;
-    _acquiredView->refCount++;
+    if (this != &other) {
+        auto tmp{std::move(*this)};
+        _txnResources = other._txnResources;
+        _acquiredView = other._acquiredView;
+        _txnResources->viewAcquisitionReferences++;
+        _acquiredView->refCount++;
+    }
     return *this;
 }
 
-ViewAcquisition& ViewAcquisition::operator=(ViewAcquisition&& other) {
-    this->~ViewAcquisition();
-    _txnResources = other._txnResources;
-    _acquiredView = other._acquiredView;
-    other._txnResources = nullptr;
-    other._acquiredView = nullptr;
+ViewAcquisition& ViewAcquisition::operator=(ViewAcquisition&& other) noexcept {
+    if (this != &other) {
+        auto tmp{std::move(*this)};
+        _txnResources = std::exchange(other._txnResources, {});
+        _acquiredView = std::exchange(other._acquiredView, {});
+    }
     return *this;
 }
 
@@ -794,10 +797,7 @@ ViewAcquisition::~ViewAcquisition() {
     if (transactionResources.state == shard_role_details::TransactionResources::State::ACTIVE) {
         auto currentRefCount = --_acquiredView->refCount;
         if (currentRefCount == 0) {
-            transactionResources.acquiredViews.remove_if(
-                [&](const shard_role_details::AcquiredView& txnResourceAcquiredView) {
-                    return &txnResourceAcquiredView == _acquiredView;
-                });
+            removeByPtr(transactionResources.acquiredViews, _acquiredView);
         }
     }
 
@@ -826,7 +826,7 @@ CollectionAcquisition acquireCollection(OperationContext* opCtx,
 }
 
 CollectionAcquisitions acquireCollections(OperationContext* opCtx,
-                                          CollectionAcquisitionRequests acquisitionRequests,
+                                          const CollectionAcquisitionRequests& acquisitionRequests,
                                           LockMode mode) {
     // Transform the CollectionAcquisitionRequests to NamespaceOrViewAcquisitionRequests.
     CollectionOrViewAcquisitionRequests namespaceOrViewAcquisitionRequests;
@@ -835,8 +835,7 @@ CollectionAcquisitions acquireCollections(OperationContext* opCtx,
               std::back_inserter(namespaceOrViewAcquisitionRequests));
 
     // Acquire the collections
-    auto acquisitions =
-        acquireCollectionsOrViews(opCtx, std::move(namespaceOrViewAcquisitionRequests), mode);
+    auto acquisitions = acquireCollectionsOrViews(opCtx, namespaceOrViewAcquisitionRequests, mode);
 
     // Transform the acquisitions to CollectionAcquisitions
     CollectionAcquisitions collectionAcquisitions;
@@ -866,9 +865,10 @@ CollectionOrViewAcquisitionMap makeAcquisitionMap(CollectionOrViewAcquisitions a
 
 CollectionOrViewAcquisition acquireCollectionOrView(
     OperationContext* opCtx, CollectionOrViewAcquisitionRequest acquisitionRequest, LockMode mode) {
-    auto acquisition = acquireCollectionsOrViews(opCtx, {std::move(acquisitionRequest)}, mode);
+    CollectionOrViewAcquisitionRequests requests{std::move(acquisitionRequest)};
+    auto acquisition = acquireCollectionsOrViews(opCtx, requests, mode);
     invariant(acquisition.size() == 1);
-    return std::move(*acquisition.begin());
+    return std::move(acquisition.front());
 }
 
 CollectionAcquisition acquireCollectionMaybeLockFree(
@@ -878,7 +878,7 @@ CollectionAcquisition acquireCollectionMaybeLockFree(
 }
 
 CollectionAcquisitions acquireCollectionsMaybeLockFree(
-    OperationContext* opCtx, CollectionAcquisitionRequests acquisitionRequests) {
+    OperationContext* opCtx, const CollectionAcquisitionRequests& acquisitionRequests) {
     // Transform the CollectionAcquisitionRequests to NamespaceOrViewAcquisitionRequests.
     CollectionOrViewAcquisitionRequests namespaceOrViewAcquisitionRequests;
     std::move(acquisitionRequests.begin(),
@@ -886,14 +886,14 @@ CollectionAcquisitions acquireCollectionsMaybeLockFree(
               std::back_inserter(namespaceOrViewAcquisitionRequests));
 
     // Acquire the collections
-    auto acquisitions = acquireCollectionsOrViewsMaybeLockFree(
-        opCtx, std::move(namespaceOrViewAcquisitionRequests));
+    auto acquisitions =
+        acquireCollectionsOrViewsMaybeLockFree(opCtx, namespaceOrViewAcquisitionRequests);
 
     // Transform the acquisitions to CollectionAcquisitions
     CollectionAcquisitions collectionAcquisitions;
     for (auto& acquisition : acquisitions) {
         // It must be a collection, because that's what the acquisition request stated.
-        invariant(acquisition.isCollection());
+        dassert(acquisition.isCollection());
         collectionAcquisitions.emplace_back(std::move(acquisition));
     }
     return collectionAcquisitions;
@@ -901,9 +901,10 @@ CollectionAcquisitions acquireCollectionsMaybeLockFree(
 
 CollectionOrViewAcquisition acquireCollectionOrViewMaybeLockFree(
     OperationContext* opCtx, CollectionOrViewAcquisitionRequest acquisitionRequest) {
-    auto acquisition =
-        acquireCollectionsOrViewsMaybeLockFree(opCtx, {std::move(acquisitionRequest)});
-    invariant(acquisition.size() == 1);
+    CollectionOrViewAcquisitionRequests requests{std::move(acquisitionRequest)};
+
+    auto acquisition = acquireCollectionsOrViewsMaybeLockFree(opCtx, requests);
+    dassert(acquisition.size() == 1);
     return std::move(*acquisition.begin());
 }
 
@@ -917,7 +918,7 @@ void SnapshotAttempt::snapshotInitialState() {
 }
 
 void SnapshotAttempt::changeReadSourceForSecondaryReads() {
-    invariant(_replTermBeforeSnapshot && _catalogBeforeSnapshot);
+    dassert(_replTermBeforeSnapshot && _catalogBeforeSnapshot);
     auto catalog = *_catalogBeforeSnapshot;
 
     for (auto& nsOrUUID : _acquisitionRequests) {
@@ -1059,8 +1060,8 @@ ResolvedNamespaceOrViewAcquisitionRequests generateSortedAcquisitionRequests(
 }
 
 CollectionOrViewAcquisitions acquireCollectionsOrViewsLockFree(
-    OperationContext* opCtx, CollectionOrViewAcquisitionRequests acquisitionRequests) {
-    if (acquisitionRequests.size() == 0) {
+    OperationContext* opCtx, const CollectionOrViewAcquisitionRequests& acquisitionRequests) {
+    if (acquisitionRequests.empty()) {
         return {};
     }
 
@@ -1068,8 +1069,7 @@ CollectionOrViewAcquisitions acquireCollectionsOrViewsLockFree(
 
     // We shouldn't have an open snapshot unless a previous lock-free acquisition opened and
     // stashed it already.
-    invariant(!shard_role_details::getRecoveryUnit(opCtx)->isActive() ||
-              opCtx->isLockFreeReadsOp());
+    dassert(!shard_role_details::getRecoveryUnit(opCtx)->isActive() || opCtx->isLockFreeReadsOp());
 
     auto lockFreeReadsResources = takeGlobalLock(opCtx, acquisitionRequests);
 
@@ -1093,9 +1093,9 @@ CollectionOrViewAcquisitions acquireCollectionsOrViewsLockFree(
         checkShardingPlacement(opCtx, acquisitionRequests);
 
         auto sortedAcquisitionRequests = shard_role_details::generateSortedAcquisitionRequests(
-            opCtx, *catalog, acquisitionRequests, std::move(lockFreeReadsResources));
+            opCtx, *catalog, acquisitionRequests, lockFreeReadsResources);
         return acquireResolvedCollectionsOrViewsWithoutTakingLocks(
-            opCtx, *catalog, std::move(sortedAcquisitionRequests));
+            opCtx, *catalog, sortedAcquisitionRequests);
     } catch (...) {
         if (openSnapshot && !shard_role_details::getLocker(opCtx)->inAWriteUnitOfWork())
             shard_role_details::getRecoveryUnit(opCtx)->abandonSnapshot();
@@ -1106,9 +1106,9 @@ CollectionOrViewAcquisitions acquireCollectionsOrViewsLockFree(
 
 CollectionOrViewAcquisitions acquireCollectionsOrViews(
     OperationContext* opCtx,
-    CollectionOrViewAcquisitionRequests acquisitionRequests,
+    const CollectionOrViewAcquisitionRequests& acquisitionRequests,
     LockMode mode) {
-    if (acquisitionRequests.size() == 0) {
+    if (acquisitionRequests.empty()) {
         return {};
     }
 
@@ -1204,7 +1204,7 @@ CollectionOrViewAcquisitions acquireCollectionsOrViews(
 
         try {
             return acquireResolvedCollectionsOrViewsWithoutTakingLocks(
-                opCtx, *catalog, std::move(sortedAcquisitionRequests));
+                opCtx, *catalog, sortedAcquisitionRequests);
         } catch (...) {
             if (openSnapshot && !shard_role_details::getLocker(opCtx)->inAWriteUnitOfWork())
                 shard_role_details::getRecoveryUnit(opCtx)->abandonSnapshot();
@@ -1214,7 +1214,7 @@ CollectionOrViewAcquisitions acquireCollectionsOrViews(
 }
 
 CollectionOrViewAcquisitions acquireCollectionsOrViewsMaybeLockFree(
-    OperationContext* opCtx, CollectionOrViewAcquisitionRequests acquisitionRequests) {
+    OperationContext* opCtx, const CollectionOrViewAcquisitionRequests& acquisitionRequests) {
     const bool allAcquisitionsForRead =
         std::all_of(acquisitionRequests.begin(), acquisitionRequests.end(), [](const auto& ar) {
             return ar.operationType == AcquisitionPrerequisites::kRead;
@@ -1222,11 +1222,10 @@ CollectionOrViewAcquisitions acquireCollectionsOrViewsMaybeLockFree(
     tassert(7740500, "Cannot acquire for write without locks", allAcquisitionsForRead);
 
     if (supportsLockFreeRead(opCtx)) {
-        return shard_role_details::acquireCollectionsOrViewsLockFree(
-            opCtx, std::move(acquisitionRequests));
+        return shard_role_details::acquireCollectionsOrViewsLockFree(opCtx, acquisitionRequests);
     } else {
         const auto lockMode = opCtx->inMultiDocumentTransaction() ? MODE_IX : MODE_IS;
-        return acquireCollectionsOrViews(opCtx, std::move(acquisitionRequests), lockMode);
+        return acquireCollectionsOrViews(opCtx, acquisitionRequests, lockMode);
     }
 }
 
@@ -1508,7 +1507,7 @@ void restoreTransactionResourcesToOperationContext(
             // Check if this operation is a direct connection and if it is authorized to be one
             // after reacquiring locks or snapshots.
             direct_connection_util::checkDirectShardOperationAllowed(
-                opCtx, transactionResources.acquiredCollections.front().prerequisites.nss.dbName());
+                opCtx, transactionResources.acquiredCollections.front().prerequisites.nss);
 
             // TODO: This will be removed when we no longer snapshot sharding state on CollectionPtr
             invariant(acquiredCollection.collectionDescription);

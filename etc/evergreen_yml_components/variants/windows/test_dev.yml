@@ -27,7 +27,7 @@ variables:
 # ANY MODIFICATIONS HERE SHOULD ALSO BE MADE IN THOSE FILES
 - &windows_expansions
   compile_variant: *windows_compile_variant_name
-  burn_in_tests_build_variant: enterprise-windows-all-feature-flags-required
+  burn_in_tests_build_variant: enterprise-windows-required
   exe: ".exe"
   content_type: application/zip
   python: '/cygdrive/c/python/python310/python.exe'
@@ -49,7 +49,7 @@ variables:
 buildvariants:
 - name: &windows-compile-required windows-compile-required
   display_name: "! Windows Enterprise Compile"
-  tags: ["bazel_check"]
+  tags: ["required", "bazel_check"]
   run_on:
   - windows-vsCurrent-xxlarge
   activate: true  # These compile variants run on every commit to reduce latency of the auto-reverter.
@@ -84,8 +84,9 @@ buildvariants:
 
 - &enterprise-windows-template
   <<: *windows_compile_variant_dependency
-  name: &enterprise-windows-suggested enterprise-windows-suggested
-  display_name: "* Enterprise Windows"
+  name: &enterprise-windows-required enterprise-windows-required
+  display_name: "! Enterprise Windows"
+  tags: ["required"]
   cron: "0 */4 * * *" # From the ${project_required_suggested_cron} parameter
   run_on:
   - windows-vsCurrent-small

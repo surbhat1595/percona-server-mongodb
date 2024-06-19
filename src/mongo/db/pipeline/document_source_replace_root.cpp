@@ -92,24 +92,23 @@ boost::optional<std::string> ReplaceRootTransformation::unnestsPath() const {
 
 boost::intrusive_ptr<DocumentSourceMatch> ReplaceRootTransformation::createTypeNEObjectPredicate(
     const std::string& expression, const boost::intrusive_ptr<ExpressionContext>& expCtx) {
-    // This produces {$expr: ... }
-    auto matchExpr = std::make_unique<ExprMatchExpression>(
-        // This produces {$ne: ... }
-        make_intrusive<ExpressionCompare>(
-            expCtx.get(),
-            ExpressionCompare::CmpOp::NE,
-            // This produces [...]
-            makeVector<boost::intrusive_ptr<Expression>>(
-                // This produces {$type: ... }
-                make_intrusive<ExpressionType>(
-                    expCtx.get(),
-                    makeVector<boost::intrusive_ptr<Expression>>(
-                        // This produces "$expression"
-                        ExpressionFieldPath::createPathFromString(
-                            expCtx.get(), expression, expCtx->variablesParseState))),
-                // This produces {$const: "object"}
-                ExpressionConstant::create(expCtx.get(), Value("object"_sd)))),
-        expCtx);
+    auto matchExpr = std::make_unique<OrMatchExpression>();
+    {
+        MatcherTypeSet typeSet;
+        typeSet.bsonTypes.insert(BSONType::Array);
+        auto typeIsArrayExpr =
+            std::make_unique<TypeMatchExpression>(StringData(expression), typeSet);
+        matchExpr->add(std::move(typeIsArrayExpr));
+    }
+    {
+        MatcherTypeSet typeSet;
+        typeSet.bsonTypes.insert(BSONType::Object);
+        auto typeIsObjectExpr =
+            std::make_unique<TypeMatchExpression>(StringData(expression), typeSet);
+        auto typeIsNotObjectExpr =
+            std::make_unique<NotMatchExpression>(std::move(typeIsObjectExpr));
+        matchExpr->add(std::move(typeIsNotObjectExpr));
+    }
 
     BSONObjBuilder bob;
     matchExpr->serialize(&bob);
@@ -136,17 +135,25 @@ bool ReplaceRootTransformation::pushDotRenamedMatchBefore(Pipeline::SourceContai
     const auto unnestedPath = unnestsPath();
 
     if (prospectiveMatch && unnestedPath) {
+        MatchExpression* expr = prospectiveMatch->getMatchExpression();
+        // A MatchExpression that contains $expr is ineligible for pushdown because the match
+        // pushdown turned out to be comparatively slower in our benchmarks when $expr was used on
+        // dotted paths. Since MatchExpressions operate on BSONObj, while agg expressions operate on
+        // Documents. $expr also goes through an additional step of converting BSONObj to Document.
+        if (QueryPlannerCommon::hasNode(expr, MatchExpression::EXPRESSION)) {
+            return false;
+        }
+
         // If we reach this point, we know:
         // 1) The current stage is a ReplaceRoot stage whose transformation represents the unnesting
         // of a field path (length > 1).
-        // 2) The stage after us is a match. For a replaceRoot stage that unnests a field path, we
-        // will attempt to prepend the field path to subpaths in a copy of the match stage's
-        // MatchExpression.
+        // 2) The stage after us is a non-$expr match. For a replaceRoot stage that unnests a field
+        // path, we will attempt to prepend the field path to subpaths in a copy of the match
+        // stage's MatchExpression.
         //
         // Ex: For the pipeline [{$replaceWith: {"$subDocument"}}, {$match: {x: 2}}], we make a copy
         // of the original match expression and transform it to {$match: {"subDocument.x": 2}}. If
         // the entire ME is eligible, we return a new match stage with the prepended ME.
-        MatchExpression* expr = prospectiveMatch->getMatchExpression();
         auto& prefixPath = unnestedPath.get();
         StringMap<std::string> renames;
 
@@ -187,18 +194,6 @@ bool ReplaceRootTransformation::pushDotRenamedMatchBefore(Pipeline::SourceContai
     }
 
     return false;
-}
-
-Pipeline::SourceContainer::iterator ReplaceRootTransformation::doOptimizeAt(
-    Pipeline::SourceContainer::iterator itr, Pipeline::SourceContainer* container) {
-    // Attempt to push match stage before replaceRoot/replaceWith stage.
-    if (pushDotRenamedMatchBefore(itr, container)) {
-        // Optimize the previous stage. If this is the first stage, optimize the current stage
-        // instead.
-        return itr == container->begin() ? itr : std::prev(itr);
-    }
-
-    return std::next(itr);
 }
 
 REGISTER_DOCUMENT_SOURCE(replaceRoot,

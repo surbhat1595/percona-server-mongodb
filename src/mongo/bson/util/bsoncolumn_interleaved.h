@@ -48,7 +48,7 @@ using BufferVector = boost::container::small_vector<T, 1>;
 template <typename Buffer>
 struct BlockBasedSubObjectFinisher {
     BlockBasedSubObjectFinisher(const BufferVector<Buffer*>& buffers) : _buffers(buffers) {}
-    void finish(const char* elemBytes, int fieldNameSize, int totalSize);
+    void finish(const char* elemBytes, int fieldNameSize);
     void finishMissing();
 
     const BufferVector<Buffer*>& _buffers;
@@ -233,10 +233,8 @@ inline BlockBasedInterleavedDecompressor::DecodingState::DecodingState() = defau
 inline BlockBasedInterleavedDecompressor::DecodingState::Decoder64::Decoder64() = default;
 
 template <typename Buffer>
-void BlockBasedSubObjectFinisher<Buffer>::finish(const char* elemBytes,
-                                                 int fieldNameSize,
-                                                 int totalSize) {
-    BSONElement elem{elemBytes, fieldNameSize, totalSize, BSONElement::TrustedInitTag{}};
+void BlockBasedSubObjectFinisher<Buffer>::finish(const char* elemBytes, int fieldNameSize) {
+    BSONElement elem{elemBytes, fieldNameSize, BSONElement::TrustedInitTag{}};
     for (auto&& buffer : _buffers) {
         // use preallocated method here to indicate that the element does not need to be
         // copied to longer-lived memory.
@@ -248,6 +246,9 @@ template <typename Buffer>
 void BlockBasedSubObjectFinisher<Buffer>::finishMissing() {
     for (auto&& buffer : _buffers) {
         buffer->appendMissing();
+        // We need to set last here to ensure we correctly process simple8b blocks that may follow
+        // the interleaved mode.
+        buffer->template setLast<BSONElement>(BSONElement());
     }
 }
 
@@ -277,6 +278,10 @@ const char* BlockBasedInterleavedDecompressor::decompress(
             }};
         findScalar.traverse(refObj);
     }
+
+    // If we are in interleaved mode, there must be at least one scalar field in the reference
+    // object.
+    uassert(8884002, "Invalid BSONColumn encoding", !scalarElems.empty());
 
     // For each path, we can use a fast implementation if it just decompresses a single scalar field
     // to a buffer. Paths that don't match any elements in the reference object will just get a
@@ -360,6 +365,9 @@ const char* BlockBasedInterleavedDecompressor::decompressGeneral(
     absl::flat_hash_map<Buffer*, int32_t> bufferToPositions;
 
     {
+        // Keep track of how many elements we find so we can check that we found each one requested
+        // by the caller.
+        size_t foundElems = 0;
         BSONObjTraversal trInit{
             _traverseArrays,
             _rootType,
@@ -371,6 +379,7 @@ const char* BlockBasedInterleavedDecompressor::decompressGeneral(
                         }
                     }
                     posToBuffers.push_back(std::move(it->second));
+                    ++foundElems;
                 } else {
                     // An empty list to indicate that this element isn't being materialized.
                     posToBuffers.push_back({});
@@ -388,6 +397,7 @@ const char* BlockBasedInterleavedDecompressor::decompressGeneral(
                         b->template setLast<BSONElement>(elem);
                     }
                     posToBuffers.push_back(std::move(it->second));
+                    ++foundElems;
                 } else {
                     // An empty list to indicate that this element isn't being materialized.
                     posToBuffers.push_back({});
@@ -395,6 +405,10 @@ const char* BlockBasedInterleavedDecompressor::decompressGeneral(
                 return true;
             }};
         trInit.traverse(refObj);
+
+        // Sanity check: make sure that the number of elements we found during traversal matches the
+        // number of elements requested for materialization by the caller.
+        uassert(9071200, "Request for unknown element", elemToBuffer.size() == foundElems);
     }
 
     // Advance past the reference object to the compressed data of the first field.
@@ -472,7 +486,10 @@ const char* BlockBasedInterleavedDecompressor::decompressGeneral(
                 decodingStateElem = state.loadDelta(_allocator, *d128);
                 ++d128->pos;
             } else {
-                invariant(*control != EOO, "moreData() should ensure we terminate loop at EOO");
+                // If interleaved mode is ending, it means there were streams of different lengths,
+                // since moreData(), which checks the first field, must have returned true.
+                uassert(8884000, "Invalid BSON Column encoding", *control != EOO);
+
                 // No more deltas for this scalar field. The next control byte is guaranteed
                 // to belong to this scalar field, since traversal order is fixed.
                 auto result = state.loadControl(_allocator, control);
@@ -598,7 +615,11 @@ struct BlockBasedInterleavedDecompressor::FastDecodingState {
     FastDecodingState(size_t fieldPos,
                       const BSONElement& refElem,
                       BufferVector<Buffer*>&& buffers = {})
-        : _valueCount(0), _fieldPos(fieldPos), _refElem(refElem), _buffers(std::move(buffers)) {}
+        : _valueCount(0),
+          _fieldPos(fieldPos),
+          _refElem(refElem),
+          _buffers(std::move(buffers)),
+          _lastNonRLEBlock(simple8b::kSingleZero) {}
 
 
     // The number of values seen so far by this stream.
@@ -614,6 +635,9 @@ struct BlockBasedInterleavedDecompressor::FastDecodingState {
     // materialized, this will be empty.
     BufferVector<Buffer*> _buffers;
 
+    // The last non-rle block encountered for this stream.
+    uint64_t _lastNonRLEBlock;
+
     // The last uncompressed value for this stream. The delta is applied against this to compute a
     // new uncompressed value.
     std::variant<std::monostate,              // For types that are not compressed
@@ -626,6 +650,8 @@ struct BlockBasedInterleavedDecompressor::FastDecodingState {
 
     // Given the current reference element, set _lastValue.
     void setLastValueFromBSONElem() {
+        // Reset '_lastNonRLEBlock' when encountering a new uncompressed element.
+        _lastNonRLEBlock = simple8b::kSingleZero;
         switch (_refElem.type()) {
             case Bool:
                 _lastValue.emplace<int64_t>(_refElem.boolean());
@@ -660,10 +686,16 @@ struct BlockBasedInterleavedDecompressor::FastDecodingState {
                     Simple8bTypeUtil::encodeString(_refElem.valueStringData()).value_or(0));
                 break;
             case BinData: {
+                // 'BinData' elements that are too large to be encoded should be treated as
+                // literals.
                 int size;
                 const char* binary = _refElem.binData(size);
-                _lastValue.emplace<int128_t>(
-                    Simple8bTypeUtil::encodeBinary(binary, size).value_or(0));
+                boost::optional<int128_t> binData = Simple8bTypeUtil::encodeBinary(binary, size);
+                if (binData) {
+                    _lastValue.emplace<int128_t>(*binData);
+                } else {
+                    _lastValue.emplace<std::monostate>(std::monostate{});
+                }
             } break;
             case Code:
                 _lastValue.emplace<int128_t>(
@@ -682,7 +714,7 @@ struct BlockBasedInterleavedDecompressor::FastDecodingState {
                 _lastValue.emplace<std::monostate>(std::monostate{});
                 break;
             default:
-                uasserted(9999992, "Type not implemented");
+                uasserted(8910801, "Type not implemented");
                 break;
         }
     }
@@ -700,21 +732,65 @@ template <class Buffer>
 void BlockBasedInterleavedDecompressor::dispatchDecompressionForType(
     FastDecodingState<Buffer>& state, const char* control, uint8_t size) {
 
-    auto finish64 = [&state](size_t valueCount, int64_t lastValue) {
-        state._valueCount += valueCount;
-        state._lastValue.template emplace<int64_t>(lastValue);
+    size_t bufIdx = 0;
+    const size_t lastBufIdx = state._buffers.size() - 1;
+
+    // These are finish functions that will update 'state'. We may need to decompress elements to
+    // more than on buffer, so make sure that we only update the state once.
+    auto finish64 = [&state, &bufIdx, lastBufIdx](
+                        size_t valueCount, int64_t lastValue, uint64_t lastNonRLEBlock) {
+        if (bufIdx == lastBufIdx) {
+            state._valueCount += valueCount;
+            state._lastNonRLEBlock = lastNonRLEBlock;
+            state._lastValue.template emplace<int64_t>(lastValue);
+        }
+        ++bufIdx;
     };
-    auto finish128 = [&state](size_t valueCount, int128_t lastValue) {
-        state._valueCount += valueCount;
-        state._lastValue.template emplace<int128_t>(lastValue);
+    auto finish128 = [&state, &bufIdx, lastBufIdx](
+                         size_t valueCount, int128_t lastValue, uint64_t lastNonRLEBlock) {
+        if (bufIdx == lastBufIdx) {
+            state._valueCount += valueCount;
+            state._lastNonRLEBlock = lastNonRLEBlock;
+            state._lastValue.template emplace<int128_t>(lastValue);
+        }
+        ++bufIdx;
     };
-    auto finishDeltaOfDelta = [&state](
-                                  size_t valueCount, int64_t lastValue, int64_t lastLastValue) {
-        state._valueCount += valueCount;
-        state._lastValue.template emplace<std::pair<int64_t, int64_t>>(lastValue, lastLastValue);
+    auto finishDouble = [&state, &bufIdx, lastBufIdx](size_t valueCount,
+                                                      int64_t lastValue,
+                                                      uint8_t scaleIndex,
+                                                      uint64_t lastNonRLEBlock) {
+        if (bufIdx == lastBufIdx) {
+            state._valueCount += valueCount;
+            state._lastNonRLEBlock = lastNonRLEBlock;
+            double v = Simple8bTypeUtil::decodeDouble(lastValue, scaleIndex);
+            state._lastValue.template emplace<double>(v);
+        }
+        ++bufIdx;
     };
+    auto finishDeltaOfDelta = [&state, &bufIdx, lastBufIdx](size_t valueCount,
+                                                            int64_t lastValue,
+                                                            int64_t lastLastValue,
+                                                            uint64_t lastNonRLEBlock) {
+        if (bufIdx == lastBufIdx) {
+            state._valueCount += valueCount;
+            state._lastNonRLEBlock = lastNonRLEBlock;
+            state._lastValue.template emplace<std::pair<int64_t, int64_t>>(lastValue,
+                                                                           lastLastValue);
+        }
+        ++bufIdx;
+    };
+    auto finishLiteral = [&state, &bufIdx, lastBufIdx](size_t valueCount,
+                                                       uint64_t lastNonRLEBlock) {
+        if (bufIdx == lastBufIdx) {
+            state._valueCount += valueCount;
+            state._lastNonRLEBlock = lastNonRLEBlock;
+        }
+        ++bufIdx;
+    };
+
     const char* ptr = nullptr;
     const char* end = control + size + 1;
+
     switch (state._refElem.type()) {
         case Bool:
             for (auto&& buffer : state._buffers) {
@@ -724,6 +800,7 @@ void BlockBasedInterleavedDecompressor::dispatchDecompressionForType(
                         end,
                         *buffer,
                         std::get<int64_t>(state._lastValue),
+                        state._lastNonRLEBlock,
                         state._refElem,
                         [](const int64_t v, const BSONElement& ref, Buffer& buffer) {
                             buffer.append(static_cast<bool>(v));
@@ -739,6 +816,7 @@ void BlockBasedInterleavedDecompressor::dispatchDecompressionForType(
                         end,
                         *buffer,
                         std::get<int64_t>(state._lastValue),
+                        state._lastNonRLEBlock,
                         state._refElem,
                         [](const int64_t v, const BSONElement& ref, Buffer& buffer) {
                             buffer.append(static_cast<int32_t>(v));
@@ -754,6 +832,7 @@ void BlockBasedInterleavedDecompressor::dispatchDecompressionForType(
                         end,
                         *buffer,
                         std::get<int64_t>(state._lastValue),
+                        state._lastNonRLEBlock,
                         state._refElem,
                         [](const int64_t v, const BSONElement& ref, Buffer& buffer) {
                             buffer.append(v);
@@ -769,6 +848,7 @@ void BlockBasedInterleavedDecompressor::dispatchDecompressionForType(
                         end,
                         *buffer,
                         std::get<int128_t>(state._lastValue),
+                        state._lastNonRLEBlock,
                         state._refElem,
                         [](const int128_t v, const BSONElement& ref, Buffer& buffer) {
                             buffer.append(Simple8bTypeUtil::decodeDecimal128(v));
@@ -783,11 +863,8 @@ void BlockBasedInterleavedDecompressor::dispatchDecompressionForType(
                     end,
                     *buffer,
                     std::get<double>(state._lastValue),
-                    [&state](size_t valueCount, int64_t lastValue, uint8_t scaleIndex) {
-                        state._valueCount += valueCount;
-                        double v = Simple8bTypeUtil::decodeDouble(lastValue, scaleIndex);
-                        state._lastValue.template emplace<double>(v);
-                    });
+                    state._lastNonRLEBlock,
+                    finishDouble);
             }
             break;
         case bsonTimestamp: {
@@ -800,6 +877,7 @@ void BlockBasedInterleavedDecompressor::dispatchDecompressionForType(
                         *buffer,
                         last,
                         lastlast,
+                        state._lastNonRLEBlock,
                         state._refElem,
                         [](const int64_t v, const BSONElement& ref, Buffer& buffer) {
                             buffer.append(static_cast<Timestamp>(v));
@@ -817,6 +895,7 @@ void BlockBasedInterleavedDecompressor::dispatchDecompressionForType(
                         *buffer,
                         last,
                         lastlast,
+                        state._lastNonRLEBlock,
                         state._refElem,
                         [](const int64_t v, const BSONElement& ref, Buffer& buffer) {
                             buffer.append(Date_t::fromMillisSinceEpoch(v));
@@ -833,6 +912,7 @@ void BlockBasedInterleavedDecompressor::dispatchDecompressionForType(
                     *buffer,
                     last,
                     lastlast,
+                    state._lastNonRLEBlock,
                     state._refElem,
                     [](const int64_t v, const BSONElement& ref, Buffer& buffer) {
                         buffer.append(
@@ -849,6 +929,7 @@ void BlockBasedInterleavedDecompressor::dispatchDecompressionForType(
                         end,
                         *buffer,
                         std::get<int128_t>(state._lastValue),
+                        state._lastNonRLEBlock,
                         state._refElem,
                         [](const int128_t v, const BSONElement& ref, Buffer& buffer) {
                             auto string = Simple8bTypeUtil::decodeString(v);
@@ -858,35 +939,47 @@ void BlockBasedInterleavedDecompressor::dispatchDecompressionForType(
             }
             break;
         case BinData:
-            for (auto&& buffer : state._buffers) {
-                ptr = BSONColumnBlockDecompressHelpers::
-                    decompressAllDelta<StringData, int128_t, Buffer>(
-                        control,
-                        end,
-                        *buffer,
-                        std::get<int128_t>(state._lastValue),
-                        state._refElem,
-                        [](const int128_t v, const BSONElement& ref, Buffer& buffer) {
-                            char data[16];
-                            size_t size = ref.valuestrsize();
-                            Simple8bTypeUtil::decodeBinary(v, data, size);
-                            buffer.append(BSONBinData(data, size, ref.binDataType()));
-                        },
-                        finish128);
+            // If the lastValue is not a 'int128_t', then the binData is too large to be decoded and
+            // should be treated as a literal.
+            if (auto lastValue = std::get_if<int128_t>(&state._lastValue)) {
+                for (auto&& buffer : state._buffers) {
+                    ptr = BSONColumnBlockDecompressHelpers::
+                        decompressAllDelta<BSONBinData, int128_t, Buffer>(
+                            control,
+                            end,
+                            *buffer,
+                            *lastValue,
+                            state._lastNonRLEBlock,
+                            state._refElem,
+                            [](const int128_t v, const BSONElement& ref, Buffer& buffer) {
+                                char data[16];
+                                size_t size = ref.valuestrsize();
+                                Simple8bTypeUtil::decodeBinary(v, data, size);
+                                buffer.append(BSONBinData(data, size, ref.binDataType()));
+                            },
+                            finish128);
+                }
+            } else {
+                for (auto&& buffer : state._buffers) {
+                    ptr = BSONColumnBlockDecompressHelpers::decompressAllLiteral(
+                        control, end, *buffer, state._lastNonRLEBlock, finishLiteral);
+                }
             }
             break;
         case Code:
             for (auto&& buffer : state._buffers) {
                 ptr = BSONColumnBlockDecompressHelpers::
-                    decompressAllDelta<StringData, int128_t, Buffer>(
+                    decompressAllDelta<BSONCode, int128_t, Buffer>(
                         control,
                         end,
                         *buffer,
                         std::get<int128_t>(state._lastValue),
+                        state._lastNonRLEBlock,
                         state._refElem,
                         [](const int128_t v, const BSONElement& ref, Buffer& buffer) {
                             auto string = Simple8bTypeUtil::decodeString(v);
-                            buffer.append(StringData((const char*)string.str.data(), string.size));
+                            buffer.append(
+                                BSONCode(StringData((const char*)string.str.data(), string.size)));
                         },
                         finish128);
             }
@@ -903,13 +996,11 @@ void BlockBasedInterleavedDecompressor::dispatchDecompressionForType(
         case MaxKey:
             for (auto&& buffer : state._buffers) {
                 ptr = BSONColumnBlockDecompressHelpers::decompressAllLiteral(
-                    control, end, *buffer, [&state](size_t valueCount) {
-                        state._valueCount += valueCount;
-                    });
+                    control, end, *buffer, state._lastNonRLEBlock, finishLiteral);
             }
             break;
         default:
-            uasserted(9999991, "Type not implemented");
+            uasserted(8910800, "Type not implemented");
             break;
     }
 
@@ -977,7 +1068,7 @@ const char* BlockBasedInterleavedDecompressor::decompressFast(
         std::pop_heap(heap.begin(), heap.end(), std::greater<>());
         FastDecodingState<Buffer>& state = heap.back();
         if (isUncompressedLiteralControlByte(*control)) {
-            state._refElem = BSONElement{control, 1, -1};
+            state._refElem = BSONElement{control, 1, BSONElement::TrustedInitTag{}};
             for (auto&& b : state._buffers) {
                 b->template append<BSONElement>(state._refElem);
             }
@@ -997,6 +1088,13 @@ const char* BlockBasedInterleavedDecompressor::decompressFast(
             control += (1 + size);
         }
         std::push_heap(heap.begin(), heap.end(), std::greater<>());
+    }
+
+    // At this point all the scalar streams should have had the same number of elements.
+    size_t valueCount = heap.front()._valueCount;
+    for (auto&& state : std::span{heap}.subspan(1)) {
+        uassert(
+            8884001, "Invalid BSONColumn interleaved encoding", valueCount == state._valueCount);
     }
 
     // If there were paths that don't match anything, call appendMissing().

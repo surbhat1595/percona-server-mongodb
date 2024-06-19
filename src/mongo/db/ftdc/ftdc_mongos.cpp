@@ -137,7 +137,8 @@ void registerRouterCollectors(FTDCController* controller) {
                                                              "getClusterParameter",
                                                              DatabaseName::kEmpty,
                                                              BSON("getClusterParameter"
-                                                                  << "*")),
+                                                                  << "*"
+                                                                  << "omitInFTDC" << true)),
         ClusterRole::RouterServer);
 }
 

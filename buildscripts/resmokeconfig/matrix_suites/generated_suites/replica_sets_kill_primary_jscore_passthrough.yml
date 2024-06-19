@@ -9,6 +9,7 @@
 executor:
   archive:
     hooks:
+    - LagOplogApplicationInBackground
     - CheckReplDBHash
     - CheckReplOplogs
     - ValidateCollections
@@ -41,7 +42,6 @@ executor:
     mongod_options:
       enableMajorityReadConcern: ''
       set_parameters:
-        enableAutoCompaction: 1
         enableElectionHandoff: 0
         enableTestCommands: 1
         logComponentVerbosity:
@@ -57,6 +57,9 @@ executor:
       settings:
         catchUpTimeoutMillis: 0
   hooks:
+  - class: LagOplogApplicationInBackground
+    shell_options:
+      nodb: ''
   - class: ContinuousStepdown
     kill: true
   - class: CheckReplOplogs
@@ -99,6 +102,7 @@ selector:
   - jstests/core/**/startup_log.js
   - jstests/core/**/shell_connection_strings.js
   - jstests/core/**/geo_s2ordering.js
+  - jstests/core/mixed_version_replica_set.js
   - jstests/fle2/**/*.js
   - src/mongo/db/modules/*/jstests/fle2/**/*.js
   exclude_with_any_tags:

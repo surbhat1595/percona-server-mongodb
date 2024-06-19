@@ -228,8 +228,8 @@ void PrimaryOnlyServiceRegistry::onStepUpComplete(OperationContext* opCtx, long 
 
 
     // Since this method is called before we mark the node writable in
-    // ReplicationCoordinatorImpl::signalDrainComplete and therefore can block the new primary from
-    // starting to receive writes, generate a warning if we are spending too long here.
+    // ReplicationCoordinatorImpl::signalApplierDrainComplete and therefore can block the new
+    // primary from starting to receive writes, generate a warning if we are spending too long here.
     Timer totalTime{};
     ON_BLOCK_EXIT([&] {
         auto timeSpent = totalTime.millis();
@@ -421,6 +421,8 @@ void PrimaryOnlyService::onStepUp(const OpTime& stepUpOpTime) {
 
     savedInstances.clear();
     newThenOldScopedExecutor.reset();
+
+    _onServiceInitialization();
 
     PrimaryOnlyServiceHangBeforeLaunchingStepUpLogic.pauseWhileSet();
 
@@ -681,6 +683,10 @@ std::vector<std::shared_ptr<PrimaryOnlyService::Instance>> PrimaryOnlyService::g
     }
 
     return instances;
+}
+
+std::shared_ptr<executor::ScopedTaskExecutor> PrimaryOnlyService::getInstanceExecutor() const {
+    return _scopedExecutor;
 }
 
 void PrimaryOnlyService::releaseInstance(const InstanceID& id, Status status) {

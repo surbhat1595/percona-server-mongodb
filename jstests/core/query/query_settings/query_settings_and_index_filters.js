@@ -20,6 +20,7 @@ import {QuerySettingsUtils} from "jstests/libs/query_settings_utils.js";
 
 const coll = assertDropAndRecreateCollection(db, jsTestName());
 const qsutils = new QuerySettingsUtils(db, coll.getName());
+qsutils.removeAllQuerySettings();
 
 // Insert data into the collection.
 assert.commandWorked(coll.insertMany([
@@ -63,7 +64,7 @@ function assertExplain(findCmd, {indexFilterSet, querySettings, expectedIndexSca
 
     getQueryPlanners(explain).forEach((queryPlanner) => {
         assert.eq(queryPlanner.indexFilterSet, indexFilterSet, queryPlanner);
-        assert.eq(queryPlanner.querySettings, querySettings, queryPlanner);
+        qsutils.assertEqualSettings(queryPlanner.querySettings, querySettings, queryPlanner);
         assertIndexScan(queryPlanner, expectedIndexScan);
     });
 }

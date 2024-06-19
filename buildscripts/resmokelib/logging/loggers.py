@@ -13,7 +13,7 @@ from buildscripts.resmokelib import errors
 from buildscripts.resmokelib.core import redirect as redirect_lib
 from buildscripts.resmokelib.logging import buildlogger
 from buildscripts.resmokelib.logging import formatters
-from buildscripts.resmokelib.logging.handlers import ExceptionExtractionHandler, ExceptionExtractor, Truncate
+from buildscripts.resmokelib.logging.handlers import BufferedFileHandler, ExceptionExtractionHandler, ExceptionExtractor, Truncate
 
 _DEFAULT_FORMAT = "[%(name)s] %(message)s"
 
@@ -274,7 +274,7 @@ def new_test_thread_logger(parent, test_kind, thread_id, tenant_id=None):
 
 def new_hook_logger(hook_class, job_num):
     """Create a new hook logger from a given fixture logger."""
-    name = "{}:job{:d}".format(hook_class, job_num)
+    name = "hook:{}:job{:d}".format(hook_class, job_num)
     logger = logging.Logger(name)
     logger.parent = _FIXTURE_LOGGER_REGISTRY[job_num]
     return logger
@@ -404,7 +404,7 @@ def _add_evergreen_handler(logger, job_num, test_id=None):
         fp = f"{_get_evergreen_log_dirname()}/{get_evergreen_log_name(job_num, test_id)}"
         os.makedirs(os.path.dirname(fp), exist_ok=True)
 
-        handler = logging.FileHandler(filename=fp, mode="a")
+        handler = BufferedFileHandler(fp)
         handler.setFormatter(
             formatters.EvergreenLogFormatter(fmt=logger_info.get("format", _DEFAULT_FORMAT)))
         logger.addHandler(handler)

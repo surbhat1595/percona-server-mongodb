@@ -58,6 +58,7 @@
 #include "mongo/bson/bsontypes.h"
 #include "mongo/bson/ordering.h"
 #include "mongo/config.h"  // IWYU pragma: keep
+#include "mongo/db/exec/sbe/values/key_string_entry.h"
 #include "mongo/db/exec/shard_filterer.h"
 #include "mongo/db/fts/fts_matcher.h"
 #include "mongo/db/matcher/expression.h"
@@ -67,6 +68,7 @@
 #include "mongo/db/query/index_bounds.h"
 #include "mongo/db/record_id.h"
 #include "mongo/db/storage/key_string.h"
+#include "mongo/db/storage/sorted_data_interface.h"
 #include "mongo/platform/bits.h"
 #include "mongo/platform/compiler.h"
 #include "mongo/platform/decimal128.h"
@@ -87,15 +89,12 @@ namespace KeyString {
 class Value;
 }  // namespace KeyString
 
-class InListData;
-
 class TimeZoneDatabase;
 class TimeZone;
 
 class JsFunction;
 
 namespace sbe {
-
 /**
  * Trivially copyable variation on a tuple theme. This allow us to return tuples through registers.
  */
@@ -114,6 +113,7 @@ struct FastTuple<A, B, C> {
 
 struct MakeObjSpec;
 class SortSpec;
+class InList;
 
 using FrameId = int64_t;
 using SpoolId = int64_t;
@@ -158,7 +158,6 @@ enum class TypeTags : uint8_t {
 
     Boolean,
     Null,
-    StringSmall,
 
     MinKey,
     MaxKey,
@@ -172,8 +171,10 @@ enum class TypeTags : uint8_t {
     // destroyed by SBE.
     csiCell,
 
+    StringSmall,
+
     // Special marker
-    EndOfShallowTypeTags = csiCell,
+    EndOfShallowTypeTags = StringSmall,
 
     // Heap values
     NumberDecimal,
@@ -205,8 +206,8 @@ enum class TypeTags : uint8_t {
     // Local lambda value
     LocalLambda,
 
-    // key_string::Value
-    ksValue,
+    // The index key string.
+    keyString,
 
     // Pointer to a timezone database object.
     timeZoneDB,
@@ -247,8 +248,8 @@ enum class TypeTags : uint8_t {
     // Pointer to an IndexBounds object.
     indexBounds,
 
-    // Pointer to an InListData object.
-    inListData,
+    // Pointer to an InList object.
+    inList,
 
     // Special marker, must be last.
     TypeTagsMax,
@@ -273,8 +274,8 @@ inline constexpr bool isArray(TypeTags tag) noexcept {
         tag == TypeTags::bsonArray;
 }
 
-inline constexpr bool isInListData(TypeTags tag) noexcept {
-    return tag == TypeTags::inListData;
+inline constexpr bool isInList(TypeTags tag) noexcept {
+    return tag == TypeTags::inList;
 }
 
 inline constexpr bool isNullish(TypeTags tag) noexcept {
@@ -1675,12 +1676,16 @@ inline std::pair<TypeTags, Value> makeIntOrLong(int64_t longVal) {
     return {TypeTags::NumberInt64, bitcastFrom<int64_t>(longVal)};
 }
 
-inline InListData* getInListDataView(Value val) noexcept {
-    return reinterpret_cast<InListData*>(val);
+inline InList* getInListView(Value val) noexcept {
+    return reinterpret_cast<InList*>(val);
 }
 
 inline key_string::Value* getKeyStringView(Value val) noexcept {
     return reinterpret_cast<key_string::Value*>(val);
+}
+
+inline value::KeyStringEntry* getKeyString(Value val) noexcept {
+    return reinterpret_cast<value::KeyStringEntry*>(val);
 }
 
 std::pair<TypeTags, Value> makeCopyTimeZone(const TimeZone& tz);
@@ -1845,7 +1850,8 @@ inline std::pair<TypeTags, Value> makeCopyBsonCodeWScope(const BsonCodeWScope& c
     return makeNewBsonCodeWScope(cws.code, cws.scope);
 }
 
-std::pair<TypeTags, Value> makeCopyKeyString(const key_string::Value& inKey);
+std::pair<TypeTags, Value> makeKeyString(std::unique_ptr<key_string::Value> inKey);
+std::pair<TypeTags, Value> makeKeyString(const key_string::Value& inKey);
 
 std::pair<TypeTags, Value> makeCopyCollator(const CollatorInterface& collator);
 
@@ -1924,8 +1930,6 @@ inline std::pair<TypeTags, Value> copyValue(TypeTags tag, Value val) {
             memcpy(dst, binData, size + sizeof(uint32_t) + 1);
             return {TypeTags::bsonBinData, reinterpret_cast<Value>(dst)};
         }
-        case TypeTags::ksValue:
-            return makeCopyKeyString(*getKeyStringView(val));
         case TypeTags::bsonRegex:
             return makeCopyBsonRegex(getBsonRegexView(val));
         case TypeTags::bsonJavascript:
@@ -1949,7 +1953,11 @@ inline std::pair<TypeTags, Value> copyValue(TypeTags tag, Value val) {
         case TypeTags::sortSpec:
         case TypeTags::makeObjSpec:
         case TypeTags::indexBounds:
+        case TypeTags::inList:
             return getExtendedTypeOps(tag)->makeCopy(val);
+        case TypeTags::keyString:
+            return {TypeTags::keyString,
+                    bitcastFrom<value::KeyStringEntry*>(getKeyString(val)->makeCopy().release())};
         default:
             break;
     }

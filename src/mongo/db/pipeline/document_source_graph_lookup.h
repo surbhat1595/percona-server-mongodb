@@ -162,6 +162,12 @@ public:
         return DepsTracker::State::SEE_NEXT;
     };
 
+    size_t getFrontierUsageBytes_forTest() const {
+        return _frontierUsageBytes;
+    }
+
+    void frontierInsertWithMemoryTracking_forTest(Value value);
+
     void addVariableRefs(std::set<Variables::Id>* refs) const final {
         expression::addVariableRefs(_startWith.get(), refs);
         if (_additionalFilter) {
@@ -259,7 +265,7 @@ private:
      * Updates '_cache' with 'result' appropriately, given that 'result' was retrieved when querying
      * for 'queried'.
      */
-    void addToCache(const Document& result, const ValueUnorderedSet& queried);
+    void addToCache(const Document& result, const ValueFlatUnorderedSet& queried);
 
     /**
      * Assert that '_visited' and '_frontier' have not exceeded the maximum meory usage, and then
@@ -276,15 +282,14 @@ private:
     bool addToVisitedAndFrontier(Document result, long long depth);
 
     /**
+     * Insert into 'frontier' and update '_frontierUsageBytes.'
+     */
+    inline void frontierInsertWithMemoryTracking(Value value);
+
+    /**
      * Returns true if we are not in a transaction.
      */
     bool foreignShardedGraphLookupAllowed() const;
-
-    /**
-     * Sets 'querySettings' to 'expCtx' if they were not previously set.
-     */
-    void setQuerySettingsIfNeeded(const boost::intrusive_ptr<ExpressionContext>& expCtx,
-                                  const query_settings::QuerySettings& querySettings);
 
     // $graphLookup options.
     NamespaceString _from;
@@ -310,7 +315,7 @@ private:
     size_t _frontierUsageBytes = 0;
 
     // Only used during the breadth-first search, tracks the set of values on the current frontier.
-    ValueUnorderedSet _frontier;
+    ValueFlatUnorderedSet _frontier;
 
     // Tracks nodes that have been discovered for a given input. Keys are the '_id' value of the
     // document from the foreign collection, value is the document itself.  The keys are compared
@@ -337,11 +342,6 @@ private:
     // '_fromPipeline' execution.
     Variables _variables;
     VariablesParseState _variablesParseState;
-
-    // Flag, indicating if query settings were set to the '_fromExpCtx'. This is needed to avoid
-    // setting query settings multiple time, which results in assertion failure in cases when query
-    // knobs have already been initialized with the previous query settings.
-    bool _didSetQuerySettingsToPipeline = false;
 };
 
 }  // namespace mongo

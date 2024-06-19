@@ -426,8 +426,7 @@ __curhs_set_key(WT_CURSOR *cursor, ...)
 static int
 __curhs_prev_visible(WT_SESSION_IMPL *session, WT_CURSOR_HS *hs_cursor)
 {
-    WT_CURSOR *file_cursor;
-    WT_CURSOR *std_cursor;
+    WT_CURSOR *file_cursor, *std_cursor;
     WT_CURSOR_BTREE *cbt;
     WT_DECL_ITEM(datastore_key);
     WT_DECL_RET;
@@ -530,8 +529,7 @@ err:
 static int
 __curhs_next_visible(WT_SESSION_IMPL *session, WT_CURSOR_HS *hs_cursor)
 {
-    WT_CURSOR *file_cursor;
-    WT_CURSOR *std_cursor;
+    WT_CURSOR *file_cursor, *std_cursor;
     WT_CURSOR_BTREE *cbt;
     WT_DECL_ITEM(datastore_key);
     WT_DECL_RET;
@@ -714,7 +712,7 @@ __curhs_search_near(WT_CURSOR *cursor, int *exactp)
     wt_timestamp_t start_ts;
     uint64_t counter;
     uint32_t btree_id;
-    int exact, cmp;
+    int cmp, exact;
 
     hs_cursor = (WT_CURSOR_HS *)cursor;
     file_cursor = hs_cursor->file_cursor;
@@ -911,8 +909,7 @@ __curhs_set_value(WT_CURSOR *cursor, ...)
     WT_CURSOR *file_cursor;
     WT_CURSOR_HS *hs_cursor;
     WT_ITEM *hs_val;
-    wt_timestamp_t start_ts;
-    wt_timestamp_t stop_ts;
+    wt_timestamp_t start_ts, stop_ts;
     uint64_t type;
     va_list ap;
 
@@ -1233,11 +1230,11 @@ __wt_curhs_open(WT_SESSION_IMPL *session, WT_CURSOR *owner, WT_CURSOR **cursorp)
 {
     WT_CURSOR_STATIC_INIT(iface, __wt_cursor_get_key, /* get-key */
       __wt_cursor_get_value,                          /* get-value */
-      __wt_cursor_get_raw_key_value_notsup,           /* get-raw-key-value */
+      __wti_cursor_get_raw_key_value_notsup,          /* get-raw-key-value */
       __curhs_set_key,                                /* set-key */
       __curhs_set_value,                              /* set-value */
       __curhs_compare,                                /* compare */
-      __wt_cursor_equals_notsup,                      /* equals */
+      __wti_cursor_equals_notsup,                     /* equals */
       __curhs_next,                                   /* next */
       __curhs_prev,                                   /* prev */
       __curhs_reset,                                  /* reset */

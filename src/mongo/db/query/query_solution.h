@@ -68,6 +68,7 @@
 #include "mongo/db/query/collation/collator_interface.h"
 #include "mongo/db/query/index_bounds.h"
 #include "mongo/db/query/index_entry.h"
+#include "mongo/db/query/index_hint.h"
 #include "mongo/db/query/interval_evaluation_tree.h"
 #include "mongo/db/query/plan_enumerator/plan_enumerator_explain_info.h"
 #include "mongo/db/query/projection.h"
@@ -99,10 +100,6 @@ enum class FieldAvailability {
     // The field is provided as a hash of raw data instead of the raw data itself. For example, this
     // can happen when the field is a hashed field in an index.
     kHashedValueProvided,
-
-    // The field is available as ICU encoded string and can be used to do sorting but it does not
-    // provide the actual value.
-    kCollatedProvided,
 
     // The field is completely provided.
     kFullyProvided,
@@ -919,11 +916,6 @@ struct IndexScanNode : public QuerySolutionNodeWithSortSet {
     bool fetched() const override {
         return false;
     }
-    /**
-     * This function checks if the given field has string bounds. This is needed to check if we need
-     * to do some special handling in the case of collations.
-     */
-    bool hasStringBounds(const std::string& field) const;
     FieldAvailability getFieldAvailability(const std::string& field) const override;
     bool sortedByDiskLoc() const override;
 
@@ -1825,7 +1817,8 @@ struct EqLookupNode : public QuerySolutionNode {
                  const FieldPath& joinField,
                  EqLookupNode::LookupStrategy lookupStrategy,
                  boost::optional<IndexEntry> idxEntry,
-                 bool shouldProduceBson)
+                 bool shouldProduceBson,
+                 NaturalOrderHint::Direction scanDirection = NaturalOrderHint::Direction::kForward)
         : QuerySolutionNode(std::move(child)),
           foreignCollection(foreignCollection),
           joinFieldLocal(joinFieldLocal),
@@ -1833,7 +1826,8 @@ struct EqLookupNode : public QuerySolutionNode {
           joinField(joinField),
           lookupStrategy(lookupStrategy),
           idxEntry(std::move(idxEntry)),
-          shouldProduceBson(shouldProduceBson) {}
+          shouldProduceBson(shouldProduceBson),
+          scanDirection(scanDirection) {}
 
     StageType getType() const override {
         return STAGE_EQ_LOOKUP;
@@ -1905,6 +1899,11 @@ struct EqLookupNode : public QuerySolutionNode {
      * 'sbe::Object' is produced instead.
      */
     bool shouldProduceBson;
+
+    /**
+     * Scan direction if hinted, default forward.
+     */
+    NaturalOrderHint::Direction scanDirection;
 };  // struct EqLookupNode
 
 /**
@@ -1913,19 +1912,21 @@ struct EqLookupNode : public QuerySolutionNode {
  * like SQL join stages. They are more like $lookup than $unwind.
  */
 struct EqLookupUnwindNode : public QuerySolutionNode {
-    EqLookupUnwindNode(std::unique_ptr<QuerySolutionNode> child,
-                       // Shared data members.
-                       const FieldPath& joinField,
-                       // $lookup-specific data members.
-                       const NamespaceString& foreignCollection,
-                       const FieldPath& joinFieldLocal,
-                       const FieldPath& joinFieldForeign,
-                       EqLookupNode::LookupStrategy lookupStrategy,
-                       boost::optional<IndexEntry> idxEntry,
-                       bool shouldProduceBson,
-                       // $unwind-specific data members.
-                       bool preserveNullAndEmptyArrays,
-                       const boost::optional<FieldPath>& indexPath)
+    EqLookupUnwindNode(
+        std::unique_ptr<QuerySolutionNode> child,
+        // Shared data members.
+        const FieldPath& joinField,
+        // $lookup-specific data members.
+        const NamespaceString& foreignCollection,
+        const FieldPath& joinFieldLocal,
+        const FieldPath& joinFieldForeign,
+        EqLookupNode::LookupStrategy lookupStrategy,
+        boost::optional<IndexEntry> idxEntry,
+        bool shouldProduceBson,
+        // $unwind-specific data members.
+        bool preserveNullAndEmptyArrays,
+        const boost::optional<FieldPath>& indexPath,
+        NaturalOrderHint::Direction scanDirection = NaturalOrderHint::Direction::kForward)
         : QuerySolutionNode(std::move(child)),
           // Shared data members.
           joinField{joinField},
@@ -1940,7 +1941,8 @@ struct EqLookupUnwindNode : public QuerySolutionNode {
           unwindNode{nullptr /* child */,
                      joinField /* fieldPath */,
                      preserveNullAndEmptyArrays,
-                     indexPath} {}
+                     indexPath},
+          scanDirection(scanDirection) {}
 
     StageType getType() const override {
         return STAGE_EQ_LOOKUP_UNWIND;
@@ -2018,6 +2020,11 @@ struct EqLookupUnwindNode : public QuerySolutionNode {
     // node. Its 'child' member is set to nullptr to avoid an unwanted recursion to the current $LU,
     // which is conceptually the $unwind's parent.
     struct UnwindNode unwindNode;
+
+    /**
+     * Scan direction if hinted, default forward.
+     */
+    NaturalOrderHint::Direction scanDirection;
 };  // struct EqLookupUnwindNode
 
 struct SentinelNode : public QuerySolutionNode {

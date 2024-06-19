@@ -501,27 +501,6 @@ Status OplogApplierUtils::applyOplogEntryOrGroupedInsertsCommon(
                     }
                 }
 
-                boost::optional<CollectionOrViewAcquisition> viewAcquisition;
-                if (nss.isSystemDotViews() && opType == OpTypeEnum::kDelete) {
-                    try {
-                        // In addition to the system.views, obtain the lock of the view that we are
-                        // going to change
-                        NamespaceString targetNamespace = NamespaceStringUtil::deserialize(
-                            nss.tenantId(),
-                            op->getIdElement().checkAndGetStringData(),
-                            SerializationContext::stateDefault());
-
-                        CollectionOrViewAcquisitionRequest request =
-                            CollectionOrViewAcquisitionRequest::fromOpCtx(
-                                opCtx, targetNamespace, AcquisitionPrerequisites::kWrite);
-                        viewAcquisition.emplace(acquireCollectionOrView(opCtx, request, MODE_IX));
-                    } catch (DBException&) {
-                        LOGV2(7861502,
-                              "Acquiring lock on invalid view",
-                              "view"_attr = op->getIdElement());
-                    }
-                }
-
                 invariant(coll);
                 uassert(ErrorCodes::NamespaceNotFound,
                         str::stream()
@@ -562,6 +541,11 @@ Status OplogApplierUtils::applyOplogEntryOrGroupedInsertsCommon(
                 if (opType == OpTypeEnum::kDelete &&
                     !oplogApplicationEnforcesSteadyStateConstraints &&
                     oplogApplicationMode == OplogApplication::Mode::kSecondary) {
+                    LOGV2_DEBUG(8994800,
+                                1,
+                                "Acceptable error when applying CRUD op",
+                                "error"_attr = redact(ex),
+                                "op"_attr = redact(entryOrGroupedInserts.toBSON()));
                     if (opCounters) {
                         const auto& opObj = redact(op->toBSONForLogging());
                         opCounters->gotDeleteFromMissingNamespace();
@@ -579,12 +563,17 @@ Status OplogApplierUtils::applyOplogEntryOrGroupedInsertsCommon(
                 ex.addContext(str::stream() << "Failed to apply operation: "
                                             << redact(entryOrGroupedInserts.toBSON()));
                 throw;
-            } catch (ExceptionFor<ErrorCodes::CommandNotSupportedOnView>&) {
+            } catch (ExceptionFor<ErrorCodes::CommandNotSupportedOnView>& ex) {
                 // This can happen in initial sync or unstable recovery mode when a time-series
                 // collection is created in place of a dropped regular collection and oplog entries
                 // are being applied that were originally performed on the regular collection.
                 if (oplogApplicationMode == OplogApplication::Mode::kInitialSync ||
                     oplogApplicationMode == OplogApplication::Mode::kUnstableRecovering) {
+                    LOGV2_DEBUG(8994801,
+                                1,
+                                "Acceptable error when applying CRUD op",
+                                "error"_attr = redact(ex),
+                                "op"_attr = redact(entryOrGroupedInserts.toBSON()));
                     return Status::OK();
                 }
 

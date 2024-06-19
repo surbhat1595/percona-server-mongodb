@@ -226,7 +226,7 @@ private:
 };
 
 struct NoopSubObjectFinisher {
-    void finish(const char* elemBytes, int fieldNameSize, int totalSize) {}
+    void finish(const char* elemBytes, int fieldNameSize) {}
     void finishMissing() {}
 };
 
@@ -325,7 +325,7 @@ public:
             if (_contiguousBlock) {
                 // If we started contiguous mode upon construction, finish the object.
                 auto [ptr, size] = _contiguousBlock->done();
-                _finisher.finish(ptr, _fieldNameSize + 1, size);
+                _finisher.finish(ptr, _fieldNameSize + 1);
             }
         }
     }
@@ -491,11 +491,11 @@ public:
                                           const char* end,
                                           Buffer& buffer,
                                           Encoding last,
+                                          uint64_t lastNonRLEBlock,
                                           const BSONElement& reference,
                                           const Materialize& materialize,
                                           const Finish& finish) {
         // iterate until we stop seeing simple8b block sequences
-        uint64_t prev = simple8b::kSingleZero;
         size_t elemCount = 0;
         while (ptr < end) {
             uint8_t control = *ptr;
@@ -513,7 +513,7 @@ public:
             elemCount += simple8b::visitAll<Encoding>(
                 ptr + 1,
                 size,
-                prev,
+                lastNonRLEBlock,
                 [&materialize, &buffer, &reference, &last](const Encoding v) {
                     if (v == 0)
                         buffer.appendLast();
@@ -528,7 +528,7 @@ public:
             ptr += 1 + size;
         }
 
-        finish(elemCount, last);
+        finish(elemCount, last, lastNonRLEBlock);
         return ptr;
     }
 
@@ -540,8 +540,14 @@ public:
                                           Encoding last,
                                           const BSONElement& reference,
                                           const Materialize& materialize) {
-        return decompressAllDelta<T>(
-            ptr, end, buffer, last, reference, materialize, [](size_t count, Encoding last) {});
+        return decompressAllDelta<T>(ptr,
+                                     end,
+                                     buffer,
+                                     last,
+                                     simple8b::kSingleZero, /* lastNonRLEBlock */
+                                     reference,
+                                     materialize,
+                                     [](size_t count, Encoding last, uint64_t lastNonRLEBlock) {});
     }
 
     /* Like decompressAllDelta, but does not have branching to avoid re-materialization
@@ -553,11 +559,11 @@ public:
                                                    const char* end,
                                                    Buffer& buffer,
                                                    Encoding last,
+                                                   uint64_t lastNonRLEBlock,
                                                    const BSONElement& reference,
                                                    const Materialize& materialize,
                                                    const Finish& finish) {
         // iterate until we stop seeing simple8b block sequences
-        uint64_t prev = simple8b::kSingleZero;
         size_t elemCount = 0;
         while (ptr < end) {
             uint8_t control = *ptr;
@@ -574,7 +580,7 @@ public:
             elemCount += simple8b::visitAll<Encoding>(
                 ptr + 1,
                 size,
-                prev,
+                lastNonRLEBlock,
                 [&materialize, &buffer, &reference, &last](const Encoding v) {
                     last = expandDelta(last, v);
                     materialize(last, reference, buffer);
@@ -584,7 +590,7 @@ public:
             ptr += 1 + size;
         }
 
-        finish(elemCount, last);
+        finish(elemCount, last, lastNonRLEBlock);
         return ptr;
     }
 
@@ -597,7 +603,14 @@ public:
                                                    const BSONElement& reference,
                                                    const Materialize& materialize) {
         return decompressAllDeltaPrimitive<T>(
-            ptr, end, buffer, last, reference, materialize, [](size_t count, Encoding last) {});
+            ptr,
+            end,
+            buffer,
+            last,
+            simple8b::kSingleZero, /* lastNonRLEBlock */
+            reference,
+            materialize,
+            [](size_t count, Encoding last, uint64_t lastNonRLEBlock) {});
     }
 
     template <typename T, class Buffer, typename Materialize, typename Finish>
@@ -607,11 +620,11 @@ public:
                                                  Buffer& buffer,
                                                  int64_t last,
                                                  int64_t lastlast,
+                                                 uint64_t lastNonRLEBlock,
                                                  const BSONElement& reference,
                                                  const Materialize& materialize,
                                                  const Finish& finish) {
         // iterate until we stop seeing simple8b block sequences
-        uint64_t prev = simple8b::kSingleZero;
         size_t elemCount = 0;
         while (ptr < end) {
             uint8_t control = *ptr;
@@ -628,7 +641,7 @@ public:
             elemCount += simple8b::visitAll<int64_t>(
                 ptr + 1,
                 size,
-                prev,
+                lastNonRLEBlock,
                 [&materialize, &lastlast, &buffer, &reference, &last](int64_t v) {
                     lastlast = expandDelta(lastlast, v);
                     last = expandDelta(last, lastlast);
@@ -639,7 +652,7 @@ public:
             ptr += 1 + size;
         }
 
-        finish(elemCount, last, lastlast);
+        finish(elemCount, last, lastlast, lastNonRLEBlock);
         return ptr;
     }
 
@@ -651,23 +664,28 @@ public:
                                                  int64_t last,
                                                  const BSONElement& reference,
                                                  const Materialize& materialize) {
-        return decompressAllDeltaOfDelta<T>(ptr,
-                                            end,
-                                            buffer,
-                                            last,
-                                            0,
-                                            reference,
-                                            materialize,
-                                            [](size_t count, int64_t last, int64_t lastlast) {});
+        return decompressAllDeltaOfDelta<T>(
+            ptr,
+            end,
+            buffer,
+            last,
+            0,
+            simple8b::kSingleZero, /* lastNonRLEBlock */
+            reference,
+            materialize,
+            [](size_t count, int64_t last, int64_t lastlast, uint64_t lastNonRLEBlock) {});
     }
 
     template <class Buffer, typename Finish>
     requires Appendable<Buffer>
-    static const char* decompressAllDouble(
-        const char* ptr, const char* end, Buffer& buffer, double last, const Finish& finish) {
+    static const char* decompressAllDouble(const char* ptr,
+                                           const char* end,
+                                           Buffer& buffer,
+                                           double last,
+                                           uint64_t lastNonRLEBlock,
+                                           const Finish& finish) {
         // iterate until we stop seeing simple8b block sequences
         int64_t lastValue = 0;
-        uint64_t prev = simple8b::kSingleZero;
         size_t elemCount = 0;
         uint8_t scaleIndex = bsoncolumn::kInvalidScaleIndex;
         while (ptr < end) {
@@ -688,7 +706,7 @@ public:
             elemCount += simple8b::visitAll<int64_t>(
                 ptr + 1,
                 size,
-                prev,
+                lastNonRLEBlock,
                 [&last, &buffer, &scaleIndex, &lastValue](int64_t v) {
                     lastValue = expandDelta(lastValue, v);
                     last = Simple8bTypeUtil::decodeDouble(lastValue, scaleIndex);
@@ -699,8 +717,50 @@ public:
             ptr += 1 + size;
         }
 
-        finish(elemCount, lastValue, scaleIndex);
+        finish(elemCount, lastValue, scaleIndex, lastNonRLEBlock);
         return ptr;
+    }
+
+    template <class Buffer, typename Finish>
+    requires Appendable<Buffer>
+    static const char* decompressAllMissing(const char* ptr,
+                                            const char* end,
+                                            Buffer& buffer,
+                                            uint64_t lastNonRLEBlock,
+                                            const Finish& finish) {
+        size_t elemCount = 0;
+        while (ptr < end) {
+            const uint8_t control = *ptr;
+            if (control == EOO || isUncompressedLiteralControlByte(control) ||
+                isInterleavedStartControlByte(control))
+                break;
+
+            uint8_t size = numSimple8bBlocksForControlByte(control) * sizeof(uint64_t);
+            uassert(8915000,
+                    "Invalid control byte in BSON Column",
+                    bsoncolumn::scaleIndexForControlByte(control) ==
+                        Simple8bTypeUtil::kMemoryAsInteger);
+
+            elemCount = simple8b::count(ptr + 1, size);
+            for (size_t i = 0; i < elemCount; ++i) {
+                buffer.appendMissing();
+            }
+
+            ptr += 1 + size;
+        }
+
+        finish(elemCount, lastNonRLEBlock);
+        return ptr;
+    }
+
+    template <class Buffer>
+    requires Appendable<Buffer>
+    static const char* decompressAllMissing(const char* ptr, const char* end, Buffer& buffer) {
+        return decompressAllMissing(ptr,
+                                    end,
+                                    buffer,
+                                    simple8b::kSingleZero /* lastNonRLEBlock */,
+                                    [](size_t count, uint64_t lastNonRLEBlock) {});
     }
 
     template <class Buffer>
@@ -710,7 +770,12 @@ public:
                                            Buffer& buffer,
                                            double last) {
         return decompressAllDouble(
-            ptr, end, buffer, last, [](size_t count, int64_t last, uint8_t scaleIndex) {});
+            ptr,
+            end,
+            buffer,
+            last,
+            simple8b::kSingleZero, /* lastNonRLEBlock */
+            [](size_t count, int64_t last, uint8_t scaleIndex, uint64_t lastNonRLEBlock) {});
     }
 
     template <class Buffer, typename Finish>
@@ -718,8 +783,13 @@ public:
     static const char* decompressAllLiteral(const char* ptr,
                                             const char* end,
                                             Buffer& buffer,
+                                            uint64_t lastNonRLEBlock,
                                             const Finish& finish) {
-        uint64_t prev = simple8b::kSingleZero;
+        if (buffer.isLastMissing()) {
+            // The last element in the buffer is missing (EOO).
+            return decompressAllMissing(ptr, end, buffer, lastNonRLEBlock, finish);
+        }
+
         size_t elemCount = 0;
         while (ptr < end) {
             const uint8_t control = *ptr;
@@ -736,7 +806,7 @@ public:
             elemCount += simple8b::visitAll<int64_t>(
                 ptr + 1,
                 size,
-                prev,
+                lastNonRLEBlock,
                 [&buffer](int64_t v) {
                     uassert(
                         8609800, "Post literal delta blocks should only contain skip or 0", v == 0);
@@ -748,14 +818,18 @@ public:
             ptr += 1 + size;
         }
 
-        finish(elemCount);
+        finish(elemCount, lastNonRLEBlock);
         return ptr;
     }
 
     template <class Buffer>
     requires Appendable<Buffer>
     static const char* decompressAllLiteral(const char* ptr, const char* end, Buffer& buffer) {
-        return decompressAllLiteral(ptr, end, buffer, [](size_t count) {});
+        return decompressAllLiteral(ptr,
+                                    end,
+                                    buffer,
+                                    simple8b::kSingleZero /* lastNonRLEBlock */,
+                                    [](size_t count, uint64_t lastNonRLEBlock) {});
     }
 };
 
@@ -791,6 +865,10 @@ public:
 
     static BSONElement materializeMissing(ElementStorage& allocator) {
         return BSONElement();
+    }
+
+    static bool isMissing(const Element& elem) {
+        return elem.eoo();
     }
 
 private:
@@ -886,6 +964,15 @@ struct RootPath {
         return {refObj.objdata()};
     }
 };
+
+/**
+ * Returns true if the given path is the root path. If it returns anything given the empty object,
+ * then it's the root path.
+ */
+template <class Path>
+bool isRootPath(Path& path) {
+    return !path.elementsToMaterialize(BSONObj{}).empty();
+}
 
 }  // namespace bsoncolumn
 }  // namespace mongo

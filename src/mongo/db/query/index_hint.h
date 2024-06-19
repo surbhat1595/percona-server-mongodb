@@ -30,16 +30,18 @@
 #pragma once
 
 #include <boost/optional.hpp>
+#include <compare>
 #include <string>
+#include <type_traits>
 #include <variant>
 
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
+#include "mongo/bson/util/builder_fwd.h"
 
 namespace mongo {
-
 using IndexKeyPattern = BSONObj;
 using IndexName = std::string;
 
@@ -50,15 +52,38 @@ using IndexName = std::string;
  * - specify a natural sort when running a find operation against a view.
  */
 struct NaturalOrderHint {
-    enum class Direction {
+    enum class Direction : int8_t {
         kForward = 1,
         kBackward = -1,
     };
 
     explicit NaturalOrderHint(Direction direction) : direction(direction) {}
 
+    auto operator<=>(const NaturalOrderHint& other) const = default;
+
     Direction direction;
 };
+
+namespace detail {
+// Concept to avoid ambiguity with BSON builder types which implement differing streaming operators.
+template <class T>
+concept string_builder = std::is_same_v<T, StringBuilder> || std::is_same_v<T, StackStringBuilder>;
+}  // namespace detail
+
+auto& operator<<(detail::string_builder auto& os, NaturalOrderHint::Direction dir) {
+    switch (dir) {
+        case NaturalOrderHint::Direction::kForward:
+            os << "forward";
+            return os;
+        case NaturalOrderHint::Direction::kBackward:
+            os << "backward";
+            return os;
+    }
+    MONGO_UNREACHABLE;
+}
+
+std::string toString(NaturalOrderHint::Direction dir);
+bool isForward(NaturalOrderHint::Direction dir);
 
 /**
  * Class represents all possible index hint definitions. Index hint may be specified as:
@@ -84,11 +109,17 @@ public:
     boost::optional<const IndexName&> getIndexName() const;
     boost::optional<const NaturalOrderHint&> getNaturalHint() const;
 
+    std::strong_ordering operator<=>(const IndexHint& other) const;
+    bool operator==(const IndexHint& other) const;
+    bool operator!=(const IndexHint& other) const = default;
+
     size_t hash() const;
 
 private:
     std::variant<IndexKeyPattern, IndexName, NaturalOrderHint> _hint;
-};  // namespace index_hint
+};
 
+// Helper for boost::hash.
+size_t hash_value(const IndexHint& hint);
 
 }  // namespace mongo

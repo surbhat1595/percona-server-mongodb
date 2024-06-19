@@ -330,13 +330,38 @@ Status TCMallocReleaseRateServerParameter::setFromString(StringData tcmallocRele
     return Status::OK();
 }
 
+Status onUpdateHeapProfilingSampleIntervalBytes(long long newValue) {
+#ifdef MONGO_CONFIG_TCMALLOC_GOOGLE
+    tcmalloc::MallocExtension::SetProfileSamplingRate(newValue);
+#else
+    LOGV2_WARNING(
+        8872800,
+        "The heapProfilingSampleIntervalBytes server parameter is only configurable at startup "
+        "when using the old TCMalloc. Setting this parameter will have no effect.");
+#endif
+
+    return Status::OK();
+}
+
+Status validateHeapProfilingSampleIntervalBytes(long long newValue,
+                                                const boost::optional<TenantId>& tenantId) {
+    const long long heapProfilerMinRate = 10000;  // 10kB
+    if (newValue == 0 || newValue >= heapProfilerMinRate) {
+        return Status::OK();
+    }
+
+    return {ErrorCodes::BadValue,
+            "heapProfilingSampleIntervalBytes must have a minimum rate of {} bytes or be disabled "
+            "with a rate of 0."_format(heapProfilerMinRate)};
+}
+
 namespace {
 
 MONGO_INITIALIZER_GENERAL(TcmallocConfigurationDefaults, (), ("BeginStartupOptionHandling"))
 (InitializerContext*) {
+#ifdef MONGO_CONFIG_TCMALLOC_GPERF
     ProcessInfo pi;
     size_t systemMemorySizeMB = pi.getMemSizeMB();
-#ifdef MONGO_CONFIG_TCMALLOC_GPERF
     // Before processing the command line options, if the user has not specified a value in via
     // the environment, set tcmalloc.max_total_thread_cache_bytes to its default value.
     if (getenv("TCMALLOC_MAX_TOTAL_THREAD_CACHE_BYTES")) {
@@ -356,23 +381,7 @@ MONGO_INITIALIZER_GENERAL(TcmallocConfigurationDefaults, (), ("BeginStartupOptio
     }
 
 #elif defined(MONGO_CONFIG_TCMALLOC_GOOGLE)
-    size_t numCores = pi.getNumAvailableCores();
-    // 1024MB in bytes spread across cores.
-    size_t defaultTcMallocPerCPUCacheSize = (1024 * 1024 * 1024) / numCores;
-    size_t derivedTcMallocPerCPUCacheSize =
-        ((systemMemorySizeMB / 8) * 2 * 1024 * 1024) / numCores;  // 1/4 of system memory in bytes
-
-    size_t perCPUCacheSize =
-        std::min(defaultTcMallocPerCPUCacheSize, derivedTcMallocPerCPUCacheSize);
-
-    try {
-        setTcmallocProperty(kMaxPerCPUCacheSizePropertyName, perCPUCacheSize);
-    } catch (const ExceptionFor<ErrorCodes::InternalError>& ex) {
-        LOGV2_ERROR(
-            8815000, "Could not set tcmallocMaxPerCPUCacheSize", "reason"_attr = ex.toString());
-    }
-
-    tcmalloc::MallocExtension::SetProfileSamplingRate(0);
+    tcmalloc::MallocExtension::SetProfileSamplingRate(HeapProfilingSampleIntervalBytes);
 #endif  // MONGO_CONFIG_TCMALLOC_GPERF
 }
 

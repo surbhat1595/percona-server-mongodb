@@ -40,6 +40,8 @@ namespace tidy {
  * flag the uses of UninteruptibleLockGuard since it does not comply with the design
  * requirements of MongoDB, they should be flagged so new instances receive extra
  * scrutiny from authors and code reviewers.
+ *
+ * TODO SERVER-68868: Remove this class once ULG doesn't exist.
  */
 class MongoUninterruptibleLockGuardCheck : public clang::tidy::ClangTidyCheck {
 public:

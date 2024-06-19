@@ -114,7 +114,7 @@ public:
         // Force subsequent uses of the namespace to refresh the filtering metadata so they can
         // synchronize with any work happening on the primary (e.g., migration critical section).
         // TODO (SERVER-71444): Fix to be interruptible or document exception.
-        UninterruptibleLockGuard noInterrupt(shard_role_details::getLocker(opCtx));  // NOLINT.
+        UninterruptibleLockGuard noInterrupt(opCtx);  // NOLINT.
         auto scopedCss =
             CollectionShardingRuntime::assertCollectionLockedAndAcquireExclusive(opCtx, _nss);
         if (_droppingCollection)
@@ -197,6 +197,10 @@ void ShardServerOpObserver::onInserts(OperationContext* opCtx,
                                       std::vector<bool> fromMigrate,
                                       bool defaultFromMigrate,
                                       OpStateAccumulator* opAccumulator) {
+    if (repl::ReplicationCoordinator::get(opCtx)->isDataRecovering()) {
+        return;
+    }
+
     const auto& nss = coll->ns();
 
     for (auto it = begin; it != end; ++it) {
@@ -255,8 +259,7 @@ void ShardServerOpObserver::onInserts(OperationContext* opCtx,
                 deletionTask.getCollectionUuid(), numOrphanDocs);
         }
 
-        if (nss == NamespaceString::kCollectionCriticalSectionsNamespace &&
-            !sharding_recovery_util::inRecoveryMode(opCtx)) {
+        if (nss == NamespaceString::kCollectionCriticalSectionsNamespace) {
             const auto collCSDoc = CollectionCriticalSectionDocument::parse(
                 IDLParserContext("ShardServerOpObserver"), insertedDoc);
             invariant(!collCSDoc.getBlockReads());
@@ -269,8 +272,7 @@ void ShardServerOpObserver::onInserts(OperationContext* opCtx,
                             lockDbIfNotPrimary.emplace(opCtx, insertedNss.dbName(), MODE_IX);
                         }
                         // TODO (SERVER-71444): Fix to be interruptible or document exception.
-                        UninterruptibleLockGuard noInterrupt(  // NOLINT.
-                            shard_role_details::getLocker(opCtx));
+                        UninterruptibleLockGuard noInterrupt(opCtx);  // NOLINT.
                         auto scopedDss = DatabaseShardingState::assertDbLockedAndAcquireExclusive(
                             opCtx, insertedNss.dbName());
                         scopedDss->enterCriticalSectionCatchUpPhase(opCtx, reason);
@@ -286,8 +288,7 @@ void ShardServerOpObserver::onInserts(OperationContext* opCtx,
                         }
 
                         // TODO (SERVER-71444): Fix to be interruptible or document exception.
-                        UninterruptibleLockGuard noInterrupt(  // NOLINT.
-                            shard_role_details::getLocker(opCtx));
+                        UninterruptibleLockGuard noInterrupt(opCtx);  // NOLINT.
                         auto scopedCsr =
                             CollectionShardingRuntime::assertCollectionLockedAndAcquireExclusive(
                                 opCtx, insertedNss);
@@ -301,6 +302,10 @@ void ShardServerOpObserver::onInserts(OperationContext* opCtx,
 void ShardServerOpObserver::onUpdate(OperationContext* opCtx,
                                      const OplogUpdateEntryArgs& args,
                                      OpStateAccumulator* opAccumulator) {
+    if (repl::ReplicationCoordinator::get(opCtx)->isDataRecovering()) {
+        return;
+    }
+
     const auto& updateDoc = args.updateArgs->update;
     // Most of these handlers do not need to run when the update is a full document replacement.
     // An empty updateDoc implies a no-op update and is not a valid oplog entry.
@@ -408,8 +413,7 @@ void ShardServerOpObserver::onUpdate(OperationContext* opCtx,
         }
     }
 
-    if (args.coll->ns() == NamespaceString::kCollectionCriticalSectionsNamespace &&
-        !sharding_recovery_util::inRecoveryMode(opCtx)) {
+    if (args.coll->ns() == NamespaceString::kCollectionCriticalSectionsNamespace) {
         const auto collCSDoc = CollectionCriticalSectionDocument::parse(
             IDLParserContext("ShardServerOpObserver"), args.updateArgs->updatedDoc);
         invariant(collCSDoc.getBlockReads());
@@ -424,8 +428,7 @@ void ShardServerOpObserver::onUpdate(OperationContext* opCtx,
                     }
 
                     // TODO (SERVER-71444): Fix to be interruptible or document exception.
-                    UninterruptibleLockGuard noInterrupt(  // NOLINT.
-                        shard_role_details::getLocker(opCtx));
+                    UninterruptibleLockGuard noInterrupt(opCtx);  // NOLINT.
                     auto scopedDss = DatabaseShardingState::assertDbLockedAndAcquireExclusive(
                         opCtx, updatedNss.dbName());
                     scopedDss->enterCriticalSectionCommitPhase(opCtx, reason);
@@ -441,8 +444,7 @@ void ShardServerOpObserver::onUpdate(OperationContext* opCtx,
                     }
 
                     // TODO (SERVER-71444): Fix to be interruptible or document exception.
-                    UninterruptibleLockGuard noInterrupt(  // NOLINT.
-                        shard_role_details::getLocker(opCtx));
+                    UninterruptibleLockGuard noInterrupt(opCtx);  // NOLINT.
                     auto scopedCsr =
                         CollectionShardingRuntime::assertCollectionLockedAndAcquireExclusive(
                             opCtx, updatedNss);
@@ -469,6 +471,9 @@ void ShardServerOpObserver::aboutToDelete(OperationContext* opCtx,
                                           BSONObj const& doc,
                                           OplogDeleteEntryArgs* args,
                                           OpStateAccumulator* opAccumulator) {
+    if (repl::ReplicationCoordinator::get(opCtx)->isDataRecovering()) {
+        return;
+    }
 
     if (coll->ns() == NamespaceString::kCollectionCriticalSectionsNamespace ||
         coll->ns() == NamespaceString::kRangeDeletionNamespace) {
@@ -484,9 +489,9 @@ void ShardServerOpObserver::onModifyCollectionShardingIndexCatalog(OperationCont
                                                                    const NamespaceString& nss,
                                                                    const UUID& uuid,
                                                                    BSONObj indexDoc) {
-    // If we are in recovery mode (STARTUP or ROLLBACK) let the sharding recovery service to take
+    // If we are in recovery mode (STARTUP2 or ROLLBACK) let the sharding recovery service to take
     // care of the in-memory state.
-    if (sharding_recovery_util::inRecoveryMode(opCtx)) {
+    if (repl::ReplicationCoordinator::get(opCtx)->isDataRecovering()) {
         return;
     }
     LOGV2_DEBUG(6712303,
@@ -602,6 +607,10 @@ void ShardServerOpObserver::onDelete(OperationContext* opCtx,
                                      const BSONObj& doc,
                                      const OplogDeleteEntryArgs& args,
                                      OpStateAccumulator* opAccumulator) {
+    if (repl::ReplicationCoordinator::get(opCtx)->isDataRecovering()) {
+        return;
+    }
+
     const auto& nss = coll->ns();
     auto& documentId = documentIdDecoration(args);
     invariant(!documentId.isEmpty());
@@ -664,8 +673,7 @@ void ShardServerOpObserver::onDelete(OperationContext* opCtx,
         }
     }
 
-    if (nss == NamespaceString::kCollectionCriticalSectionsNamespace &&
-        !sharding_recovery_util::inRecoveryMode(opCtx)) {
+    if (nss == NamespaceString::kCollectionCriticalSectionsNamespace) {
         const auto& deletedDoc = documentId;
         const auto collCSDoc = CollectionCriticalSectionDocument::parse(
             IDLParserContext("ShardServerOpObserver"), deletedDoc);
@@ -680,8 +688,7 @@ void ShardServerOpObserver::onDelete(OperationContext* opCtx,
                     }
 
                     // TODO (SERVER-71444): Fix to be interruptible or document exception.
-                    UninterruptibleLockGuard noInterrupt(  // NOLINT.
-                        shard_role_details::getLocker(opCtx));
+                    UninterruptibleLockGuard noInterrupt(opCtx);  // NOLINT.
                     auto scopedDss = DatabaseShardingState::assertDbLockedAndAcquireExclusive(
                         opCtx, deletedNss.dbName());
 
@@ -704,8 +711,7 @@ void ShardServerOpObserver::onDelete(OperationContext* opCtx,
                     }
 
                     // TODO (SERVER-71444): Fix to be interruptible or document exception.
-                    UninterruptibleLockGuard noInterrupt(  // NOLINT.
-                        shard_role_details::getLocker(opCtx));
+                    UninterruptibleLockGuard noInterrupt(opCtx);  // NOLINT.
                     auto scopedCsr =
                         CollectionShardingRuntime::assertCollectionLockedAndAcquireExclusive(
                             opCtx, deletedNss);
@@ -753,6 +759,10 @@ void ShardServerOpObserver::onCreateCollection(OperationContext* opCtx,
                                                const BSONObj& idIndex,
                                                const OplogSlot& createOpTime,
                                                bool fromMigrate) {
+    if (repl::ReplicationCoordinator::get(opCtx)->isDataRecovering()) {
+        return;
+    }
+
     // Only the shard primay nodes control the collection creation and secondaries just follow
     // Secondaries CSR will be the defaulted one (UNKNOWN in most of the cases)
     if (!opCtx->writesAreReplicated()) {
@@ -795,6 +805,10 @@ repl::OpTime ShardServerOpObserver::onDropCollection(OperationContext* opCtx,
                                                      std::uint64_t numRecords,
                                                      const CollectionDropType dropType,
                                                      bool markFromMigrate) {
+    if (repl::ReplicationCoordinator::get(opCtx)->isDataRecovering()) {
+        return {};
+    }
+
     if (collectionName == NamespaceString::kServerConfigurationNamespace) {
         // Dropping system collections is not allowed for end users
         invariant(!opCtx->writesAreReplicated());
@@ -817,6 +831,10 @@ void ShardServerOpObserver::onCreateIndex(OperationContext* opCtx,
                                           const UUID& uuid,
                                           BSONObj indexDoc,
                                           bool fromMigrate) {
+    if (repl::ReplicationCoordinator::get(opCtx)->isDataRecovering()) {
+        return;
+    }
+
     abortOngoingMigrationIfNeeded(opCtx, nss);
 }
 
@@ -826,16 +844,28 @@ void ShardServerOpObserver::onStartIndexBuild(OperationContext* opCtx,
                                               const UUID& indexBuildUUID,
                                               const std::vector<BSONObj>& indexes,
                                               bool fromMigrate) {
+    if (repl::ReplicationCoordinator::get(opCtx)->isDataRecovering()) {
+        return;
+    }
+
     abortOngoingMigrationIfNeeded(opCtx, nss);
 }
 
 void ShardServerOpObserver::onStartIndexBuildSinglePhase(OperationContext* opCtx,
                                                          const NamespaceString& nss) {
+    if (repl::ReplicationCoordinator::get(opCtx)->isDataRecovering()) {
+        return;
+    }
+
     abortOngoingMigrationIfNeeded(opCtx, nss);
 }
 
 void ShardServerOpObserver::onAbortIndexBuildSinglePhase(OperationContext* opCtx,
                                                          const NamespaceString& nss) {
+    if (repl::ReplicationCoordinator::get(opCtx)->isDataRecovering()) {
+        return;
+    }
+
     abortOngoingMigrationIfNeeded(opCtx, nss);
 }
 
@@ -844,6 +874,10 @@ void ShardServerOpObserver::onDropIndex(OperationContext* opCtx,
                                         const UUID& uuid,
                                         const std::string& indexName,
                                         const BSONObj& indexInfo) {
+    if (repl::ReplicationCoordinator::get(opCtx)->isDataRecovering()) {
+        return;
+    }
+
     abortOngoingMigrationIfNeeded(opCtx, nss);
 };
 
@@ -853,14 +887,10 @@ void ShardServerOpObserver::onCollMod(OperationContext* opCtx,
                                       const BSONObj& collModCmd,
                                       const CollectionOptions& oldCollOptions,
                                       boost::optional<IndexCollModInfo> indexInfo) {
-    // An empty collMod contains only the top-level "collMod": <collection> field. Empty collMods
-    // are sometimes used for FCV upgrades that modify the catalog in a compatible way with existing
-    // data users. These modifications do not change the underlying data assumptions and are
-    // otherwise a no-op since an empty collMod won't change anything.
-    bool emptyCollMod = collModCmd.nFields() <= 1;
-    if (!emptyCollMod) {
-        abortOngoingMigrationIfNeeded(opCtx, nss);
+    if (repl::ReplicationCoordinator::get(opCtx)->isDataRecovering()) {
+        return;
     }
+    abortOngoingMigrationIfNeeded(opCtx, nss);
 };
 
 void ShardServerOpObserver::onReplicationRollback(OperationContext* opCtx,

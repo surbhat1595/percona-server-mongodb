@@ -31,7 +31,6 @@ struct __wt_process {
     double tsc_nsec_ratio; /* rdtsc ticks to nanoseconds */
     bool use_epochtime;    /* use expensive time */
 
-    bool fast_truncate_2022; /* fast-truncate fix run-time configuration */
     bool tiered_shared_2023; /* tiered shared run-time configuration */
 
     WT_CACHE_POOL *cache_pool; /* shared cache information */
@@ -47,8 +46,9 @@ struct __wt_process {
 extern WT_PROCESS __wt_process;
 
 typedef enum __wt_background_compact_cleanup_stat_type {
-    BACKGROUND_CLEANUP_ALL_STAT,
-    BACKGROUND_CLEANUP_STALE_STAT
+    BACKGROUND_COMPACT_CLEANUP_EXIT,      /* Cleanup when the thread exits */
+    BACKGROUND_COMPACT_CLEANUP_OFF,       /* Cleanup when the thread is disabled */
+    BACKGROUND_COMPACT_CLEANUP_STALE_STAT /* Cleanup stale stats only */
 } WT_BACKGROUND_COMPACT_CLEANUP_STAT_TYPE;
 
 /*
@@ -424,8 +424,9 @@ struct __wt_connection_impl {
     TAILQ_HEAD(__wt_blockhash, __wt_block) * blockhash;
     TAILQ_HEAD(__wt_block_qh, __wt_block) blockqh;
 
-    WT_BLKCACHE blkcache;     /* Block cache */
-    WT_CHUNKCACHE chunkcache; /* Chunk cache */
+    WT_BLKCACHE blkcache;             /* Block cache */
+    WT_CHECKPOINT_CLEANUP cc_cleanup; /* Checkpoint cleanup */
+    WT_CHUNKCACHE chunkcache;         /* Chunk cache */
 
     /* Locked: handles in each bucket */
     uint64_t *dh_bucket_count;
@@ -475,9 +476,9 @@ struct __wt_connection_impl {
     bool ckpt_tid_set;                   /* Checkpoint thread set */
     WT_CONDVAR *ckpt_cond;               /* Checkpoint wait mutex */
     wt_shared uint64_t ckpt_most_recent; /* Clock value of most recent checkpoint */
-#define WT_CKPT_LOGSIZE(conn) ((conn)->ckpt_logsize != 0)
-    wt_off_t ckpt_logsize; /* Checkpoint log size period */
-    bool ckpt_signalled;   /* Checkpoint signalled */
+#define WT_CKPT_LOGSIZE(conn) (__wt_atomic_loadi64(&(conn)->ckpt_logsize) != 0)
+    wt_shared wt_off_t ckpt_logsize; /* Checkpoint log size period */
+    bool ckpt_signalled;             /* Checkpoint signalled */
 
     uint64_t ckpt_apply;           /* Checkpoint handles applied */
     uint64_t ckpt_apply_time;      /* Checkpoint applied handles gather time */
@@ -570,6 +571,7 @@ struct __wt_connection_impl {
     WT_THREAD_GROUP evict_threads;
     uint32_t evict_threads_max; /* Max eviction threads */
     uint32_t evict_threads_min; /* Min eviction threads */
+    bool evict_sample_inmem;
 
 #define WT_MAX_PREFETCH_QUEUE 120
 #define WT_PREFETCH_QUEUE_PER_TRIGGER 30
@@ -648,6 +650,7 @@ struct __wt_connection_impl {
     uint32_t log_force_write_wait;         /* Log force write wait configuration */
     const char *log_path;                  /* Logging path format */
     uint32_t log_prealloc;                 /* Log file pre-allocation */
+    uint32_t log_prealloc_init_count;      /* initial number of pre-allocated log files */
     uint16_t log_req_max;                  /* Max required log version */
     uint16_t log_req_min;                  /* Min required log version */
     wt_shared uint32_t txn_logsync;        /* Log sync configuration */
@@ -821,13 +824,14 @@ struct __wt_connection_impl {
 /* AUTOMATIC FLAG VALUE GENERATION START 0 */
 #define WT_CONN_SERVER_CAPACITY 0x001u
 #define WT_CONN_SERVER_CHECKPOINT 0x002u
-#define WT_CONN_SERVER_CHUNKCACHE_METADATA 0x004u
-#define WT_CONN_SERVER_COMPACT 0x008u
-#define WT_CONN_SERVER_LOG 0x010u
-#define WT_CONN_SERVER_LSM 0x020u
-#define WT_CONN_SERVER_STATISTICS 0x040u
-#define WT_CONN_SERVER_SWEEP 0x080u
-#define WT_CONN_SERVER_TIERED 0x100u
+#define WT_CONN_SERVER_CHECKPOINT_CLEANUP 0x004u
+#define WT_CONN_SERVER_CHUNKCACHE_METADATA 0x008u
+#define WT_CONN_SERVER_COMPACT 0x010u
+#define WT_CONN_SERVER_LOG 0x020u
+#define WT_CONN_SERVER_LSM 0x040u
+#define WT_CONN_SERVER_STATISTICS 0x080u
+#define WT_CONN_SERVER_SWEEP 0x100u
+#define WT_CONN_SERVER_TIERED 0x200u
     /* AUTOMATIC FLAG VALUE GENERATION STOP 32 */
     uint32_t server_flags;
 

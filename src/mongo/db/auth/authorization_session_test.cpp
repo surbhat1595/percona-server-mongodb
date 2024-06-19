@@ -74,10 +74,12 @@
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kTest
 
 namespace mongo {
-
-using AuthorizationSessionTest = AuthorizationSessionTestFixture;
-
 namespace {
+
+class AuthorizationSessionTest : public AuthorizationSessionTestFixture {
+public:
+    void testInvalidateUser(std::string mechanismData);
+};
 
 const TenantId kTenantId1(OID("12345678901234567890aaaa"));
 const TenantId kTenantId2(OID("12345678901234567890aaab"));
@@ -337,10 +339,13 @@ TEST_F(AuthorizationSessionTest, SystemCollectionsAccessControl) {
     authzSession->logoutDatabase(_client.get(), kTestDB, "Kill the test!"_sd);
 }
 
-TEST_F(AuthorizationSessionTest, InvalidateUser) {
+void AuthorizationSessionTest::testInvalidateUser(std::string mechanismData) {
+    UserRequest userRequest(kSpencerTest, boost::none);
+    userRequest.mechanismData = std::move(mechanismData);
+
     // Add a readWrite user
     ASSERT_OK(createUser(kSpencerTest, {{"readWrite", "test"}}));
-    ASSERT_OK(authzSession->addAndAuthorizeUser(_opCtx.get(), kSpencerTestRequest, boost::none));
+    ASSERT_OK(authzSession->addAndAuthorizeUser(_opCtx.get(), userRequest, boost::none));
 
     ASSERT_TRUE(
         authzSession->isAuthorizedForActionsOnResource(testFooCollResource, ActionType::find));
@@ -348,6 +353,7 @@ TEST_F(AuthorizationSessionTest, InvalidateUser) {
         authzSession->isAuthorizedForActionsOnResource(testFooCollResource, ActionType::insert));
 
     User* user = authzSession->lookupUser(kSpencerTest);
+    ASSERT(user != nullptr);
 
     // Change the user to be read-only
     int ignored;
@@ -364,6 +370,7 @@ TEST_F(AuthorizationSessionTest, InvalidateUser) {
         authzSession->isAuthorizedForActionsOnResource(testFooCollResource, ActionType::insert));
 
     user = authzSession->lookupUser(kSpencerTest);
+    ASSERT(user != nullptr);
 
     // Delete the user.
     ASSERT_OK(managerState->remove(
@@ -377,6 +384,18 @@ TEST_F(AuthorizationSessionTest, InvalidateUser) {
         authzSession->isAuthorizedForActionsOnResource(testFooCollResource, ActionType::insert));
     ASSERT_FALSE(authzSession->lookupUser(kSpencerTest));
     authzSession->logoutDatabase(_client.get(), kTestDB, "Kill the test!"_sd);
+}
+
+TEST_F(AuthorizationSessionTest, InvalidateUserByName) {
+    // Basic test with no roles or mechanism data.
+    std::string mechanismData{};
+    testInvalidateUser(std::move(mechanismData));
+}
+
+TEST_F(AuthorizationSessionTest, InvalidateUserByNameWithMechanismData) {
+    // Attach cache-key breaking mechanism data to validate cache invalidation.
+    std::string mechanismData("mechdata");
+    testInvalidateUser(std::move(mechanismData));
 }
 
 TEST_F(AuthorizationSessionTest, UseOldUserInfoInFaceOfConnectivityProblems) {
@@ -1103,7 +1122,7 @@ TEST_F(AuthorizationSessionTest, CheckAuthForAggregateWithDeeplyNestedLookup) {
         cmdBuilder << "cursor" << BSONObj() << "$db" << nssFoo.db_forTest();
 
         auto aggReq = uassertStatusOK(aggregation_request_helper::parseFromBSONForTests(
-            nssFoo, cmdBuilder.obj(), boost::none, false /* apiStrict */, _sc));
+            cmdBuilder.obj(), makeVTS(nssFoo), boost::none, false /* apiStrict */));
         PrivilegeVector privileges = uassertStatusOK(
             auth::getPrivilegesForAggregate(authzSession.get(), nssFoo, aggReq, false));
         ASSERT_TRUE(authzSession->isAuthorizedForPrivileges(privileges));
@@ -1733,18 +1752,18 @@ TEST_F(AuthorizationSessionTest, ExpirationWithSecurityTokenNOK) {
 }
 
 TEST_F(AuthorizationSessionTest, CheckBuiltInRolesForBypassDefaultMaxTimeMS) {
-    // Verify the "root" role is authorised  for 'bypassDefaultMaxTimeMS' for all resources.
+    // Verify the "root" role is authorised  for 'bypassDefaultMaxTimeMS'.
     authzSession->assumePrivilegesForBuiltinRole(RoleName{"root", "admin"});
-    ASSERT_TRUE(authzSession->isAuthorizedForActionsOnResource(
-        ResourcePattern::forAnyResource(boost::none), ActionType::bypassDefaultMaxTimeMS));
+    ASSERT_TRUE(authzSession->isAuthorizedForClusterAction(ActionType::bypassDefaultMaxTimeMS,
+                                                           boost::none));
 
     authzSession->logoutAllDatabases(_client.get(), "Test finished");
 
-    // Verify the "__system" role is authorised  for 'bypassDefaultMaxTimeMS' for all resources.
+    // Verify the "__system" role is authorised  for 'bypassDefaultMaxTimeMS'.
     auto client = getServiceContext()->getService()->makeClient("directClient");
     authzSession->grantInternalAuthorization(client.get());
-    ASSERT_TRUE(authzSession->isAuthorizedForActionsOnResource(
-        ResourcePattern::forAnyResource(boost::none), ActionType::bypassDefaultMaxTimeMS));
+    ASSERT_TRUE(authzSession->isAuthorizedForClusterAction(ActionType::bypassDefaultMaxTimeMS,
+                                                           boost::none));
 }
 
 class SystemBucketsTest : public AuthorizationSessionTest {
@@ -2046,6 +2065,45 @@ TEST_F(AuthorizationSessionTest, InternalSystemClientsBypassValidateRestrictions
     // should not fail even though client does not have a transport session
     authzSession->startRequest(opCtx.get());
     ASSERT_OK(currentUser->validateRestrictions(opCtx.get()));
+}
+
+TEST_F(AuthorizationSessionTest, ClusterActionsTestInternal) {
+    authzSession->grantInternalAuthorization(_client.get());
+    ASSERT_TRUE(
+        authzSession->isAuthorizedForClusterAction(ActionType::advanceClusterTime, boost::none));
+    ASSERT_TRUE(
+        authzSession->isAuthorizedForClusterAction(ActionType::advanceClusterTime, kTenantId1));
+    ASSERT_TRUE(authzSession->isAuthorizedForClusterAction(ActionType::bypassDefaultMaxTimeMS,
+                                                           boost::none));
+    ASSERT_TRUE(
+        authzSession->isAuthorizedForClusterAction(ActionType::bypassDefaultMaxTimeMS, kTenantId1));
+    authzSession->logoutAllDatabases(_client.get(), "Test finished");
+}
+
+TEST_F(AuthorizationSessionTest, ClusterActionsTestAdmin) {
+    authzSession->assumePrivilegesForBuiltinRole(RoleName{"root", "admin"});
+    ASSERT_FALSE(
+        authzSession->isAuthorizedForClusterAction(ActionType::advanceClusterTime, boost::none));
+    ASSERT_FALSE(
+        authzSession->isAuthorizedForClusterAction(ActionType::advanceClusterTime, kTenantId1));
+    ASSERT_TRUE(authzSession->isAuthorizedForClusterAction(ActionType::bypassDefaultMaxTimeMS,
+                                                           boost::none));
+    ASSERT_TRUE(
+        authzSession->isAuthorizedForClusterAction(ActionType::bypassDefaultMaxTimeMS, kTenantId1));
+    authzSession->logoutAllDatabases(_client.get(), "Test finished");
+}
+
+TEST_F(AuthorizationSessionTest, ClusterActionsTestUser) {
+    authzSession->assumePrivilegesForBuiltinRole(RoleName{"read", "admin"});
+    ASSERT_FALSE(
+        authzSession->isAuthorizedForClusterAction(ActionType::advanceClusterTime, boost::none));
+    ASSERT_FALSE(
+        authzSession->isAuthorizedForClusterAction(ActionType::advanceClusterTime, kTenantId1));
+    ASSERT_FALSE(authzSession->isAuthorizedForClusterAction(ActionType::bypassDefaultMaxTimeMS,
+                                                            boost::none));
+    ASSERT_FALSE(
+        authzSession->isAuthorizedForClusterAction(ActionType::bypassDefaultMaxTimeMS, kTenantId1));
+    authzSession->logoutAllDatabases(_client.get(), "Test finished");
 }
 
 }  // namespace

@@ -48,6 +48,7 @@
 #include "mongo/db/auth/user_name.h"
 #include "mongo/db/client.h"
 #include "mongo/db/operation_context.h"
+#include "mongo/db/session/logical_session_cache_gen.h"
 #include "mongo/db/session/logical_session_id_helpers.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/read_through_cache.h"
@@ -280,6 +281,12 @@ void serializeLsidAndTxnNumber(OperationContext* opCtx, BSONObjBuilder* builder)
     OperationSessionInfo sessionInfo;
     sessionInfo.setSessionId(opCtx->getLogicalSessionId());
     sessionInfo.setTxnNumber(opCtx->getTxnNumber());
+    sessionInfo.serialize(builder);
+}
+
+void serializeLsid(OperationContext* opCtx, BSONObjBuilder* builder) {
+    OperationSessionInfo sessionInfo;
+    sessionInfo.setSessionId(opCtx->getLogicalSessionId());
     sessionInfo.serialize(builder);
 }
 

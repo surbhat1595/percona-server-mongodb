@@ -167,18 +167,13 @@ ServiceContext::ConstructorActionRegisterer queryStatsStoreManagerRegisterer{
         // is the number of cpu cores. However, with performance investigation we found that when
         // the size of the partitions was too large, it took too long to copy out and read one
         // partition. We are now capping each partition at 16MB (the largest size a query shape can
-        // be), or smaller if that gives us fewer partitions than we have cores. The size needs to
-        // be cast to a double since we want to round up the number of partitions, and therefore
-        // need to avoid int division.
+        // be. If that gives us fewer partitions than we have cores, we set it to match the
+        // number of cores. The size needs to be cast to a double since we want to round up the
+        // number of partitions, and therefore need to avoid int division.
         size_t numPartitions = std::ceil(double(size) / (16 * 1024 * 1024));
-        // This is our guess at how big a small-ish query shape (+ metrics) would be, but
-        // intentionally not the smallest possible one. The purpose of this constant is to keep us
-        // from making each partition so small that it does not record anything, while still being
-        // small enough to allow us to shrink the overall memory footprint of the data structure if
-        // the user requested that we do so.
-        constexpr double approxEntrySize = 0.004 * 1024 * 1024;  // 4KB
-        if (numPartitions < ProcessInfo::getNumLogicalCores()) {
-            numPartitions = std::ceil(double(size) / (approxEntrySize * 10));
+        auto numLogicalCores = ProcessInfo::getNumLogicalCores();
+        if (numPartitions < numLogicalCores) {
+            numPartitions = numLogicalCores;
         }
 
         globalQueryStatsStoreManager =
@@ -242,6 +237,9 @@ void updateStatistics(const QueryStatsStore::Partition& proofOfLock,
 
     toUpdate.keysExamined.aggregate(snapshot.keysExamined);
     toUpdate.docsExamined.aggregate(snapshot.docsExamined);
+    toUpdate.bytesRead.aggregate(snapshot.bytesRead);
+    toUpdate.readTimeMicros.aggregate(snapshot.readTimeMicros);
+    toUpdate.workingTimeMillis.aggregate(snapshot.workingTimeMillis);
     toUpdate.hasSortStage.aggregate(snapshot.hasSortStage);
     toUpdate.usedDisk.aggregate(snapshot.usedDisk);
     toUpdate.fromMultiPlanner.aggregate(snapshot.fromMultiPlanner);
@@ -284,7 +282,8 @@ void insertQueryStatsEntry(QueryStatsStore::Partition& proofOfLock,
 
 void registerRequest(OperationContext* opCtx,
                      const NamespaceString& collection,
-                     std::function<std::unique_ptr<Key>(void)> makeKey) {
+                     std::function<std::unique_ptr<Key>(void)> makeKey,
+                     bool willNeverExhaust) {
     if (!isQueryStatsEnabled(opCtx->getServiceContext())) {
         LOGV2_DEBUG(8473000,
                     5,
@@ -327,6 +326,8 @@ void registerRequest(OperationContext* opCtx,
                     "collection"_attr = collection);
         return;
     }
+
+    opDebug.queryStatsInfo.willNeverExhaust = willNeverExhaust;
     // There are a few cases where a query shape can be larger than the original query. For example,
     // {$exists: false} in the input query serializes to {$not: {$exists: true}. In rare cases where
     // an input query has thousands of clauses, the cumulative bloat that shapification adds results
@@ -372,6 +373,9 @@ QueryStatsSnapshot captureMetrics(const OperationContext* opCtx,
         static_cast<uint64_t>(metrics.nreturned.value_or(0)),
         static_cast<uint64_t>(metrics.keysExamined.value_or(0)),
         static_cast<uint64_t>(metrics.docsExamined.value_or(0)),
+        static_cast<uint64_t>(metrics.bytesRead.value_or(0)),
+        metrics.readingTime.value_or(Microseconds(0)).count(),
+        metrics.clusterWorkingTime.value_or(Milliseconds(0)).count(),
         metrics.hasSortStage,
         metrics.usedDisk,
         metrics.fromMultiPlanner,
@@ -385,8 +389,14 @@ void writeQueryStats(OperationContext* opCtx,
                      boost::optional<size_t> queryStatsKeyHash,
                      std::unique_ptr<Key> key,
                      const QueryStatsSnapshot& snapshot,
-                     std::unique_ptr<SupplementalStatsEntry> supplementalMetrics) {
-    if (!key) {
+                     std::unique_ptr<SupplementalStatsEntry> supplementalMetrics,
+                     bool willNeverExhaust) {
+
+    // Generally we expect a 'key' to write query stats. However, for a change stream query, we
+    // expect it has no 'key' after its first writeQueryStats(), but it must have a
+    // 'queryStatsKeyHash' for its entry to be updated.
+    // TODO SERVER-89058 Modify comment to include tailable cursors.
+    if (!key && !(willNeverExhaust && queryStatsKeyHash)) {
         return;
     }
 
@@ -404,15 +414,23 @@ void writeQueryStats(OperationContext* opCtx,
     }
     auto&& queryStatsStore =
         QueryStatsStoreManager::get(opCtx->getServiceContext())->getQueryStatsStore();
-    dassert(absl::HashOf(*key) == queryStatsKeyHash,
-            "Expecting query stats key to hash to the given hash. Is the OpCtx state being "
-            "incorrectly re-used?");
+    if (key) {
+        dassert(absl::HashOf(*key) == queryStatsKeyHash,
+                "Expecting query stats key to hash to the given hash. Is the OpCtx state being "
+                "incorrectly re-used?");
+    }
     auto&& [statusWithMetrics, partitionLock] =
         queryStatsStore.getWithPartitionLock(*queryStatsKeyHash);
     if (statusWithMetrics.isOK()) {
         // Found an existing entry! Just update the metrics and we're done.
         return updateStatistics(
             partitionLock, *statusWithMetrics.getValue(), snapshot, std::move(supplementalMetrics));
+    }
+
+    // It is possible a cursor that lives forever has no key associated with it and its entry may
+    // have been evicted.
+    if (willNeverExhaust && !key) {
+        return;
     }
 
     // Otherwise we didn't find an existing entry. Try to create one.
@@ -422,6 +440,42 @@ void writeQueryStats(OperationContext* opCtx,
                                  std::move(key),
                                  snapshot,
                                  std::move(supplementalMetrics));
+}
+
+void writeQueryStatsOnCursorDisposeOrKill(OperationContext* opCtx,
+                                          boost::optional<size_t> queryStatsKeyHash,
+                                          std::unique_ptr<Key> key,
+                                          bool willNeverExhaust,
+                                          boost::optional<Microseconds> firstResponseExecutionTime,
+                                          OpDebug::AdditiveMetrics metrics) {
+    // It is discouraged but technically possible for a user to enable queryStats on the mongods of
+    // a replica set. In this case, a cursor will be created for each mongod. However, the
+    // queryStatsKey is behind a unique_ptr on CurOp. The ClientCursor constructor std::moves the
+    // queryStatsKey so it uniquely owns it (and also makes the queryStatsKey on CurOp now a
+    // nullptr) and copies over the queryStatsKeyHash as the latter is a cheap copy.
+    // In the case of sharded $search, two cursors will be created per mongod. In this way,
+    // two cursors are part of the same thread/operation, and therefore share a OpCtx/CurOp/OpDebug.
+    // The first cursor that is created will own the queryStatsKey and have a copy of the
+    // queryStatsKeyHash. On the other hand, the second one will only have a copy of the hash since
+    // the queryStatsKey will be null on CurOp from being std::move'd in the first cursor
+    // construction call. To not trip the tassert in writeQueryStats and because all cursors are
+    // guaranteed to have a copy of the hash, we check that the cursor has a key
+    if (key && opCtx) {
+        auto snapshot = query_stats::captureMetrics(
+            opCtx, query_stats::microsecondsToUint64(firstResponseExecutionTime), metrics);
+
+        query_stats::writeQueryStats(opCtx, queryStatsKeyHash, std::move(key), snapshot);
+    } else if (willNeverExhaust && opCtx) {
+        // Since we already recorded information about the possible getMores associated with a
+        // cursor that never ends, the only information left to record is about the kill/dispose
+        // cursor operation. This operation is not timed and does not have any metrics associated
+        // with it.
+        auto snapshot = query_stats::captureMetrics(
+            opCtx, query_stats::microsecondsToUint64(boost::none), OpDebug::AdditiveMetrics());
+
+        query_stats::writeQueryStats(
+            opCtx, queryStatsKeyHash, nullptr, snapshot, nullptr, willNeverExhaust);
+    }
 }
 
 }  // namespace mongo::query_stats

@@ -1,5 +1,9 @@
 functions:
   f_dsi_run_workload: &dsi_run_func # this function replaces f_run_dsi_workload
+    - command: timeout.update
+      params:
+        exec_timeout_secs: ${exec_timeout_secs_override}
+        timeout_secs: ${timeout_secs_override}
     - command: git.get_project
       params:
         directory: src/mongo
@@ -113,18 +117,21 @@ tasks:
     commands:
       - func: f_generate_all_variant_auto_tasks
   - name: schedule_global_auto_tasks
+    patch_only: true
     priority: 5
     commands:
       - func: f_schedule_tasks
         vars:
           tasks: all_tasks
   - name: schedule_variant_auto_tasks
+    patch_only: true
     priority: 5
     commands:
       - func: f_schedule_tasks
         vars:
           tasks: variant_tasks
   - name: schedule_patch_auto_tasks
+    patch_only: true
     priority: 5
     commands:
       - func: f_schedule_tasks
@@ -992,8 +999,7 @@ tasks:
              include_filter_2: regression,
              exclude_filter: none,
              threads: "1 4",
-             read_cmd: 'true',
-             share_dataset: 'true'}
+             read_cmd: 'true'}
 
   - name: big_collection
     commands:

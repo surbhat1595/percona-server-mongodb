@@ -72,6 +72,7 @@ public:
     static constexpr StringData kWholeBucketFilter = "wholeBucketFilter"_sd;
     static constexpr StringData kEventFilter = "eventFilter"_sd;
     static constexpr StringData kFixedBuckets = "fixedBuckets"_sd;
+    static constexpr StringData kSbeCompatible = "sbeCompatible"_sd;
 
     static boost::intrusive_ptr<DocumentSource> createFromBsonInternal(
         BSONElement elem, const boost::intrusive_ptr<ExpressionContext>& expCtx);
@@ -82,7 +83,8 @@ public:
                                        timeseries::BucketUnpacker bucketUnpacker,
                                        int bucketMaxSpanSeconds,
                                        bool assumeNoMixedSchemaData = false,
-                                       bool fixedBuckets = false);
+                                       bool fixedBuckets = false,
+                                       boost::optional<bool> sbeCompatible = boost::none);
 
     DocumentSourceInternalUnpackBucket(const boost::intrusive_ptr<ExpressionContext>& expCtx,
                                        timeseries::BucketUnpacker bucketUnpacker,
@@ -90,7 +92,8 @@ public:
                                        const boost::optional<BSONObj>& eventFilterBson,
                                        const boost::optional<BSONObj>& wholeBucketFilterBson,
                                        bool assumeNoMixedSchemaData = false,
-                                       bool fixedBuckets = false);
+                                       bool fixedBuckets = false,
+                                       boost::optional<bool> sbeCompatible = boost::none);
 
     const char* getSourceName() const override {
         return kStageNameInternal.rawData();
@@ -232,11 +235,11 @@ public:
 
     /**
      * If the stage after $_internalUnpackBucket is $project, $addFields, or $set, try to extract
-     * from it computed meta projections and push them pass the current stage. Return true if the
-     * next stage was removed as a result of the optimization.
+     * from it computed meta projections and push them pass the current stage. Returns the iterator
+     * that needs to be optimized next.
      */
-    bool pushDownComputedMetaProjection(Pipeline::SourceContainer::iterator itr,
-                                        Pipeline::SourceContainer* container);
+    boost::optional<Pipeline::SourceContainer::iterator> pushDownComputedMetaProjection(
+        Pipeline::SourceContainer::iterator itr, Pipeline::SourceContainer* container);
 
     /**
      * If 'src' represents an exclusion $project, attempts to extract the parts of 'src' that are
@@ -389,6 +392,10 @@ private:
     bool _triedInternalizeProject = false;
     bool _triedLastpointRewrite = false;
     bool _triedLimitPushDown = false;
+
+    // The $project or $addFields stages which we have tried to apply the computed meta project push
+    // down optimization to.
+    std::vector<DocumentSource*> _triedComputedMetaPushDownFor;
 
     // Caches the SBE-compatibility status result of this stage.
     boost::optional<bool> _isSbeCompatible = boost::none;

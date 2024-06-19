@@ -273,7 +273,7 @@ public:
         ReplicationConsistencyMarkers* consistencyMarkers,
         StorageInterface* storageInterface,
         const OplogApplier::Options& options,
-        ThreadPool* writerPool) final {
+        ThreadPool* workerPool) final {
         MONGO_UNREACHABLE;
     };
 
@@ -559,14 +559,14 @@ boost::optional<BSONObj> ShardMergeRecipientService::Instance::reportForCurrentO
     }
 
     if (_stateDoc.getStartAtOpTime()) {
-        _stateDoc.getStartAtOpTime()->append(&bob, "receiveStartOpTime");
+        _stateDoc.getStartAtOpTime()->append("receiveStartOpTime", &bob);
     }
     if (_stateDoc.getStartFetchingDonorOpTime())
-        _stateDoc.getStartFetchingDonorOpTime()->append(&bob, "startFetchingDonorOpTime");
+        _stateDoc.getStartFetchingDonorOpTime()->append("startFetchingDonorOpTime", &bob);
     if (_stateDoc.getStartApplyingDonorOpTime())
-        _stateDoc.getStartApplyingDonorOpTime()->append(&bob, "startApplyingDonorOpTime");
+        _stateDoc.getStartApplyingDonorOpTime()->append("startApplyingDonorOpTime", &bob);
     if (_stateDoc.getCloneFinishedRecipientOpTime())
-        _stateDoc.getCloneFinishedRecipientOpTime()->append(&bob, "cloneFinishedRecipientOpTime");
+        _stateDoc.getCloneFinishedRecipientOpTime()->append("cloneFinishedRecipientOpTime", &bob);
 
     if (_stateDoc.getExpireAt())
         bob.append("expireAt", *_stateDoc.getExpireAt());
@@ -1265,10 +1265,11 @@ boost::optional<OpTime> ShardMergeRecipientService::Instance::_getOldestActiveTr
     // config.transactions collection aren't coalesced for multi-statement transactions during
     // secondary oplog application, unlike the retryable writes where updates to config.transactions
     // collection are coalesced on secondaries.
-    findCmd.setReadConcern(BSON(repl::ReadConcernArgs::kLevelFieldName
-                                << repl::readConcernLevels::kSnapshotName
-                                << repl::ReadConcernArgs::kAtClusterTimeFieldName << ReadTimestamp
-                                << repl::ReadConcernArgs::kAllowTransactionTableSnapshot << true));
+    findCmd.setReadConcern(
+        BSON(repl::ReadConcernArgs::kLevelFieldName
+             << repl::readConcernLevels::toString(repl::ReadConcernLevel::kSnapshotReadConcern)
+             << repl::ReadConcernArgs::kAtClusterTimeFieldName << ReadTimestamp
+             << repl::ReadConcernArgs::kAllowTransactionTableSnapshot << true));
 
     auto earliestOpenTransactionBson = _client->findOne(std::move(findCmd), _readPreference);
     LOGV2_DEBUG(7339736,
@@ -1403,7 +1404,7 @@ void ShardMergeRecipientService::Instance::_processCommittedTransactionEntry(con
     // Use the same wallclock time as the noop entry.
     sessionTxnRecord.setLastWriteDate(noopEntry.getWallClockTime());
 
-    AutoGetOplogFastPath oplogWrite(opCtx, OplogAccessMode::kWrite);
+    AutoGetOplog oplogWrite(opCtx, OplogAccessMode::kWrite);
     writeConflictRetry(
         opCtx, "writeDonorCommittedTxnEntry", NamespaceString::kRsOplogNamespace, [&] {
             WriteUnitOfWork wuow(opCtx);
@@ -1863,7 +1864,7 @@ ShardMergeRecipientService::Instance::_advanceMajorityCommitTsToBkpCursorCheckpo
                        "mergeRecipientWriteNoopToAdvanceStableTimestamp",
                        NamespaceString::kRsOplogNamespace,
                        [&] {
-                           AutoGetOplogFastPath oplogWrite(opCtx, OplogAccessMode::kWrite);
+                           AutoGetOplog oplogWrite(opCtx, OplogAccessMode::kWrite);
                            WriteUnitOfWork wuow(opCtx);
                            const std::string msg = str::stream()
                                << "Merge recipient advancing stable timestamp";
@@ -2042,7 +2043,7 @@ void ShardMergeRecipientService::Instance::_cleanupOnMigrationCompletion(Status 
         using std::swap;
         swap(savedDonorOplogFetcher, _donorOplogFetcher);
         swap(savedTenantOplogApplier, _tenantOplogApplier);
-        swap(savedWriterPool, _writerPool);
+        swap(savedWriterPool, _workerPool);
         swap(savedDonorFilenameBackupCursorFileFetcher, _donorFilenameBackupCursorFileFetcher);
         swap(savedBackupCursorKeepAliveFuture, _backupCursorKeepAliveFuture);
     }
@@ -2173,7 +2174,7 @@ void ShardMergeRecipientService::Instance::_startOplogApplier() {
                                                                boost::none,
                                                                _donorOplogBuffer.get(),
                                                                **_scopedExecutor,
-                                                               _writerPool.get());
+                                                               _workerPool.get());
 
     LOGV2_DEBUG(7339750,
                 1,
@@ -2201,7 +2202,7 @@ void ShardMergeRecipientService::Instance::_setup(ConnectionPair connectionPair)
     _client = std::move(connectionPair.first);
     _oplogFetcherClient = std::move(connectionPair.second);
 
-    _writerPool = makeTenantMigrationWriterPool();
+    _workerPool = makeTenantMigrationWorkerPool();
 
     _sharedData = std::make_unique<TenantMigrationSharedData>(_serviceContext->getFastClockSource(),
                                                               getMigrationUUID());

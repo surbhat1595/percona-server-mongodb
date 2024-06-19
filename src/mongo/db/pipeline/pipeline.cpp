@@ -181,7 +181,6 @@ void validateTopLevelPipeline(const Pipeline& pipeline) {
 MONGO_FAIL_POINT_DEFINE(disablePipelineOptimization);
 
 using boost::intrusive_ptr;
-using std::endl;
 using std::ostringstream;
 using std::string;
 using std::vector;
@@ -880,11 +879,13 @@ std::unique_ptr<Pipeline, PipelineDeleter> Pipeline::makePipeline(
     MakePipelineOptions opts) {
     auto pipeline = Pipeline::parse(rawPipeline, expCtx, opts.validator);
 
+    bool alreadyOptimized = opts.alreadyOptimized;
+
     if (opts.optimize) {
         pipeline->optimizePipeline();
+        alreadyOptimized = true;
     }
 
-    constexpr bool alreadyOptimized = true;
     pipeline->validateCommon(alreadyOptimized);
 
     if (opts.attachCursorSource) {

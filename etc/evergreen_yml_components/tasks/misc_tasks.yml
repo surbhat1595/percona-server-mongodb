@@ -54,6 +54,74 @@ variables:
 ################################################
 tasks:
 - <<: *antithesis_task_template
+  name: antithesis_concurrency_sharded_with_stepdowns_and_balancer_and_config_transitions
+  tags:
+    [
+      "assigned_to_jira_team_devprod_correctness",
+      "experimental",
+      "antithesis",
+    ]
+  commands:
+    - func: "do setup"
+    - func: "do setup for antithesis"
+    - func: "antithesis image build and push"
+      vars:
+        suite: concurrency_sharded_with_stepdowns_and_balancer_and_config_transitions
+        resmoke_args: >-
+          --runAllFeatureFlagTests
+
+- <<: *antithesis_task_template
+  name: antithesis_concurrency_sharded_kill_primary_with_balancer_and_config_transitions
+  tags:
+    [
+      "assigned_to_jira_team_devprod_correctness",
+      "experimental",
+      "antithesis",
+    ]
+  commands:
+    - func: "do setup"
+    - func: "do setup for antithesis"
+    - func: "antithesis image build and push"
+      vars:
+        suite: concurrency_sharded_kill_primary_with_balancer_and_config_transitions
+        resmoke_args: >-
+          --runAllFeatureFlagTests
+
+- <<: *antithesis_task_template
+  name: antithesis_concurrency_sharded_replication_with_balancer_and_config_transitions
+  tags:
+    [
+      "assigned_to_jira_team_devprod_correctness",
+      "experimental",
+      "antithesis",
+    ]
+  commands:
+    - func: "do setup"
+    - func: "do setup for antithesis"
+    - func: "antithesis image build and push"
+      vars:
+        suite: concurrency_sharded_replication_with_balancer_and_config_transitions
+        resmoke_args: >-
+          --runAllFeatureFlagTests
+
+- <<: *antithesis_task_template
+  name: antithesis_jstestfuzz_sharded_with_config_transitions
+  tags:
+    [
+      "assigned_to_jira_team_devprod_correctness",
+      "experimental",
+      "antithesis",
+    ]
+  commands:
+    - func: "do setup"
+    - func: "do setup for antithesis"
+    - func: "antithesis image build and push"
+      vars:
+        suite: jstestfuzz_sharded_with_config_transitions
+        resmoke_args: >-
+          --runAllFeatureFlagTests
+
+- <<: *antithesis_task_template
   name: antithesis_concurrency_sharded_multi_stmt_txn_kill_primary
   tags: ["assigned_to_jira_team_devprod_correctness", "experimental", "antithesis"]
   commands:
@@ -88,6 +156,23 @@ tasks:
       suite: concurrency_sharded_initial_sync
       resmoke_args: >-
         --runAllFeatureFlagTests
+
+- <<: *antithesis_task_template
+  name: antithesis_replica_sets_initsync_jscore_passthrough
+  tags:
+    [
+      "assigned_to_jira_team_devprod_correctness",
+      "experimental",
+      "antithesis",
+    ]
+  commands:
+    - func: "do setup"
+    - func: "do setup for antithesis"
+    - func: "antithesis image build and push"
+      vars:
+        suite: replica_sets_initsync_jscore_passthrough
+        resmoke_args: >-
+          --runAllFeatureFlagTests
 
 - <<: *antithesis_task_template
   name: antithesis_concurrency_sharded_with_stepdowns_and_balancer_config_shard
@@ -164,6 +249,74 @@ tasks:
   - func: "antithesis image build and push"
     vars:
       suite: replica_sets_jscore_passthrough
+      resmoke_args: >-
+        --runAllFeatureFlagTests
+
+- <<: *antithesis_task_template
+  name: antithesis_replica_sets_lag_oplog_application_jscore_passthrough
+  tags:
+    [
+      "assigned_to_jira_team_devprod_correctness",
+      "experimental",
+      "antithesis",
+    ]
+  commands:
+  - func: "do setup"
+  - func: "do setup for antithesis"
+  - func: "antithesis image build and push"
+    vars:
+      suite: replica_sets_lag_oplog_application_jscore_passthrough
+      resmoke_args: >-
+        --runAllFeatureFlagTests
+
+- <<: *antithesis_task_template
+  name: antithesis_replica_sets_kill_primary_jscore_passthrough
+  tags:
+    [
+      "assigned_to_jira_team_devprod_correctness",
+      "experimental",
+      "antithesis",
+    ]
+  commands:
+  - func: "do setup"
+  - func: "do setup for antithesis"
+  - func: "antithesis image build and push"
+    vars:
+      suite: replica_sets_kill_primary_jscore_passthrough
+      resmoke_args: >-
+        --runAllFeatureFlagTests
+
+- <<: *antithesis_task_template
+  name: antithesis_replica_sets_kill_secondaries_jscore_passthrough
+  tags:
+    [
+      "assigned_to_jira_team_devprod_correctness",
+      "experimental",
+      "antithesis",
+    ]
+  commands:
+  - func: "do setup"
+  - func: "do setup for antithesis"
+  - func: "antithesis image build and push"
+    vars:
+      suite: replica_sets_kill_secondaries_jscore_passthrough
+      resmoke_args: >-
+        --runAllFeatureFlagTests
+
+- <<: *antithesis_task_template
+  name: antithesis_replica_sets_initsync_lagged_sync_source_jscore_passthrough
+  tags:
+    [
+      "assigned_to_jira_team_devprod_correctness",
+      "experimental",
+      "antithesis",
+    ]
+  commands:
+  - func: "do setup"
+  - func: "do setup for antithesis"
+  - func: "antithesis image build and push"
+    vars:
+      suite: replica_sets_initsync_lagged_sync_source_jscore_passthrough
       resmoke_args: >-
         --runAllFeatureFlagTests
 

@@ -41,12 +41,13 @@ namespace mongo::classic_runtime_planner_for_sbe {
 
 SubPlanner::SubPlanner(PlannerDataForSBE plannerData) : PlannerBase(std::move(plannerData)) {
     LOGV2_DEBUG(8542100, 5, "Using classic subplanner for SBE");
+
     _subplanStage =
         std::make_unique<SubplanStage>(cq()->getExpCtxRaw(),
                                        collections().getMainCollectionPtrOrAcquisition(),
                                        ws(),
                                        cq(),
-                                       PlanCachingMode::NeverCache);
+                                       makeCallbacks());
 
     auto trialPeriodYieldPolicy =
         makeClassicYieldPolicy(opCtx(),
@@ -57,31 +58,81 @@ SubPlanner::SubPlanner(PlannerDataForSBE plannerData) : PlannerBase(std::move(pl
     uassertStatusOK(_subplanStage->pickBestPlan(plannerParams(),
                                                 trialPeriodYieldPolicy.get(),
                                                 false /* shouldConstructClassicExecutableTree */));
+
+    _solution = extendSolutionWithPipeline(_subplanStage->extractBestWholeQuerySolution());
 }
 
 std::unique_ptr<PlanExecutor, PlanExecutor::Deleter> SubPlanner::makeExecutor(
     std::unique_ptr<CanonicalQuery> canonicalQuery) {
-    std::unique_ptr<QuerySolution> solution = _subplanStage->extractBestWholeQuerySolution();
+    auto sbePlanAndData = prepareSbePlanAndData(*_solution);
 
-    // Extend the winning solution with the agg pipeline and build the execution tree.
-    if (!cq()->cqPipeline().empty()) {
-        solution = QueryPlanner::extendWithAggPipeline(
-            *cq(), std::move(solution), plannerParams().secondaryCollectionsInfo);
+    if (useSbePlanCache()) {
+        plan_cache_util::updateSbePlanCacheWithPinnedEntry(opCtx(),
+                                                           collections(),
+                                                           *cq(),
+                                                           *_solution,
+                                                           *sbePlanAndData.first.get(),
+                                                           sbePlanAndData.second);
     }
 
-    auto sbePlanAndData = prepareSbePlanAndData(*solution);
-    plan_cache_util::updatePlanCache(opCtx(),
-                                     collections(),
-                                     *cq(),
-                                     *solution,
-                                     *sbePlanAndData.first.get(),
-                                     sbePlanAndData.second);
-
     return prepareSbePlanExecutor(std::move(canonicalQuery),
-                                  std::move(solution),
+                                  std::move(_solution),
                                   std::move(sbePlanAndData),
                                   false /*isFromPlanCache*/,
                                   cachedPlanHash(),
                                   nullptr /*classicRuntimePlannerStage*/);
 }
+SubplanStage::PlanSelectionCallbacks SubPlanner::makeCallbacks() {
+    if (useSbePlanCache()) {
+        // When using the SBE plan cache, pass no-op callbacks to the 'SubplanStage'. We take care
+        // of writing the complete composite plan to the SBE plan cache ourselves.
+        return SubplanStage::PlanSelectionCallbacks{
+            .onPickPlanForBranch =
+                [this](const CanonicalQuery&,
+                       MultiPlanStage& mps,
+                       std::unique_ptr<plan_ranker::PlanRankingDecision>,
+                       std::vector<plan_ranker::CandidatePlan>&) { ++_numPerBranchMultiplans; },
+            .onPickPlanWholeQuery = plan_cache_util::NoopPlanCacheWriter{},
+        };
+    } else {
+        // This callback is invoked on a per $or branch basis. The callback is constructed in the
+        // "sometimes cache" mode. We currently do not support cached plan replanning for rooted $or
+        // queries. Therefore, we must be more conservative about putting a potentially bad plan
+        // into the cache in the subplan path.
+        //
+        // TODO SERVER-18777: Support replanning for rooted $or queries.
+        plan_cache_util::ConditionalClassicPlanCacheWriter perBranchWriter{
+            plan_cache_util::ConditionalClassicPlanCacheWriter::Mode::SometimesCache,
+            opCtx(),
+            collections().getMainCollectionPtrOrAcquisition(),
+            false /* executeInSbe. We set this to false because the cache entry created by this
+                     callback is only used by the SubPlanner. It is not used for constructing a
+                     final execution plan.  This is marked by a special byte in the plan cache key
+                     which indicates that the entry is used for subplanning only.
+                   */};
+
+        // Wrap the conditional classic plan cache writer function object so that we can count the
+        // number of times that multi-planning gets invoked for an $or branch.
+        auto perBranchCallback = [this, capturedPerBranchWriter = std::move(perBranchWriter)](
+                                     const CanonicalQuery& cq,
+                                     MultiPlanStage& mps,
+                                     std::unique_ptr<plan_ranker::PlanRankingDecision> ranking,
+                                     std::vector<plan_ranker::CandidatePlan>& candidates) {
+            ++_numPerBranchMultiplans;
+            capturedPerBranchWriter(cq, mps, std::move(ranking), candidates);
+        };
+
+        // The query will run in SBE but we are using the classic plan cache. Use callbacks to write
+        // a classic plan cache entry for each branch.
+        return SubplanStage::PlanSelectionCallbacks{
+            .onPickPlanForBranch = std::move(perBranchCallback),
+            .onPickPlanWholeQuery =
+                plan_cache_util::ClassicPlanCacheWriter{
+                    opCtx(),
+                    collections().getMainCollectionPtrOrAcquisition(),
+                    true /* executeInSbe */},
+        };
+    }
+}
+
 }  // namespace mongo::classic_runtime_planner_for_sbe

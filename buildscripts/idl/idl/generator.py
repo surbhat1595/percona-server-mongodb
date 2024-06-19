@@ -717,28 +717,57 @@ class _CppHeaderFileWriter(_CppFileWriterBase):
 
         self._writer.write_empty_line()
 
-    def gen_setter(self, field):
+    def gen_setters(self, field):
         # type: (ast.Field) -> None
-        """Generate the C++ setter definition for a field."""
+        """Generate the C++ setter definitions for a field."""
         cpp_type_info = cpp_types.get_cpp_type(field)
-        param_type = cpp_type_info.get_getter_setter_type()
+        setter_type = cpp_type_info.get_getter_setter_type()
+        storage_type = cpp_type_info.get_storage_type()
         is_serial = _is_required_serializer_field(field)
         memfn = _get_field_member_setter_name(field)
+        validator = _get_field_member_validator_name(field) if field.validator is not None else ""
+
+        # Generate the setter for instances of the "getter/setter type", which may not be the same
+        # as the storage type.
         if field.chained_struct_field:
             body = "{}.{}(std::move(value));".format(
-                _get_field_member_name(field.chained_struct_field),
-                _get_field_member_setter_name(field))
+                _get_field_member_name(field.chained_struct_field), memfn)
         else:
-            body = cpp_type_info.get_setter_body(
-                _get_field_member_name(field),
-                _get_field_member_validator_name(field) if field.validator is not None else '')
-        set_has = _gen_mark_present(field.cpp_name) if is_serial else ''
+            body = cpp_type_info.get_setter_body(_get_field_member_name(field), validator)
+        set_has = _gen_mark_present(field.cpp_name) if is_serial else ""
 
-        with self._block(f'void {memfn}({param_type} value) {{', '}'):
-            self._writer.write_line(f'{body}')
-            if (set_has):
+        with self._block(f"void {memfn}({setter_type} value) {{", "}"):
+            self._writer.write_line(body)
+            if set_has:
                 self._writer.write_line(set_has)
         self._writer.write_empty_line()
+
+        # If the storage type doesn't match the setter type and the field supports it, then
+        # generate the setter for instances of the storage type.
+        if storage_type != setter_type and cpp_type_info.has_storage_type_setter():
+            if field.chained_struct_field:
+                storage_setter_body = "{}.{}(std::move(value));".format(
+                    _get_field_member_name(field.chained_struct_field), memfn)
+            else:
+                storage_setter_body = cpp_type_info.get_storage_type_setter_body(
+                    _get_field_member_name(field), validator)
+
+            with self._block(f"void {memfn}({storage_type} value) {{", "}"):
+                self._writer.write_line(storage_setter_body)
+                if set_has:
+                    self._writer.write_line(set_has)
+            self._writer.write_empty_line()
+
+            # There may be types that are implicitly convertible to both the setter type and storage
+            # type (for instance, when dealing with string fields). This could make calls to the
+            # setter ambiguous. This template takes over when a type is implicitly convertible to
+            # the storage type, resolving the ambiguity. It just does the conversion and calls the
+            # storage type setter.
+            with self._block("template<typename T,", ">"):
+                self._writer.write_line(
+                    f"std::enable_if_t<std::is_convertible_v<T, {storage_type}>, int> = 0")
+            with self._block(f"void {memfn}(const T& value) {{", "}"):
+                self._writer.write_line(f"{memfn}({storage_type}{{value}});")
 
     def gen_constexpr_getters(self):
         # type: () -> None
@@ -1268,7 +1297,7 @@ class _CppHeaderFileWriter(_CppFileWriterBase):
                                 self.gen_description_comment(field.description)
                             self.gen_getter(struct, field)
                             if not struct.immutable or (field.type and field.type.internal_only):
-                                self.gen_setter(field)
+                                self.gen_setters(field)
 
                     # Generate getters for any constexpr/compile-time struct data
                     self.write_empty_line()
@@ -1754,6 +1783,11 @@ class _CppSourceFileWriter(_CppFileWriterBase):
         cpp_type_info = cpp_types.get_cpp_type(field)
         cpp_type = cpp_type_info.get_type_name()
 
+        # If field (cpp_type) is the same type as sequence.objs, just copy and skip loop
+        if cpp_type == "mongo::BSONObj" and not field.type.deserializer:
+            self._writer.write_line('%s = sequence.objs;' % (_get_field_member_name(field)))
+            return
+
         self._writer.write_line('std::vector<%s> values;' % (cpp_type))
         self._writer.write_line('values.reserve(sequence.objs.size());')
         self._writer.write_empty_line()
@@ -1959,7 +1993,8 @@ class _CppSourceFileWriter(_CppFileWriterBase):
 
         field_usage_check = _get_field_usage_checker(self._writer, struct)
         if isinstance(struct, ast.Command):
-            self._writer.write_line('BSONElement commandElement;')
+            if struct.namespace != common.COMMAND_NAMESPACE_IGNORED:
+                self._writer.write_line('BSONElement commandElement;')
             self._writer.write_line('bool firstFieldFound = false;')
             self._writer.write_empty_line()
 
@@ -2632,8 +2667,8 @@ class _CppSourceFileWriter(_CppFileWriterBase):
         if isinstance(struct, ast.Command):
             known_name = "_knownOP_MSGFields" if is_op_msg_request else "_knownBSONFields"
             self._writer.write_line(
-                "IDLParserContext::appendGenericCommandArguments(commandPassthroughFields, %s, builder);"
-                % (known_name))
+                "::mongo::appendGenericCommandArguments(commandPassthroughFields, %s, builder);" %
+                (known_name))
             self._writer.write_empty_line()
 
     def gen_bson_serializer_method(self, struct):

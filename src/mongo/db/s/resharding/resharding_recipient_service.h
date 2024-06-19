@@ -262,6 +262,10 @@ private:
     void _cleanupReshardingCollections(bool aborted,
                                        const CancelableOperationContextFactory& factory);
 
+    // Transitions the on-disk and in-memory state to 'newState'.
+    void _transitionState(RecipientStateEnum newState,
+                          const CancelableOperationContextFactory& factory);
+
     // Transitions the on-disk and in-memory state to the state defined in 'newRecipientCtx'.
     void _transitionState(RecipientShardContext&& newRecipientCtx,
                           boost::optional<CloneDetails>&& cloneDetails,
@@ -272,14 +276,6 @@ private:
     void _transitionToCreatingCollection(CloneDetails cloneDetails,
                                          boost::optional<mongo::Date_t> startConfigTxnCloneTime,
                                          const CancelableOperationContextFactory& factory);
-
-    void _transitionToCloning(const CancelableOperationContextFactory& factory);
-
-    void _transitionToBuildingIndex(const CancelableOperationContextFactory& factory);
-
-    void _transitionToApplying(const CancelableOperationContextFactory& factory);
-
-    void _transitionToStrictConsistency(const CancelableOperationContextFactory& factory);
 
     void _transitionToError(Status abortReason, const CancelableOperationContextFactory& factory);
 
@@ -327,7 +323,7 @@ private:
     CancellationToken _initAbortSource(const CancellationToken& stepdownToken);
 
     // Get indexesToBuild and indexesBuilt from the index catalog, then save them in _metrics
-    void _fetchBuildIndexMetrics();
+    void _tryFetchBuildIndexMetrics(OperationContext* opCtx);
 
 
     // The primary-only service instance corresponding to the recipient instance. Not owned.

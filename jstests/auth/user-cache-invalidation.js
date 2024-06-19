@@ -1,5 +1,5 @@
 // Test for invalidation of records across invalidation boundaries.
-// @tags: [requires_replication]
+// @tags: [requires_replication,does_not_support_stepdowns]
 
 import {configureFailPoint} from "jstests/libs/fail_point_util.js";
 import {Thread} from "jstests/libs/parallelTester.js";
@@ -91,7 +91,7 @@ function assertLacksLog(conn, cond, start, end) {
  * Create a user with read permission and simply
  * auth and read in a parallel shell.
  *
- * We use FailPoint 'authLocalGetUser.resolveRolesDelayMS' to
+ * We use FailPoint 'authLocalGetUser.resolveUserDelayMS' to
  * give us time to invalidate the user mid-acquisition.
  *
  * We also use pauseBatchApplicationBeforeCompletion with replsets
@@ -137,11 +137,11 @@ function runTest(writeNode, readNode, awaitReplication, lock, unlock) {
         readNode, 'waitForUserCacheInvalidation', {userName: {db: testDB, user: testUser}});
 
     // We need some time to mutate the auth state before the acquisition completes.
-    const kResolveRolesDelayMS = 5 * 1000;
+    const kResolveUserDelayMS = 5 * 1000;
     assert.commandWorked(readAdmin.runCommand({
         configureFailPoint: 'authLocalGetUser',
         mode: 'alwaysOn',
-        data: {resolveRolesDelayMS: NumberInt(kResolveRolesDelayMS)}
+        data: {resolveUserDelayMS: NumberInt(kResolveUserDelayMS)}
     }));
 
     const thread = new Thread(function(port, testUser, testDB) {
@@ -226,8 +226,12 @@ function runTest(writeNode, readNode, awaitReplication, lock, unlock) {
     for (let i = 0; i < cfg.members.length; ++i) {
         cfg.members[i].priority = i ? 0 : 1;
     }
-    rst.initiate(cfg);
+    rst.initiateWithHighElectionTimeout(cfg);
     rst.awaitSecondaryNodes();
+
+    // Freeze secondaries to avoid surprise stepdowns.
+    rst.getSecondaries().forEach(rst.freeze);
+    rst.awaitReplication();
 
     // Now identify the permanent primary and secondary we'll use.
     const primary = rst.getPrimary();

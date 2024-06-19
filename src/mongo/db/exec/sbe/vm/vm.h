@@ -179,7 +179,7 @@ struct Instruction {
         isNull,
         isObject,
         isArray,
-        isInListData,
+        isInList,
         isString,
         isNumber,
         isBinData,
@@ -190,6 +190,7 @@ struct Instruction {
         isMinKey,
         isMaxKey,
         isTimestamp,
+        isKeyString,
         typeMatchImm,
 
         function,
@@ -401,8 +402,8 @@ struct Instruction {
                 return "isObject";
             case isArray:
                 return "isArray";
-            case isInListData:
-                return "isInListData";
+            case isInList:
+                return "isInList";
             case isString:
                 return "isString";
             case isNumber:
@@ -423,6 +424,8 @@ struct Instruction {
                 return "isMaxKey";
             case isTimestamp:
                 return "isTimestamp";
+            case isKeyString:
+                return "isKeyString";
             case typeMatchImm:
                 return "typeMatchImm";
             case function:
@@ -889,9 +892,23 @@ int32_t updateAndCheckMemUsage(value::Array* state,
                                int32_t memLimit,
                                size_t idx = static_cast<size_t>(AggMultiElems::kMemUsage));
 
-struct MakeObjStackOffsets {
+class CodeFragment;
+
+struct ProduceObjContext {
     int fieldsStackOffset = 0;
     int argsStackOffset = 0;
+    const CodeFragment* code;
+};
+
+/**
+ * This struct is used by traverseAndProduceBsonObj() to hold args that stay the same across
+ * each level of recursion. Also, by making use of this struct, on most common platforms we
+ * will be able to pass all of traverseAndProduceBsonObj()'s args via CPU registers (rather
+ * than passing them via the native stack).
+ */
+struct ProduceObjContextAndSpec {
+    ProduceObjContext produceObjCtx;
+    const MakeObjSpec* spec;
 };
 
 /**
@@ -1160,7 +1177,7 @@ public:
     void appendIsNull(Instruction::Parameter input);
     void appendIsObject(Instruction::Parameter input);
     void appendIsArray(Instruction::Parameter input);
-    void appendIsInListData(Instruction::Parameter input);
+    void appendIsInList(Instruction::Parameter input);
     void appendIsString(Instruction::Parameter input);
     void appendIsNumber(Instruction::Parameter input);
     void appendIsBinData(Instruction::Parameter input);
@@ -1171,6 +1188,7 @@ public:
     void appendIsMinKey(Instruction::Parameter input);
     void appendIsMaxKey(Instruction::Parameter input);
     void appendIsTimestamp(Instruction::Parameter input);
+    void appendIsKeyString(Instruction::Parameter input);
     void appendTypeMatch(Instruction::Parameter input, uint32_t mask);
     void appendFunction(Builtin f, ArityType arity);
     void appendLabelJump(LabelId labelId);
@@ -1318,13 +1336,13 @@ public:
     class TopBottomArgsFromBlocks;
 
     ByteCode() {
-        _argStack = reinterpret_cast<uint8_t*>(mongoMalloc(sizeOfElement * 4));
+        _argStack = static_cast<uint8_t*>(::operator new(sizeOfElement * 4));
         _argStackEnd = _argStack + sizeOfElement * 4;
         _argStackTop = _argStack - sizeOfElement;
     }
 
     ~ByteCode() {
-        std::free(_argStack);
+        ::operator delete(_argStack, _argStackEnd - _argStack);
     }
 
     ByteCode(const ByteCode&) = delete;
@@ -1334,7 +1352,7 @@ public:
     bool runPredicate(const CodeFragment* code);
 
     typedef std::tuple<value::Array*, value::Array*, size_t, size_t, int32_t, int32_t, bool>
-        multiAccState;
+        MultiAccState;
 
 private:
     void runInternal(const CodeFragment* code, int64_t position);
@@ -1671,9 +1689,8 @@ private:
      * directly passed in as C++ parameters -- instead the computed input values are passed via
      * the VM's stack.)
      */
-    MONGO_COMPILER_ALWAYS_INLINE void produceBsonObject(const MakeObjSpec* spec,
-                                                        MakeObjStackOffsets stackOffsets,
-                                                        const CodeFragment* code,
+    MONGO_COMPILER_ALWAYS_INLINE void produceBsonObject(const ProduceObjContext& ctx,
+                                                        const MakeObjSpec* spec,
                                                         UniqueBSONObjBuilder& bob,
                                                         value::TypeTags rootTag,
                                                         value::Value rootVal) {
@@ -1681,58 +1698,91 @@ private:
 
         const auto& fields = spec->fields;
 
-        // Invoke the produceBsonObject() lambda with the appropriate iterator type. For
+        // Invoke produceBsonObject<CursorT>() with the appropriate cursor type. For
         // SBE objects, we use ObjectCursor. For all other types, we use BsonObjCursor.
         if (rootTag == TypeTags::Object) {
             auto obj = value::getObjectView(rootVal);
 
-            produceBsonObject(spec, stackOffsets, code, bob, ObjectCursor(fields, obj));
+            produceBsonObject(ctx, spec, bob, ObjectCursor(fields, obj));
         } else {
             const char* obj = rootTag == TypeTags::bsonObject
                 ? value::bitcastTo<const char*>(rootVal)
                 : BSONObj::kEmptyObject.objdata();
 
-            produceBsonObject(spec, stackOffsets, code, bob, BsonObjCursor(fields, obj));
+            produceBsonObject(ctx, spec, bob, BsonObjCursor(fields, obj));
         }
     }
 
-    void produceBsonObjectWithInputFields(const MakeObjSpec* spec,
-                                          MakeObjStackOffsets stackOffsets,
-                                          const CodeFragment* code,
+    void produceBsonObjectWithInputFields(const ProduceObjContext& ctx,
+                                          const MakeObjSpec* spec,
                                           UniqueBSONObjBuilder& bob,
                                           value::TypeTags objTag,
                                           value::Value objVal);
 
     template <typename CursorT>
-    void produceBsonObject(const MakeObjSpec* spec,
-                           MakeObjStackOffsets stackOffsets,
-                           const CodeFragment* code,
+    void produceBsonObject(const ProduceObjContext& ctx,
+                           const MakeObjSpec* spec,
                            UniqueBSONObjBuilder& bob,
                            CursorT cursor);
 
-    /**
-     * This struct is used by traverseAndProduceBsonObj() to hold args that stay the same across
-     * each level of recursion. Also, by making use of this struct, on most common platforms we
-     * will be able to pass all of traverseAndProduceBsonObj()'s args via CPU registers (rather
-     * than passing them via the native stack).
-     */
-    struct TraverseAndProduceBsonObjContext {
-        const MakeObjSpec* spec;
-        MakeObjStackOffsets stackOffsets;
-        const CodeFragment* code;
-    };
-
-    void traverseAndProduceBsonObj(const TraverseAndProduceBsonObjContext& ctx,
+    void traverseAndProduceBsonObj(const ProduceObjContextAndSpec& ctx,
                                    value::TypeTags tag,
                                    value::Value val,
                                    int64_t maxDepth,
                                    UniqueBSONArrayBuilder& bab);
 
-    void traverseAndProduceBsonObj(const TraverseAndProduceBsonObjContext& ctx,
+    void traverseAndProduceBsonObj(const ProduceObjContextAndSpec& ctx,
                                    value::TypeTags tag,
                                    value::Value val,
                                    StringData fieldName,
                                    UniqueBSONObjBuilder& bob);
+
+    MONGO_COMPILER_ALWAYS_INLINE void performSetArgAction(const ProduceObjContext& ctx,
+                                                          const MakeObjSpec::FieldAction& action,
+                                                          StringData fieldName,
+                                                          UniqueBSONObjBuilder& bob) {
+        size_t argIdx = action.getSetArgIdx();
+        auto [_, tag, val] = getFromStack(ctx.argsStackOffset + argIdx);
+        bson::appendValueToBsonObj(bob, fieldName, tag, val);
+    }
+
+    MONGO_COMPILER_ALWAYS_INLINE void performAddArgAction(const ProduceObjContext& ctx,
+                                                          const MakeObjSpec::FieldAction& action,
+                                                          StringData fieldName,
+                                                          UniqueBSONObjBuilder& bob) {
+        size_t argIdx = action.getAddArgIdx();
+        auto [_, tag, val] = getFromStack(ctx.argsStackOffset + argIdx);
+        bson::appendValueToBsonObj(bob, fieldName, tag, val);
+    }
+
+    MONGO_COMPILER_ALWAYS_INLINE void performLambdaArgAction(const ProduceObjContext& ctx,
+                                                             const MakeObjSpec::FieldAction& action,
+                                                             value::TypeTags tag,
+                                                             value::Value val,
+                                                             StringData fieldName,
+                                                             UniqueBSONObjBuilder& bob) {
+        const auto& lambdaArg = action.getLambdaArg();
+        size_t argIdx = lambdaArg.argIdx;
+        auto [_, lamTag, lamVal] = getFromStack(ctx.argsStackOffset + argIdx);
+        tassert(7103506, "Expected arg to be LocalLambda", lamTag == value::TypeTags::LocalLambda);
+
+        pushStack(false, tag, val);
+        runLambdaInternal(ctx.code, value::bitcastTo<int64_t>(lamVal));
+
+        auto [__, outputTag, outputVal] = getFromStack(0);
+        bson::appendValueToBsonObj(bob, fieldName, outputTag, outputVal);
+        popAndReleaseStack();
+    }
+
+    MONGO_COMPILER_ALWAYS_INLINE void performMakeObjAction(const ProduceObjContext& ctx,
+                                                           const MakeObjSpec::FieldAction& action,
+                                                           value::TypeTags tag,
+                                                           value::Value val,
+                                                           StringData fieldName,
+                                                           UniqueBSONObjBuilder& bob) {
+        const MakeObjSpec* spec = action.getMakeObjSpec();
+        traverseAndProduceBsonObj({ctx, spec}, tag, val, fieldName, bob);
+    }
 
     template <bool IsBlockBuiltin = false>
     bool validateDateTruncParameters(TimeUnit* unit,
@@ -1917,7 +1967,7 @@ private:
     FastTuple<bool, value::TypeTags, value::Value> builtinObjectToArray(ArityType arity);
     FastTuple<bool, value::TypeTags, value::Value> builtinArrayToObject(ArityType arity);
 
-    static multiAccState getMultiAccState(value::TypeTags stateTag, value::Value stateVal);
+    static MultiAccState getMultiAccState(value::TypeTags stateTag, value::Value stateVal);
 
     FastTuple<bool, value::TypeTags, value::Value> builtinAggFirstNNeedsMoreInput(ArityType arity);
     FastTuple<bool, value::TypeTags, value::Value> builtinAggFirstN(ArityType arity);
@@ -2483,36 +2533,31 @@ class ObjWithInputFieldsCursor;
 
 // There are five instantiations of the templated produceBsonObject() method, one for each
 // type of MakeObj input cursor.
-extern template void ByteCode::produceBsonObject<BsonObjCursor>(const MakeObjSpec* spec,
-                                                                MakeObjStackOffsets stackOffsets,
-                                                                const CodeFragment* code,
+extern template void ByteCode::produceBsonObject<BsonObjCursor>(const ProduceObjContext& ctx,
+                                                                const MakeObjSpec* spec,
                                                                 UniqueBSONObjBuilder& bob,
                                                                 BsonObjCursor cursor);
 
-extern template void ByteCode::produceBsonObject<ObjectCursor>(const MakeObjSpec* spec,
-                                                               MakeObjStackOffsets stackOffsets,
-                                                               const CodeFragment* code,
+extern template void ByteCode::produceBsonObject<ObjectCursor>(const ProduceObjContext& ctx,
+                                                               const MakeObjSpec* spec,
                                                                UniqueBSONObjBuilder& bob,
                                                                ObjectCursor cursor);
 
 extern template void ByteCode::produceBsonObject<InputFieldsOnlyCursor>(
+    const ProduceObjContext& ctx,
     const MakeObjSpec* spec,
-    MakeObjStackOffsets stackOffsets,
-    const CodeFragment* code,
     UniqueBSONObjBuilder& bob,
     InputFieldsOnlyCursor cursor);
 
 extern template void ByteCode::produceBsonObject<BsonObjWithInputFieldsCursor>(
+    const ProduceObjContext& ctx,
     const MakeObjSpec* spec,
-    MakeObjStackOffsets stackOffsets,
-    const CodeFragment* code,
     UniqueBSONObjBuilder& bob,
     BsonObjWithInputFieldsCursor cursor);
 
 extern template void ByteCode::produceBsonObject<ObjWithInputFieldsCursor>(
+    const ProduceObjContext& ctx,
     const MakeObjSpec* spec,
-    MakeObjStackOffsets stackOffsets,
-    const CodeFragment* code,
     UniqueBSONObjBuilder& bob,
     ObjWithInputFieldsCursor cursor);
 }  // namespace vm

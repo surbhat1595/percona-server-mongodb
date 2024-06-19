@@ -94,7 +94,6 @@ namespace {
 
 using executor::NetworkInterfaceMock;
 using executor::RemoteCommandRequest;
-using executor::RemoteCommandResponse;
 
 typedef ReplicationCoordinator::ReplSetReconfigArgs ReplSetReconfigArgs;
 
@@ -367,20 +366,18 @@ TEST_F(ReplCoordTest,
     ASSERT_TRUE(result.obj().isEmpty());
 }
 
-void doReplSetInitiate(ReplicationCoordinatorImpl* replCoord,
-                       Status* status,
-                       OperationContext* opCtx) {
+void doReplSetInitiate(ReplicationCoordinatorImpl* replCoord, Status* status) {
+    // Client::setCurrent(getGlobalServiceContext()->getService()->makeClient("replSetInitiate"));
     BSONObjBuilder garbage;
     *status =
-        replCoord->processReplSetInitiate(opCtx,
-                                          BSON("_id"
-                                               << "mySet"
-                                               << "version" << 1 << "members"
-                                               << BSON_ARRAY(BSON("_id" << 1 << "host"
-                                                                        << "node1:12345")
-                                                             << BSON("_id" << 2 << "host"
-                                                                           << "node2:12345"))),
-                                          &garbage);
+        replCoord->runReplSetInitiate_forTest(BSON("_id"
+                                                   << "mySet"
+                                                   << "version" << 1 << "members"
+                                                   << BSON_ARRAY(BSON("_id" << 1 << "host"
+                                                                            << "node1:12345")
+                                                                 << BSON("_id" << 2 << "host"
+                                                                               << "node2:12345"))),
+                                              &garbage);
 }
 
 void doReplSetReconfig(ReplicationCoordinatorImpl* replCoord,
@@ -576,8 +573,11 @@ TEST_F(ReplCoordTest, NodeReturnsConfigurationInProgressWhenReceivingAReconfigWh
 
     // initiate
     Status status(ErrorCodes::InternalError, "Not Set");
-    const auto opCtx = makeOperationContext();
-    stdx::thread initateThread([&] { doReplSetInitiate(getReplCoord(), &status, opCtx.get()); });
+    stdx::thread initateThread([&] {
+        Client::setCurrent(getServiceContext()->getService()->makeClient("replSetInitiate"));
+        doReplSetInitiate(getReplCoord(), &status);
+    });
+
     getNet()->enterNetwork();
     getNet()->blackHole(getNet()->getNextReadyRequest());
     getNet()->exitNetwork();
@@ -593,10 +593,11 @@ TEST_F(ReplCoordTest, NodeReturnsConfigurationInProgressWhenReceivingAReconfigWh
                                                       << "node1:12345")
                                            << BSON("_id" << 2 << "host"
                                                          << "node2:12345")));
+
+    const auto opCtx = makeOperationContext();
     ASSERT_EQUALS(ErrorCodes::ConfigurationInProgress,
                   getReplCoord()->processReplSetReconfig(opCtx.get(), args, &result));
     ASSERT_TRUE(result.obj().isEmpty());
-
     shutdown(opCtx.get());
     initateThread.join();
 }
@@ -2620,7 +2621,8 @@ TEST_F(ReplCoordTest, StepUpReconfigConcurrentWithHeartbeatReconfig) {
     ASSERT_EQUALS(1, countTextFormatLogLinesContaining("Not scheduling a heartbeat reconfig"));
 
     // Let drain mode complete.
-    signalDrainComplete(opCtx.get());
+    signalWriterDrainComplete(opCtx.get());
+    signalApplierDrainComplete(opCtx.get());
 
     // We should have moved to a new term in the election, and our config should have the same term.
     ASSERT_EQUALS(getReplCoord()->getTerm(), 1);
@@ -2710,7 +2712,8 @@ TEST_F(ReplCoordTest, StepUpReconfigConcurrentWithForceHeartbeatReconfig) {
         // At this point the heartbeat reconfig should be in progress but blocked from completion by
         // the failpoint. We now let drain mode complete. The step up reconfig should be interrupted
         // by the in progress heartbeat reconfig.
-        signalDrainComplete(opCtx.get());
+        signalWriterDrainComplete(opCtx.get());
+        signalApplierDrainComplete(opCtx.get());
     }
 
     // The failpoint should be released now, allowing the heartbeat reconfig to complete. We run the

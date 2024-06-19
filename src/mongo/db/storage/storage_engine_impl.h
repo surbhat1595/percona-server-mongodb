@@ -110,6 +110,9 @@ public:
     }
 
     Status dropDatabase(OperationContext* opCtx, const DatabaseName& dbName) override;
+    Status dropCollectionsWithPrefix(OperationContext* opCtx,
+                                     const DatabaseName& dbName,
+                                     const std::string& collectionNamePrefix) override;
 
     void flushAllFiles(OperationContext* opCtx, bool callerHoldsReadLock) override;
 
@@ -421,10 +424,11 @@ private:
                          RecordId catalogId,
                          const NamespaceString& nss,
                          bool forRepair,
-                         Timestamp minVisibleTs,
                          Timestamp minValidTs);
 
-    Status _dropCollections(OperationContext* opCtx, const std::vector<UUID>& toDrop);
+    Status _dropCollections(OperationContext* opCtx,
+                            const std::vector<UUID>& toDrop,
+                            const std::string& collectionNamePrefix = "");
 
     /**
      * When called in a repair context (_options.forRepair=true), attempts to recover a collection

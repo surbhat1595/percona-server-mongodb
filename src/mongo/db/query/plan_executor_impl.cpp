@@ -54,7 +54,9 @@
 #include "mongo/db/exec/trial_stage.h"
 #include "mongo/db/exec/update_stage.h"
 #include "mongo/db/exec/working_set.h"
+#include "mongo/db/query/cursor_response.h"
 #include "mongo/db/query/find_command.h"
+#include "mongo/db/query/find_common.h"
 #include "mongo/db/query/mock_yield_policies.h"
 #include "mongo/db/query/plan_executor_impl.h"
 #include "mongo/db/query/plan_explainer_factory.h"
@@ -82,7 +84,6 @@
 
 namespace mongo {
 using namespace fmt::literals;
-using std::shared_ptr;
 using std::string;
 using std::unique_ptr;
 using std::vector;
@@ -255,6 +256,41 @@ void PlanExecutorImpl::reattachToOperationContext(OperationContext* opCtx) {
     _currentState = kSaved;
 }
 
+namespace {
+/**
+ * Helper function used to determine if we need to hang before inserts.
+ */
+void hangBeforeShouldWaitForInsertsIfFailpointEnabled(PlanExecutorImpl* exec) {
+    if (MONGO_unlikely(
+            planExecutorHangBeforeShouldWaitForInserts.shouldFail([exec](const BSONObj& data) {
+                auto fpNss = NamespaceStringUtil::parseFailPointData(data, "namespace"_sd);
+                return fpNss.isEmpty() || fpNss == exec->nss();
+            }))) {
+        LOGV2(20946,
+              "PlanExecutor - planExecutorHangBeforeShouldWaitForInserts fail point "
+              "enabled. Blocking until fail point is disabled");
+        planExecutorHangBeforeShouldWaitForInserts.pauseWhileSet();
+    }
+}
+
+/**
+ * Helper function used to construct lambda passed into yielding logic.
+ */
+void doYield(OperationContext* opCtx) {
+    // If we yielded because we encountered a sharding critical section, wait for the critical
+    // section to end before continuing. By waiting for the critical section to be exited we avoid
+    // busy spinning immediately and encountering the same critical section again. It is important
+    // that this wait happens after having released the lock hierarchy -- otherwise deadlocks could
+    // happen, or the very least, locks would be unnecessarily held while waiting.
+    const auto& shardingCriticalSection = planExecutorShardingCriticalSectionFuture(opCtx);
+    if (shardingCriticalSection) {
+        OperationShardingState::waitForCriticalSectionToComplete(opCtx, *shardingCriticalSection)
+            .ignore();
+        planExecutorShardingCriticalSectionFuture(opCtx).reset();
+    }
+}
+}  // namespace
+
 PlanExecutor::ExecState PlanExecutorImpl::getNext(BSONObj* objOut, RecordId* dlOut) {
     const auto state = getNextDocument(&_docOutput, dlOut);
     if (objOut && state == ExecState::ADVANCED) {
@@ -302,11 +338,8 @@ PlanExecutor::ExecState PlanExecutorImpl::_getNextImpl(Snapshotted<Document>* ob
     // Capped insert data; declared outside the loop so we hold a shared pointer to the capped
     // insert notifier the entire time we are in the loop.  Holding a shared pointer to the
     // capped insert notifier is necessary for the notifierVersion to advance.
-    std::unique_ptr<insert_listener::Notifier> notifier;
-    if (insert_listener::shouldListenForInserts(_opCtx, _cq.get())) {
-        // We always construct the insert_listener::Notifier for awaitData cursors.
-        notifier = insert_listener::getCappedInsertNotifier(_opCtx, _nss, _yieldPolicy.get());
-    }
+    auto notifier = makeNotifier();
+
     for (;;) {
         // These are the conditions which can cause us to yield:
         //   1) The yield policy's timer elapsed, or
@@ -315,19 +348,7 @@ PlanExecutor::ExecState PlanExecutorImpl::_getNextImpl(Snapshotted<Document>* ob
         // In all cases, the actual yielding happens here.
 
         const auto whileYieldingFn = [&]() {
-            // If we yielded because we encountered a sharding critical section, wait for the
-            // critical section to end before continuing. By waiting for the critical section to be
-            // exited we avoid busy spinning immediately and encountering the same critical section
-            // again. It is important that this wait happens after having released the lock
-            // hierarchy -- otherwise deadlocks could happen, or the very least, locks would be
-            // unnecessarily held while waiting.
-            const auto& shardingCriticalSection = planExecutorShardingCriticalSectionFuture(_opCtx);
-            if (shardingCriticalSection) {
-                OperationShardingState::waitForCriticalSectionToComplete(_opCtx,
-                                                                         *shardingCriticalSection)
-                    .ignore();
-                planExecutorShardingCriticalSectionFuture(_opCtx).reset();
-            }
+            doYield(_opCtx);
         };
 
         if (_yieldPolicy->shouldYieldOrInterrupt(_opCtx)) {
@@ -387,73 +408,196 @@ PlanExecutor::ExecState PlanExecutorImpl::_getNextImpl(Snapshotted<Document>* ob
                 return PlanExecutor::ADVANCED;
             }
             // This result didn't have the data the caller wanted, try again.
+
         } else if (PlanStage::NEED_YIELD == code) {
-            invariant(id == WorkingSet::INVALID_ID);
-            invariant(shard_role_details::getRecoveryUnit(_opCtx));
+            _handleNeedYield(writeConflictsInARow, tempUnavailErrorsInARow);
 
-            if (_expCtx->getTemporarilyUnavailableException()) {
-                _expCtx->setTemporarilyUnavailableException(false);
-
-                if (!_yieldPolicy->canAutoYield()) {
-                    throwTemporarilyUnavailableException(
-                        "got TemporarilyUnavailable exception on a plan that cannot auto-yield");
-                }
-
-                tempUnavailErrorsInARow++;
-                handleTemporarilyUnavailableException(
-                    _opCtx,
-                    tempUnavailErrorsInARow,
-                    "plan executor",
-                    NamespaceStringOrUUID(_nss),
-                    ExceptionFor<ErrorCodes::TemporarilyUnavailable>(
-                        Status(ErrorCodes::TemporarilyUnavailable, "temporarily unavailable")),
-                    writeConflictsInARow);
-            } else {
-                // We're yielding because of a WriteConflictException.
-                if (!_yieldPolicy->canAutoYield() ||
-                    MONGO_unlikely(skipWriteConflictRetries.shouldFail())) {
-                    throwWriteConflictException(
-                        "Write conflict during plan execution and yielding is disabled.");
-                }
-
-                CurOp::get(_opCtx)->debug().additiveMetrics.incrementWriteConflicts(1);
-                writeConflictsInARow++;
-                logWriteConflictAndBackoff(
-                    writeConflictsInARow, "plan execution", ""_sd, NamespaceStringOrUUID(_nss));
-            }
-
-            // Yield next time through the loop.
-            invariant(_yieldPolicy->canAutoYield());
-            _yieldPolicy->forceYield();
         } else if (PlanStage::NEED_TIME == code) {
             // Fall through to yield check at end of large conditional.
-        } else {
-            invariant(PlanStage::IS_EOF == code);
-            if (MONGO_unlikely(planExecutorHangBeforeShouldWaitForInserts.shouldFail(
-                    [this](const BSONObj& data) {
-                        auto fpNss = NamespaceStringUtil::parseFailPointData(data, "namespace"_sd);
-                        return fpNss.isEmpty() || fpNss == _nss;
-                    }))) {
-                LOGV2(20946,
-                      "PlanExecutor - planExecutorHangBeforeShouldWaitForInserts fail point "
-                      "enabled. Blocking until fail point is disabled");
-                planExecutorHangBeforeShouldWaitForInserts.pauseWhileSet();
-            }
 
-            // The !notifier check is necessary because shouldWaitForInserts can return 'true' when
-            // shouldListenForInserts returned 'false' (above) in the case of a deadline becoming
-            // "unexpired" due to the system clock going backwards.
-            if (!notifier ||
-                !insert_listener::shouldWaitForInserts(_opCtx, _cq.get(), _yieldPolicy.get())) {
-                return PlanExecutor::IS_EOF;
-            }
-
-            insert_listener::waitForInserts(_opCtx, _yieldPolicy.get(), notifier);
-
-            // There may be more results, keep going.
-            continue;
+        } else if (_handleEOFAndExit(code, notifier)) {
+            return PlanExecutor::IS_EOF;
         }
     }
+}
+
+namespace {
+BSONObj makeBsonWithMetadata(Document& doc, WorkingSetMember* member) {
+    if (member->metadata()) {
+        MutableDocument md(std::move(doc));
+        md.setMetadata(member->releaseMetadata());
+        return md.freeze().toBsonWithMetaData();
+    }
+
+    return doc.toBsonWithMetaData();
+}
+}  // namespace
+
+std::unique_ptr<insert_listener::Notifier> PlanExecutorImpl::makeNotifier() {
+    if (insert_listener::shouldListenForInserts(_opCtx, _cq.get())) {
+        // We always construct the insert_listener::Notifier for awaitData cursors.
+        return insert_listener::getCappedInsertNotifier(_opCtx, _nss, _yieldPolicy.get());
+    }
+    return nullptr;
+}
+
+void PlanExecutorImpl::_handleNeedYield(size_t& writeConflictsInARow,
+                                        size_t& tempUnavailErrorsInARow) {
+    invariant(shard_role_details::getRecoveryUnit(_opCtx));
+
+    if (_expCtx->getTemporarilyUnavailableException()) {
+        _expCtx->setTemporarilyUnavailableException(false);
+
+        if (!_yieldPolicy->canAutoYield()) {
+            throwTemporarilyUnavailableException(
+                "got TemporarilyUnavailable exception on a plan that "
+                "cannot "
+                "auto-yield");
+        }
+
+        tempUnavailErrorsInARow++;
+        handleTemporarilyUnavailableException(
+            _opCtx,
+            tempUnavailErrorsInARow,
+            "plan executor",
+            NamespaceStringOrUUID(_nss),
+            ExceptionFor<ErrorCodes::TemporarilyUnavailable>(
+                Status(ErrorCodes::TemporarilyUnavailable, "temporarily unavailable")),
+            writeConflictsInARow);
+
+    } else {
+        // We're yielding because of a WriteConflictException.
+        if (!_yieldPolicy->canAutoYield() ||
+            MONGO_unlikely(skipWriteConflictRetries.shouldFail())) {
+            throwWriteConflictException(
+                "Write conflict during plan execution and yielding is "
+                "disabled.");
+        }
+
+        CurOp::get(_opCtx)->debug().additiveMetrics.incrementWriteConflicts(1);
+        writeConflictsInARow++;
+        logWriteConflictAndBackoff(
+            writeConflictsInARow, "plan execution", ""_sd, NamespaceStringOrUUID(_nss));
+    }
+
+    // Yield next time through the loop.
+    invariant(_yieldPolicy->canAutoYield());
+    _yieldPolicy->forceYield();
+}
+
+bool PlanExecutorImpl::_handleEOFAndExit(PlanStage::StageState code,
+                                         std::unique_ptr<insert_listener::Notifier>& notifier) {
+    invariant(PlanStage::IS_EOF == code);
+    hangBeforeShouldWaitForInsertsIfFailpointEnabled(this);
+
+    // The !notifier check is necessary because shouldWaitForInserts can return 'true' when
+    // shouldListenForInserts returned 'false' (above) in the case of a deadline becoming
+    // "unexpired" due to the system clock going backwards.
+    if (!notifier ||
+        !insert_listener::shouldWaitForInserts(_opCtx, _cq.get(), _yieldPolicy.get())) {
+        // Time to exit.
+        return true;
+    }
+
+    insert_listener::waitForInserts(_opCtx, _yieldPolicy.get(), notifier);
+    return false;
+}
+
+size_t PlanExecutorImpl::getNextBatch(size_t batchSize, AppendBSONObjFn append) {
+    const bool includeMetadata = _expCtx && _expCtx->needsMerge;
+    if (batchSize == 0) {
+        return 0;
+    }
+
+    checkFailPointPlanExecAlwaysFails();
+    _checkIfKilled();
+
+    const auto whileYieldingFn = [opCtx = _opCtx]() {
+        return doYield(opCtx);
+    };
+    auto notifier = makeNotifier();
+
+    WorkingSetID id = WorkingSet::INVALID_ID;
+    WorkingSetMember* member;
+    PlanStage::StageState code;
+
+    // The below are incremented on every WriteConflict or TemporarilyUnavailable error
+    // accordingly, and reset to 0 on any successful call to _root->work.
+    size_t writeConflictsInARow = 0;
+    size_t tempUnavailErrorsInARow = 0;
+
+    size_t numResults = 0;
+    BSONObj objOut;
+
+    // Handle case where previous execution stashed a result.
+    if (!_stash.empty()) {
+        objOut = includeMetadata ? _stash.front().toBson() : _stash.front().toBsonWithMetaData();
+        _stash.pop_front();
+        append(objOut, getPostBatchResumeToken(), numResults);
+        numResults++;
+    }
+
+    for (;;) {
+        _checkIfMustYield(whileYieldingFn);
+
+        code = _root->work(&id);
+
+        if (code != PlanStage::NEED_YIELD) {
+            writeConflictsInARow = 0;
+            tempUnavailErrorsInARow = 0;
+        }
+
+        if (code == PlanStage::ADVANCED) {
+            // Process working set member.
+            member = _workingSet->get(id);
+            if (MONGO_likely(member->hasObj())) {
+                if (includeMetadata) {
+                    objOut = makeBsonWithMetadata(member->doc.value(), member);
+                } else {
+                    objOut = member->doc.value().toBson();
+                }
+
+            } else if (member->keyData.size() >= 1) {
+                if (includeMetadata) {
+                    _docOutput = Document{member->keyData[0].keyData};
+                    objOut = makeBsonWithMetadata(_docOutput, member);
+                } else {
+                    objOut = member->keyData[0].keyData;
+                }
+
+            } else {
+                _workingSet->free(id);
+                continue;  // Try to call work() again- we didn't get what we needed.
+            }
+
+            _workingSet->free(id);
+
+            if (MONGO_unlikely(!append(objOut, getPostBatchResumeToken(), numResults))) {
+                stashResult(objOut);
+                break;
+            }
+            numResults++;
+
+            // Only check if the query has been killed or if we've filled up the batch once a result
+            // has been produced. Doing these checks every loop can impact the performace of queries
+            // that repeatedly return NEED_TIME.
+            if (MONGO_unlikely(numResults >= batchSize)) {
+                break;
+            }
+
+            _checkIfKilled();
+
+        } else if (code == PlanStage::NEED_YIELD) {
+            _handleNeedYield(writeConflictsInARow, tempUnavailErrorsInARow);
+
+        } else if (code == PlanStage::NEED_TIME) {
+            // Do nothing except reset counters; need more time.
+
+        } else if (_handleEOFAndExit(code, notifier)) {
+            break;
+        }
+    }
+    return numResults;
 }
 
 bool PlanExecutorImpl::isEOF() {
@@ -473,33 +617,66 @@ void PlanExecutorImpl::dispose(OperationContext* opCtx) {
     _currentState = kDisposed;
 }
 
-void PlanExecutorImpl::_executePlan() {
-    invariant(_currentState == kUsable);
-    Document obj;
-    PlanExecutor::ExecState state = PlanExecutor::ADVANCED;
-    while (PlanExecutor::ADVANCED == state) {
-        state = this->getNextDocument(&obj, nullptr);
-    }
+void PlanExecutorImpl::executeExhaustive() {
+    // We don't check batch size or do anything with returned BSON in exhaustDoWork().
+    checkFailPointPlanExecAlwaysFails();
+    _checkIfKilled();
 
-    if (isMarkedAsKilled()) {
-        uassertStatusOK(_killStatus);
-    }
+    const auto whileYieldingFn = [opCtx = _opCtx]() {
+        return doYield(opCtx);
+    };
+    auto notifier = makeNotifier();
 
-    invariant(!isMarkedAsKilled());
-    invariant(PlanExecutor::IS_EOF == state);
+    WorkingSetID id = WorkingSet::INVALID_ID;
+    PlanStage::StageState code;
+
+    // The below are incremented on every WriteConflict or TemporarilyUnavailable error
+    // accordingly, and reset to 0 on any successful call to _root->work.
+    size_t writeConflictsInARow = 0;
+    size_t tempUnavailErrorsInARow = 0;
+
+    for (;;) {
+        _checkIfMustYield(whileYieldingFn);
+
+        code = _root->work(&id);
+
+        if (code != PlanStage::NEED_YIELD) {
+            writeConflictsInARow = 0;
+            tempUnavailErrorsInARow = 0;
+        }
+
+        if (code == PlanStage::ADVANCED) {
+            // Free WSM.
+            _workingSet->free(id);
+
+            // Only check if the query has been killed or if we've filled up the batch once a result
+            // has been produced. Doing these checks every loop can impact the performace of queries
+            // that repeatedly return NEED_TIME.
+            _checkIfKilled();
+
+        } else if (code == PlanStage::NEED_YIELD) {
+            _handleNeedYield(writeConflictsInARow, tempUnavailErrorsInARow);
+
+        } else if (code == PlanStage::NEED_TIME) {
+            // Do nothing except reset counters; need more time.
+
+        } else if (_handleEOFAndExit(code, notifier)) {
+            break;
+        }
+    }
 }
 
 long long PlanExecutorImpl::executeCount() {
     invariant(_root->stageType() == StageType::STAGE_COUNT ||
               _root->stageType() == StageType::STAGE_RECORD_STORE_FAST_COUNT);
 
-    _executePlan();
+    executeExhaustive();
     auto countStats = static_cast<const CountStats*>(_root->getSpecificStats());
     return countStats->nCounted;
 }
 
 UpdateResult PlanExecutorImpl::executeUpdate() {
-    _executePlan();
+    executeExhaustive();
     return getUpdateResult();
 }
 
@@ -565,7 +742,7 @@ UpdateResult PlanExecutorImpl::getUpdateResult() const {
 }
 
 long long PlanExecutorImpl::executeDelete() {
-    _executePlan();
+    executeExhaustive();
     return getDeleteResult();
 }
 
@@ -633,10 +810,6 @@ BatchedDeleteStats PlanExecutorImpl::getBatchedDeleteStats() {
 
 void PlanExecutorImpl::stashResult(const BSONObj& obj) {
     _stash.push_front(Document{obj.getOwned()});
-}
-
-bool PlanExecutorImpl::isMarkedAsKilled() const {
-    return !_killStatus.isOK();
 }
 
 Status PlanExecutorImpl::getKillStatus() {

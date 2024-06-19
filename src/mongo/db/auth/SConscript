@@ -14,25 +14,14 @@ env.SConscript(
 )
 
 env.Library(
-    target='auth_name',
-    source=[
-        'auth_name.cpp',
-    ],
-    LIBDEPS_PRIVATE=[
-        '$BUILD_DIR/mongo/db/server_base',
-        '$BUILD_DIR/mongo/db/service_context',
-    ],
-)
-
-env.Library(
     target='security_token',
     source=[
         'validated_tenancy_scope.idl',
-        'validated_tenancy_scope.cpp',
+        'validated_tenancy_scope_decoration.cpp',
     ],
-    LIBDEPS_PRIVATE=[
+    LIBDEPS=[
         '$BUILD_DIR/mongo/db/server_base',
-        'auth_name',
+        '$BUILD_DIR/mongo/db/service_context',
     ],
 )
 
@@ -66,12 +55,10 @@ env.Library(
         'role_name_or_string.cpp',
     ],
     LIBDEPS=[
-        'auth_name',
+        '$BUILD_DIR/mongo/db/server_base',
     ],
     LIBDEPS_PRIVATE=[
-        '$BUILD_DIR/mongo/db/server_base',
         '$BUILD_DIR/mongo/db/service_context',
-        '$BUILD_DIR/mongo/util/namespace_string_database_name_util',
         'auth_options',
         'cluster_auth_mode',
         'sasl_options',
@@ -136,7 +123,6 @@ env.Library(
     ],
     LIBDEPS=[
         '$BUILD_DIR/mongo/db/server_base',
-        '$BUILD_DIR/mongo/util/namespace_string_database_name_util',
         'auth',
         'auth_options',
         'authprivilege',
@@ -183,7 +169,6 @@ env.Library(
 env.Library(
     target='auth_impl_internal',
     source=[
-        'auth_types.idl',
         'authorization_manager_impl.cpp',
         'authorization_manager_impl_parameters.idl',
         'authorization_session_impl.cpp',
@@ -199,6 +184,7 @@ env.Library(
         '$BUILD_DIR/mongo/db/ldap/ldapmanager',
         '$BUILD_DIR/mongo/db/ldap_options',
         '$BUILD_DIR/mongo/db/query/query_stats/query_stats',
+        '$BUILD_DIR/mongo/db/server_base',
         '$BUILD_DIR/mongo/util/concurrency/thread_pool',
         '$BUILD_DIR/mongo/util/icu',
         '$BUILD_DIR/mongo/util/net/ssl_manager',
@@ -301,7 +287,6 @@ env.Library(
         '$BUILD_DIR/mongo/db/op_observer/op_observer',
         '$BUILD_DIR/mongo/db/op_observer/op_observer_util',
         '$BUILD_DIR/mongo/db/repl/oplog_entry',
-        '$BUILD_DIR/mongo/util/namespace_string_database_name_util',
         'auth',
     ],
 )
@@ -344,8 +329,8 @@ env.Library(
         '$BUILD_DIR/mongo/base',
         '$BUILD_DIR/mongo/bson/mutable/mutable_bson',
         '$BUILD_DIR/mongo/db/common',
+        '$BUILD_DIR/mongo/db/server_base',
         '$BUILD_DIR/mongo/idl/idl_parser',
-        '$BUILD_DIR/mongo/util/namespace_string_database_name_util',
     ],
 )
 

@@ -164,7 +164,9 @@ selector:
   - jstests/core/positional_projection.js # Positional projection
   - jstests/core/query/batch_size.js # singleBatch
   - jstests/core/query/dbref/dbref3.js # Positional projection
-  - jstests/core/query/explode_for_sort_plan_cache.js # Not first stage in pipeline
+  # Not first stage in pipeline. The following test uses $planCacheStats, which is required to be the
+  # first stage in a pipeline. This will be incomplatible with timeseries.
+  - jstests/core/query/in_expression_plan_cache.js
   - jstests/core/query/find/find_getmore_cmd.js # singleBatch
   - jstests/core/query/find/finda.js # returnKey
   - jstests/core/query/index_key_expression.js # Unclean aggregation result
@@ -212,7 +214,6 @@ selector:
   - jstests/core/query/type/type_array.js
   - jstests/core/write/update/update_numeric_field_name.js
   # Time-series collections have different indexes from regular collections.
-  - jstests/core/notablescan.js
   - jstests/core/query/array/arrayfind4.js
   - jstests/core/query/array/arrayfind9.js
   - jstests/core/query/array/arrayfinda.js
@@ -239,8 +240,6 @@ selector:
   - jstests/core/system_js_access.js
   - jstests/core/system_js_drop.js
   - jstests/core/write/find_and_modify/find_and_modify_where.js
-  # TODO (SERVER-88078): Remove this exclusion.
-  - jstests/core/type_bracket.js
   # TODO(SERVER-85322): Try to include this test(s).
   - jstests/core/resume_query.js
   - jstests/core/resume_query_from_non_existent_record.js
@@ -261,6 +260,15 @@ selector:
   # TODO SERVER-87065: Add this back in once we prevent it from erroring
   # when validation hook is run.
   - jstests/core/write/update/update_blank1.js
+  # For inserts on time-series collections, mongod does _not_ replace empty timestamp values
+  # with the current time.
+  - jstests/core/write/empty_ts.js
+  - jstests/core/write/empty_ts_bulk_write.js
+  - jstests/core/write/bypass_empty_ts_replacement.js
+  - jstests/core/write/bypass_empty_ts_replacement_bulk_write.js
+  - jstests/core/write/bypass_empty_ts_replacement_timeseries.js
+  # Assumes collection options do not change
+  - jstests/core/rename_system_buckets_collections.js
 
   exclude_with_any_tags:
   - requires_sharding

@@ -48,7 +48,6 @@
 namespace mongo {
 
 using std::unique_ptr;
-using std::vector;
 
 // static
 const char* DistinctScan::kStageType = "DISTINCT_SCAN";
@@ -93,11 +92,11 @@ PlanStage::StageState DistinctScan::doWork(WorkingSetID* out) {
         [&] {
             if (!_cursor)
                 _cursor = indexAccessMethod()->newCursor(opCtx(), _scanDirection == 1);
-            kv = _cursor->seek(IndexEntryComparison::makeKeyStringFromSeekPointForSeek(
-                _seekPoint,
+            key_string::Builder builder(
                 indexAccessMethod()->getSortedDataInterface()->getKeyStringVersion(),
-                indexAccessMethod()->getSortedDataInterface()->getOrdering(),
-                _scanDirection == 1));
+                indexAccessMethod()->getSortedDataInterface()->getOrdering());
+            kv = _cursor->seek(IndexEntryComparison::makeKeyStringFromSeekPointForSeek(
+                _seekPoint, _scanDirection == 1, builder));
             return PlanStage::ADVANCED;
         },
         [&] {

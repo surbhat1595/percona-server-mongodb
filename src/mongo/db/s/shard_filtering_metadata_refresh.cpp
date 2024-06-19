@@ -164,7 +164,7 @@ Status refreshDbMetadata(OperationContext* opCtx,
     ScopeGuard resetRefreshFutureOnError([&] {
         // TODO (SERVER-71444): Fix to be interruptible or document exception.
         // Can be uninterruptible because the work done under it can never block.
-        UninterruptibleLockGuard noInterrupt(shard_role_details::getLocker(opCtx));  // NOLINT.
+        UninterruptibleLockGuard noInterrupt(opCtx);  // NOLINT.
         auto scopedDss = DatabaseShardingState::acquireExclusive(opCtx, dbName);
         scopedDss->resetDbMetadataRefreshFuture();
     });
@@ -261,6 +261,10 @@ void onDbVersionMismatch(OperationContext* opCtx,
     invariant(!shard_role_details::getLocker(opCtx)->isLocked());
     invariant(!opCtx->getClient()->isInDirectClient());
     ShardingState::get(opCtx)->assertCanAcceptShardedCommands();
+
+    if (MONGO_unlikely(skipShardFilteringMetadataRefresh.shouldFail())) {
+        uasserted(ErrorCodes::InternalError, "skipShardFilteringMetadataRefresh failpoint");
+    }
 
     using namespace fmt::literals;
     tassert(ErrorCodes::IllegalOperation,
@@ -423,8 +427,7 @@ SharedSemiFuture<void> recoverRefreshCollectionPlacementVersion(
             ScopeGuard resetRefreshFutureOnError([&] {
                 // TODO (SERVER-71444): Fix to be interruptible or document exception.
                 // Can be uninterruptible because the work done under it can never block
-                UninterruptibleLockGuard noInterrupt(  // NOLINT.
-                    shard_role_details::getLocker(opCtx));
+                UninterruptibleLockGuard noInterrupt(opCtx);  // NOLINT.
                 auto scopedCsr = CollectionShardingRuntime::acquireExclusive(opCtx, nss);
                 scopedCsr->resetPlacementVersionRecoverRefreshFuture();
             });
@@ -542,6 +545,10 @@ void onCollectionPlacementVersionMismatch(OperationContext* opCtx,
     invariant(!shard_role_details::getLocker(opCtx)->isLocked());
     invariant(!opCtx->getClient()->isInDirectClient());
     ShardingState::get(opCtx)->assertCanAcceptShardedCommands();
+
+    if (MONGO_unlikely(skipShardFilteringMetadataRefresh.shouldFail())) {
+        uasserted(ErrorCodes::InternalError, "skipShardFilteringMetadataRefresh failpoint");
+    }
 
     Timer t{};
     ScopeGuard finishTiming([&] {

@@ -46,7 +46,7 @@
 #include <exception>
 #include <list>
 #include <mutex>
-#include <type_traits>
+#include <shared_mutex>
 
 #include "collection_catalog.h"
 
@@ -64,10 +64,8 @@
 #include "mongo/db/query/collation/collator_interface.h"
 #include "mongo/db/record_id.h"
 #include "mongo/db/server_options.h"
-#include "mongo/db/storage/bson_collection_catalog_entry.h"
 #include "mongo/db/storage/capped_snapshots.h"
 #include "mongo/db/storage/durable_catalog.h"
-#include "mongo/db/storage/ident.h"
 #include "mongo/db/storage/kv/kv_engine.h"
 #include "mongo/db/storage/record_store.h"
 #include "mongo/db/storage/recovery_unit.h"
@@ -76,11 +74,11 @@
 #include "mongo/db/transaction_resources.h"
 #include "mongo/logv2/log.h"
 #include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
 #include "mongo/logv2/log_tag.h"
 #include "mongo/logv2/redaction.h"
 #include "mongo/platform/atomic_word.h"
 #include "mongo/platform/mutex.h"
+#include "mongo/platform/rwmutex.h"
 #include "mongo/stdx/condition_variable.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/database_name_util.h"
@@ -108,10 +106,33 @@ const SharedCollectionDecorations::Decoration<AtomicWord<bool>>
 namespace {
 constexpr auto kNumDurableCatalogScansDueToMissingMapping = "numScansDueToMissingMapping"_sd;
 
-struct LatestCollectionCatalog {
-    std::shared_ptr<CollectionCatalog> catalog = std::make_shared<CollectionCatalog>();
+class LatestCollectionCatalog {
+public:
+    std::shared_ptr<CollectionCatalog> load() const {
+        std::shared_lock lk(_mutex);  // NOLINT
+        return _catalog;
+    }
+
+    bool compareAndSet(const std::shared_ptr<CollectionCatalog>& oldCatalog,
+                       std::shared_ptr<CollectionCatalog>&& newCatalog) {
+        std::lock_guard lk(_mutex);
+        if (oldCatalog != _catalog)
+            return false;
+        _catalog = std::move(newCatalog);
+        return true;
+    }
+
+    void store(std::shared_ptr<CollectionCatalog>&& newCatalog) {
+        std::lock_guard lk(_mutex);
+        _catalog = std::move(newCatalog);
+    }
+
+private:
+    mutable RWMutex _mutex;
+    // TODO SERVER-56428: Replace with std::atomic<std::shared_ptr> when supported in our toolchain
+    std::shared_ptr<CollectionCatalog> _catalog = std::make_shared<CollectionCatalog>();
 };
-const ServiceContext::Decoration<LatestCollectionCatalog> getCatalog =
+const ServiceContext::Decoration<LatestCollectionCatalog> getCatalogStore =
     ServiceContext::declareDecoration<LatestCollectionCatalog>();
 
 // Catalog instance for batched write when ongoing. The atomic bool is used to determine if a
@@ -635,7 +656,7 @@ bool CollectionCatalog::Range::empty() const {
 }
 
 std::shared_ptr<const CollectionCatalog> CollectionCatalog::latest(ServiceContext* svcCtx) {
-    return atomic_load(&getCatalog(svcCtx).catalog);
+    return getCatalogStore(svcCtx).load();
 }
 
 std::shared_ptr<const CollectionCatalog> CollectionCatalog::get(OperationContext* opCtx) {
@@ -742,9 +763,9 @@ void CollectionCatalog::write(ServiceContext* svcCtx, CatalogWriteFn job) {
     std::list<JobEntry> completed;
     std::exception_ptr myException;
 
-    auto& storage = getCatalog(svcCtx);
+    auto& storage = getCatalogStore(svcCtx);
     // hold onto base so if we need to delete it we can do it outside of the lock
-    auto base = atomic_load(&storage.catalog);
+    auto base = storage.load();
     // copy the collection catalog, this could be expensive, but we will only have one pending
     // collection in flight at a given time
     auto clone = std::make_shared<CollectionCatalog>(*base);
@@ -768,7 +789,7 @@ void CollectionCatalog::write(ServiceContext* svcCtx, CatalogWriteFn job) {
         stdx::lock_guard lock(mutex);
         if (queue.empty()) {
             // Queue is empty, store catalog and relinquish responsibility of being worker thread
-            atomic_store(&storage.catalog, std::move(clone));
+            storage.store(std::move(clone));
             workerExists = false;
             break;
         }
@@ -952,11 +973,17 @@ Status CollectionCatalog::dropView(OperationContext* opCtx, const NamespaceStrin
         ViewsForDatabase writable{viewsForDb};
         writable.remove(opCtx, systemViews, viewName);
 
-        auto& uncommittedCatalogUpdates = UncommittedCatalogUpdates::get(opCtx);
-        uncommittedCatalogUpdates.removeView(viewName);
-        uncommittedCatalogUpdates.replaceViewsForDatabase(viewName.dbName(), std::move(writable));
+        // Reload the view catalog with the changes applied.
+        result = writable.reload(opCtx, systemViews);
+        if (result.isOK()) {
+            auto& uncommittedCatalogUpdates = UncommittedCatalogUpdates::get(opCtx);
+            uncommittedCatalogUpdates.removeView(viewName);
+            uncommittedCatalogUpdates.replaceViewsForDatabase(viewName.dbName(),
+                                                              std::move(writable));
 
-        PublishCatalogUpdates::ensureRegisteredWithRecoveryUnit(opCtx, uncommittedCatalogUpdates);
+            PublishCatalogUpdates::ensureRegisteredWithRecoveryUnit(opCtx,
+                                                                    uncommittedCatalogUpdates);
+        }
     }
 
     return result;
@@ -1388,7 +1415,7 @@ boost::optional<DurableCatalogEntry> CollectionCatalog::_fetchPITCatalogEntry(
         invariant(readTimestamp);
 
         // Scan durable catalog when we don't have accurate catalogId mapping for this timestamp.
-        gCollectionCatalogSection.numScansDueToMissingMapping.fetchAndAdd(1);
+        gCollectionCatalogSection.numScansDueToMissingMapping.fetchAndAddRelaxed(1);
         auto catalogEntry = nssOrUUID.isNamespaceString()
             ? DurableCatalog::get(opCtx)->scanForCatalogEntryByNss(opCtx, nssOrUUID.nss())
             : DurableCatalog::get(opCtx)->scanForCatalogEntryByUUID(opCtx, nssOrUUID.uuid());
@@ -1669,6 +1696,9 @@ Collection* CollectionCatalog::lookupCollectionByUUIDForMetadataWrite(OperationC
     if (!coll)
         return nullptr;
 
+    if (coll->ns().isOplog())
+        return coll.get();
+
     invariant(shard_role_details::getLocker(opCtx)->isCollectionLockedForMode(coll->ns(), MODE_X));
 
     // Skip cloning and return directly if allowed.
@@ -1758,6 +1788,11 @@ std::shared_ptr<const Collection> CollectionCatalog::_getCollectionByNamespace(
 
 Collection* CollectionCatalog::lookupCollectionByNamespaceForMetadataWrite(
     OperationContext* opCtx, const NamespaceString& nss) const {
+    // Oplog is special and can only be modified in a few contexts. It is modified inplace and care
+    // need to be taken for concurrency.
+    if (nss.isOplog()) {
+        return const_cast<Collection*>(lookupCollectionByNamespace(opCtx, nss));
+    }
 
     auto& uncommittedCatalogUpdates = UncommittedCatalogUpdates::get(opCtx);
     auto [found, uncommittedPtr, newColl] = UncommittedCatalogUpdates::lookupCollection(opCtx, nss);
@@ -2502,9 +2537,9 @@ BatchedCollectionCatalogWriter::BatchedCollectionCatalogWriter(OperationContext*
     invariant(!batchedCatalogWriteInstance);
     invariant(batchedCatalogClonedCollections.empty());
 
-    auto& storage = getCatalog(_opCtx->getServiceContext());
+    auto& storage = getCatalogStore(_opCtx->getServiceContext());
     // hold onto base so if we need to delete it we can do it outside of the lock
-    _base = atomic_load(&storage.catalog);
+    _base = storage.load();
     // copy the collection catalog, this could be expensive, store it for future writes during this
     // batcher
     batchedCatalogWriteInstance = std::make_shared<CollectionCatalog>(*_base);
@@ -2517,9 +2552,8 @@ BatchedCollectionCatalogWriter::~BatchedCollectionCatalogWriter() {
 
     // Publish out batched instance, validate that no other writers have been able to write during
     // the batcher.
-    auto& storage = getCatalog(_opCtx->getServiceContext());
-    invariant(
-        atomic_compare_exchange_strong(&storage.catalog, &_base, batchedCatalogWriteInstance));
+    invariant(getCatalogStore(_opCtx->getServiceContext())
+                  .compareAndSet(_base, std::move(batchedCatalogWriteInstance)));
 
     // Clear out batched pointer so no more attempts of batching are made
     ongoingBatchedWrite.store(false);

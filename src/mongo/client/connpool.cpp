@@ -67,6 +67,7 @@
 #include "mongo/util/net/hostandport.h"
 #include "mongo/util/net/socket_exception.h"
 #include "mongo/util/str.h"
+#include "mongo/util/testing_proctor.h"
 
 #if __has_feature(address_sanitizer)
 #include <sanitizer/lsan_interface.h>
@@ -94,10 +95,7 @@ void recordWaitTime(PoolForHost& p, DBClientBase* conn, Date_t connRequestedAt) 
 
 MONGO_FAIL_POINT_DEFINE(injectWaitTimeForConnpoolAcquisition);
 
-using std::endl;
 using std::list;
-using std::map;
-using std::set;
 using std::string;
 using std::vector;
 
@@ -335,6 +333,15 @@ public:
                     // _finishCreate will take the lock again.
                     lk.unlock();
 
+                    if constexpr (kDebugBuild) {
+                        LOGV2_DEBUG(7591400,
+                                    1,
+                                    "Creating a new connection",
+                                    "target"_attr = host,
+                                    "timeout"_attr = timeout,
+                                    "requestedAt"_attr = connRequestedAt);
+                    }
+
                     // Create a new connection and return. All Connect functions
                     // should throw if they cannot create a connection.
                     auto c = connect();
@@ -468,6 +475,15 @@ DBClientBase* DBConnectionPool::get(const MongoURI& uri, double socketTimeout) {
     };
 
     return Detail::get(this, uri.toString(), socketTimeout, connect);
+}
+
+Milliseconds DBConnectionPool::getPoolHostConnTime_forTest(const std::string& host,
+                                                           double timeout) const {
+    if (TestingProctor::instance().isEnabled()) {
+        stdx::lock_guard<Latch> L(_mutex);
+        return _pools.find(PoolKey(host, timeout))->second._connTime;
+    }
+    return Milliseconds();
 }
 
 int DBConnectionPool::getNumAvailableConns(const string& host, double socketTimeout) const {

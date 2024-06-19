@@ -91,7 +91,7 @@ TEST_F(CurOpStatsTest, CheckWorkingMillisValue) {
     curop->completeAndLogOperation({logv2::LogComponent::kTest}, nullptr);
     ASSERT_EQ(curop->debug().workingTimeMillis, executionTime - waitForTickets);
 
-    // Check that workintTimeMillis correctly account for time acquiring flow control tickets
+    // Check that workingTimeMillis correctly account for time acquiring flow control tickets
     locker->addFlowControlTicketQueueTime(waitForFlowControlTicket);
     curop->completeAndLogOperation({logv2::LogComponent::kTest}, nullptr);
     ASSERT_EQ(curop->debug().workingTimeMillis,
@@ -244,5 +244,105 @@ TEST_F(CurOpStatsTest, UnstashingAndStashingTransactionResource) {
               executionTime - waitForTicketsOnOp2 - waitForFlowControlTicketsOnOp2 -
                   duration_cast<Milliseconds>(Microseconds(waitForLocksOnOp2 + waitForLocksOnOp3)));
 }
+
+TEST_F(CurOpStatsTest, CheckWorkingMillisWithBlockedTimeAtStart) {
+    auto opCtx = makeOperationContext();
+    auto curop = CurOp::get(*opCtx);
+
+    Milliseconds executionTime = Milliseconds(512);
+    Milliseconds waitForTickets = Milliseconds(2);
+    Milliseconds waitForFlowControlTicket = Milliseconds(4);
+
+    auto tickSourceMock = std::make_unique<TickSourceMock<Microseconds>>();
+    // The tick source is initialized to a non-zero value as CurOp equates a value of 0 with a
+    // not-started timer.
+    tickSourceMock->advance(Milliseconds{100});
+    curop->setTickSource_forTest(tickSourceMock.get());
+
+    // Add blocked time before curop timer starts.
+    auto locker = shard_role_details::getLocker(opCtx.get());
+
+    locker->addTicketQueueTime(waitForTickets);
+    ASSERT_EQ(locker->getTimeQueuedForTicketMicros(), waitForTickets);
+
+    locker->addFlowControlTicketQueueTime(waitForFlowControlTicket);
+    ASSERT_EQ(duration_cast<Milliseconds>(
+                  Microseconds(locker->getFlowControlStats().timeAcquiringMicros)),
+              waitForFlowControlTicket);
+
+    int64_t waitForLocks =
+        addWaitForLock(opCtx.get(), getServiceContext(), locker, Milliseconds(8));
+    ASSERT_EQ(locker->getLockerInfo(boost::none).stats.getCumulativeWaitTimeMicros(), waitForLocks);
+
+    // Advance execution time.
+    curop->ensureStarted();
+    tickSourceMock->advance(executionTime);
+    curop->done();
+    ASSERT_EQ(duration_cast<Milliseconds>(curop->elapsedTimeExcludingPauses()), executionTime);
+
+    // Check that time blocked before curop timer starts is not subtracted from workingTimeMillis.
+    curop->completeAndLogOperation({logv2::LogComponent::kTest}, nullptr);
+    ASSERT_EQ(curop->debug().workingTimeMillis, executionTime);
+
+    // Add blocked time after timer starts.
+    locker->addTicketQueueTime(waitForTickets);
+    locker->addFlowControlTicketQueueTime(waitForFlowControlTicket);
+    waitForLocks = addWaitForLock(opCtx.get(), getServiceContext(), locker, Milliseconds(16));
+
+    // Check that workingTimeMillis only accounts for blocked times after timer started.
+    curop->completeAndLogOperation({logv2::LogComponent::kTest}, nullptr);
+    ASSERT_APPROX_EQUAL(curop->debug().workingTimeMillis.count(),
+                        (executionTime -
+                         (waitForTickets + waitForFlowControlTicket +
+                          duration_cast<Milliseconds>(Microseconds(waitForLocks))))
+                            .count(),
+                        1);
+}
+
+TEST_F(CurOpStatsTest, MultipleUnstashingAndStashingTransaction) {
+    // Initialize two operation contexts.
+    auto serviceContext = getGlobalServiceContext();
+    auto client1 = serviceContext->getService()->makeClient("client1");
+    auto opCtx1 = client1->makeOperationContext();
+    auto curop1 = CurOp::get(*opCtx1);
+    auto lockerOp1 = shard_role_details::getLocker(opCtx1.get());
+
+    auto tickSourceMock = std::make_unique<TickSourceMock<Microseconds>>();
+    // The tick source is initialized to a non-zero value as CurOp equates a value of 0 with a
+    // not-started timer.
+    tickSourceMock->advance(Milliseconds{123});
+    curop1->setTickSource_forTest(tickSourceMock.get());
+
+    // Advance execution time.
+    curop1->ensureStarted();
+    tickSourceMock->advance(Milliseconds{1000});
+    lockerOp1->addTicketQueueTime(Milliseconds{20});
+
+    // Advance counters while stashed
+    curop1->updateStatsOnTransactionStash();
+    tickSourceMock->advance(Milliseconds{1000});
+    lockerOp1->addTicketQueueTime(Milliseconds{30});
+    curop1->updateStatsOnTransactionUnstash();
+
+    // Advance counters while not stashed
+    tickSourceMock->advance(Milliseconds{1000});
+    lockerOp1->addTicketQueueTime(Milliseconds{40});
+
+    // Advance counters while stashed
+    curop1->updateStatsOnTransactionStash();
+    tickSourceMock->advance(Milliseconds{1000});
+    lockerOp1->addTicketQueueTime(Milliseconds{50});
+    curop1->updateStatsOnTransactionUnstash();
+
+    // Advance counters while not stashed
+    tickSourceMock->advance(Milliseconds{1000});
+    lockerOp1->addTicketQueueTime(Milliseconds{60});
+    curop1->completeAndLogOperation({logv2::LogComponent::kTest}, nullptr);
+
+    // Verify that 120ms are excluded from 5000 execution time.
+    // Out of 200ms of locker queue time, only 120ms happened while the locker was not stashed.
+    ASSERT_EQ(curop1->debug().workingTimeMillis, Milliseconds(4880));
+}
+
 }  // namespace
 }  // namespace mongo

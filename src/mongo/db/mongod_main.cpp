@@ -72,6 +72,7 @@
 #include "mongo/db/audit/audit_options.h"
 #include "mongo/db/auth/auth_op_observer.h"
 #include "mongo/db/auth/authorization_manager.h"
+#include "mongo/db/auth/user_cache_invalidator_job.h"
 #include "mongo/db/catalog/collection.h"
 #include "mongo/db/catalog/collection_catalog.h"
 #include "mongo/db/catalog/collection_impl.h"
@@ -382,10 +383,8 @@ void logStartup(OperationContext* opCtx) {
         repl::UnreplicatedWritesBlock uwb(opCtx);
         CollectionOptions collectionOptions = uassertStatusOK(
             CollectionOptions::parse(options, CollectionOptions::ParseKind::parseForCommand));
-        uassertStatusOK(
-            db->userCreateNS(opCtx, NamespaceString::kStartupLogNamespace, collectionOptions));
-        collection = CollectionCatalog::get(opCtx)->lookupCollectionByNamespace(
-            opCtx, NamespaceString::kStartupLogNamespace);
+        collection =
+            db->createCollection(opCtx, NamespaceString::kStartupLogNamespace, collectionOptions);
     }
     invariant(collection);
 
@@ -501,8 +500,6 @@ ExitCode _initAndListen(ServiceContext* serviceContext, int listenPort) {
         stdx::lock_guard<Client> lk(cc());
         cc().setSystemOperationUnkillableByStepdown(lk);
     }
-
-    serviceContext->setFastClockSource(FastClockSourceFactory::create(Milliseconds(10)));
 
     BSONObjBuilder startupTimeElapsedBuilder;
     BSONObjBuilder startupInfoBuilder;
@@ -746,8 +743,8 @@ ExitCode _initAndListen(ServiceContext* serviceContext, int listenPort) {
         // Initialize the cached pointer to the oplog collection. We want to do this even as
         // standalone
         // so accesses to the cached pointer in replica set nodes started as standalone still work
-        // (mainly AutoGetOplogFastPath). In case the oplog doesn't exist, it is just initialized to
-        // null. This initialization must happen within a GlobalWrite lock context.
+        // (mainly AutoGetOplog). In case the oplog doesn't exist, it is just initialized to null.
+        // This initialization must happen within a GlobalWrite lock context.
         repl::acquireOplogCollectionForLogging(startupOpCtx.get());
     }
 
@@ -1671,6 +1668,8 @@ void shutdownTask(const ShutdownTaskArgs& shutdownArgs) {
                                                    &shutdownInfoBuilder);
         });
 
+    UserCacheInvalidator::stop(serviceContext);
+
     // If we don't have shutdownArgs, we're shutting down from a signal, or other clean shutdown
     // path.
     //
@@ -2153,8 +2152,6 @@ int mongod_main(int argc, char* argv[]) {
 
     waitForDebugger();
 
-    registerShutdownTask(shutdownTask);
-
     setupSignalHandlers();
 
     srand(static_cast<unsigned>(curTimeMicros64()));  // NOLINT
@@ -2169,10 +2166,22 @@ int mongod_main(int argc, char* argv[]) {
         quickExit(ExitCode::fail);
     }
 
+    // There is no single-threaded guarantee beyond this point.
+    ThreadSafetyContext::getThreadSafetyContext()->allowMultiThreading();
+    LOGV2(5945603, "Multi threading initialized");
+
+    // Per SERVER-7434, startSignalProcessingThread must run after any forks (i.e.
+    // initialize_server_global_state::forkServerOrDie) and before the creation of any other threads
+    startSignalProcessingThread();
+
     auto* service = [] {
         try {
             auto serviceContextHolder = ServiceContext::make();
             auto* serviceContext = serviceContextHolder.get();
+
+            // This FastClockSourceFactory creates a background thread ClockSource. It must be set
+            // on ServiceContext before any other threads can get and use it.
+            serviceContext->setFastClockSource(FastClockSourceFactory::create(Milliseconds(10)));
             setGlobalServiceContext(std::move(serviceContextHolder));
 
             return serviceContext;
@@ -2186,6 +2195,8 @@ int mongod_main(int argc, char* argv[]) {
             quickExit(ExitCode::fail);
         }
     }();
+
+    registerShutdownTask(shutdownTask);
 
     if (audit::setAuditInterface) {
         audit::setAuditInterface(service);
@@ -2225,14 +2236,6 @@ int mongod_main(int argc, char* argv[]) {
 
     if (!initialize_server_global_state::checkSocketPath())
         quickExit(ExitCode::fail);
-
-    // There is no single-threaded guarantee beyond this point.
-    ThreadSafetyContext::getThreadSafetyContext()->allowMultiThreading();
-    LOGV2(5945603, "Multi threading initialized");
-
-    // Per SERVER-7434, startSignalProcessingThread must run after any forks (i.e.
-    // initialize_server_global_state::forkServerOrDie) and before the creation of any other threads
-    startSignalProcessingThread();
 
     startAllocatorThread();
 

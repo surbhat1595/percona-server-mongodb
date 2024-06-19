@@ -72,8 +72,8 @@
 #include "mongo/db/repl/member_state.h"
 #include "mongo/db/repl/oplog.h"
 #include "mongo/db/repl/oplog_applier.h"
+#include "mongo/db/repl/oplog_applier_batcher.h"
 #include "mongo/db/repl/oplog_applier_impl.h"
-#include "mongo/db/repl/oplog_batcher.h"
 #include "mongo/db/repl/oplog_buffer.h"
 #include "mongo/db/repl/oplog_buffer_blocking_queue.h"
 #include "mongo/db/repl/oplog_entry.h"
@@ -215,15 +215,14 @@ public:
                 std::make_unique<MongoDSessionCatalogTransactionInterfaceImpl>()));
 
         _oplogBuffer = std::make_unique<repl::OplogBufferBlockingQueue>(kOplogBufferSize);
-        _oplogApplierThreadPool = repl::makeReplWriterPool();
+        _oplogApplierThreadPool = repl::makeReplWorkerPool();
 
         // Act as a secondary to get optimizations due to parallizing 'prepare' oplog entries. But
         // do not include in the benchmark the time to write to the oplog.
         repl::OplogApplier::Options oplogApplierOptions(
             repl::OplogApplication::Mode::kSecondary,
             false /* allowNamespaceNotFoundErrorsOnCrudOps */,
-            true /* skipWritesToOplog */,
-            true /* skipWritesToChangeCollection */);
+            true /* skipWritesToOplog */);
         _oplogApplier = std::make_unique<repl::OplogApplierImpl>(nullptr,
                                                                  _oplogBuffer.get(),
                                                                  &repl::noopOplogApplierObserver,
@@ -566,8 +565,8 @@ private:
     std::vector<BSONObj> _oplogEntries;
     UUID _foobarUUID;
     NamespaceString _foobarNs = NamespaceString::createNamespaceString_forTest("foo.bar"_sd);
-    repl::OplogBatcher::BatchLimits _batchLimits{std::numeric_limits<std::size_t>::max(),
-                                                 std::numeric_limits<std::size_t>::max()};
+    repl::OplogApplierBatcher::BatchLimits _batchLimits{std::numeric_limits<std::size_t>::max(),
+                                                        std::numeric_limits<std::size_t>::max()};
 };
 
 void runBMTest(TestServiceContext& testSvcCtx, Fixture& fixture, benchmark::State& state) {

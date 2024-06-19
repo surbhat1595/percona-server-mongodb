@@ -56,7 +56,7 @@ void assertInvalidQueryInstance(const boost::intrusive_ptr<ExpressionContext>& e
                                 const BSONObj& representativeQuery,
                                 size_t errorCode) {
     auto representativeQueryInfo =
-        createRepresentativeInfo(representativeQuery, expCtx->opCtx, boost::none);
+        createRepresentativeInfo(expCtx->opCtx, representativeQuery, boost::none);
     ASSERT_THROWS_CODE(
         utils::validateRepresentativeQuery(representativeQueryInfo), DBException, errorCode);
 }
@@ -112,7 +112,7 @@ TEST_F(QuerySettingsValidationTestFixture, QuerySettingsCannotUseUuidAsNs) {
     const BSONObj representativeQ = BSON("find" << uuid1Res.getValue() << "$db"
                                                 << "testDB"
                                                 << "filter" << BSON("a" << BSONNULL));
-    ASSERT_THROWS_CODE(createRepresentativeInfo(representativeQ, expCtx->opCtx, boost::none),
+    ASSERT_THROWS_CODE(createRepresentativeInfo(expCtx->opCtx, representativeQ, boost::none),
                        DBException,
                        7746605);
 }
@@ -125,7 +125,7 @@ TEST_F(QuerySettingsValidationTestFixture, QuerySettingsIndicesCannotReferToSame
     QuerySettings querySettings;
     auto indexSpecA = IndexHintSpec(ns, {IndexHint("sku")});
     auto indexSpecB = IndexHintSpec(ns, {IndexHint("uks")});
-    querySettings.setIndexHints({{std::vector{indexSpecA, indexSpecB}}});
+    querySettings.setIndexHints({{indexSpecA, indexSpecB}});
     utils::simplifyQuerySettings(querySettings);
     ASSERT_THROWS_CODE(utils::validateQuerySettings(querySettings), DBException, 7746608);
 }
@@ -173,11 +173,11 @@ TEST_F(QuerySettingsValidationTestFixture, QuerySettingsIndexHintsWithEmptyAllow
 
 TEST_F(QuerySettingsValidationTestFixture, QuerySettingsIndexHintsWithAllEmptyAllowedIndexes) {
     QuerySettings querySettings;
-    querySettings.setIndexHints({{std::vector{
+    querySettings.setIndexHints({{
         IndexHintSpec(makeNamespace("testDB", "testColl1"), {}),
         IndexHintSpec(makeNamespace("testDB", "testColl2"), {}),
         IndexHintSpec(makeNamespace("testDB", "testColl3"), {}),
-    }}});
+    }});
     utils::simplifyQuerySettings(querySettings);
     ASSERT_EQUALS(querySettings.getIndexHints(), boost::none);
     ASSERT_THROWS_CODE(utils::validateQuerySettings(querySettings), DBException, 7746604);
@@ -185,18 +185,17 @@ TEST_F(QuerySettingsValidationTestFixture, QuerySettingsIndexHintsWithAllEmptyAl
 
 TEST_F(QuerySettingsValidationTestFixture, QuerySettingsIndexHintsWithSomeEmptyAllowedIndexes) {
     QuerySettings querySettings;
-    querySettings.setIndexHints({{std::vector{
+    querySettings.setIndexHints({{
         IndexHintSpec(makeNamespace("testDB", "testColl1"), {}),
         IndexHintSpec(makeNamespace("testDB", "testColl2"), {IndexHint("a")}),
-    }}});
+    }});
     const auto expectedIndexHintSpec =
         IndexHintSpec(makeNamespace("testDB", "testColl2"), {IndexHint("a")});
     utils::simplifyQuerySettings(querySettings);
     const auto simplifiedIndexHints = querySettings.getIndexHints();
 
     ASSERT_NE(simplifiedIndexHints, boost::none);
-    const auto& indexHintsList =
-        std::get<std::vector<mongo::query_settings::IndexHintSpec>>(*simplifiedIndexHints);
+    const auto& indexHintsList = *simplifiedIndexHints;
     ASSERT_EQ(indexHintsList.size(), 1);
     const auto& actualIndexHintSpec = indexHintsList[0];
     ASSERT_BSONOBJ_EQ(expectedIndexHintSpec.toBSON(), actualIndexHintSpec.toBSON());

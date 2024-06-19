@@ -13,13 +13,15 @@ import {Thread} from "jstests/libs/parallelTester.js";
 const dbName = "test";
 const collName = "retryable_write_error_labels";
 const ns = dbName + "." + collName;
+const acceptableErrorsDuringShutdown =
+    [ErrorCodes.InterruptedAtShutdown, ErrorCodes.CallbackCanceled, ErrorCodes.ShutdownInProgress];
 
 // Use ShardingTest because we need to test both mongod and mongos behaviors
 let overrideMaxAwaitTimeMS = {'mode': 'alwaysOn', 'data': {maxAwaitTimeMS: 1000}};
 const st = new ShardingTest({
     config: 1,
     mongos:
-        {s0: {setParameter: "failpoint.overrideMaxAwaitTimeMS=" + tojson(overrideMaxAwaitTimeMS)}},
+        {s0: {setParameter: {"failpoint.overrideMaxAwaitTimeMS": tojson(overrideMaxAwaitTimeMS)}}},
     shards: 1
 });
 
@@ -136,6 +138,10 @@ function testMongodError(errorCode, isWCError) {
 function testMongosError() {
     const shard0Primary = st.rs0.getPrimary();
 
+    // Insert initial documents used by the test.
+    const docs = [{k: 0, x: 0}, {k: 1, x: 1}];
+    assert.commandWorked(shard0Primary.getDB(dbName)[collName].insert(docs));
+
     // Test retryable writes.
     jsTestLog("Retryable write should return mongos shutdown error with RetryableWriteError label");
 
@@ -157,9 +163,7 @@ function testMongosError() {
     MongoRunner.stopMongos(st.s);
     try {
         const retryableInsertRes = retryableInsertThread.returnData();
-        checkErrorCode(retryableInsertRes,
-                       [ErrorCodes.InterruptedAtShutdown, ErrorCodes.CallbackCanceled],
-                       false /* isWCError */);
+        checkErrorCode(retryableInsertRes, acceptableErrorsDuringShutdown, false /* isWCError */);
         assertContainRetryableErrorLabel(retryableInsertRes);
     } catch (e) {
         if (!isNetworkError(e)) {
@@ -188,9 +192,8 @@ function testMongosError() {
     MongoRunner.stopMongos(st.s);
     try {
         const nonRetryableInsertRes = nonRetryableInsertThread.returnData();
-        checkErrorCode(nonRetryableInsertRes,
-                       [ErrorCodes.InterruptedAtShutdown, ErrorCodes.CallbackCanceled],
-                       false /* isWCError */);
+        checkErrorCode(
+            nonRetryableInsertRes, acceptableErrorsDuringShutdown, false /* isWCError */);
         assertNotContainErrorLabels(nonRetryableInsertRes);
     } catch (e) {
         if (!isNetworkError(e)) {
@@ -211,7 +214,7 @@ function testMongosError() {
         const sessionDb = session.getDatabase(dbName);
         const sessionColl = sessionDb.getCollection(collName);
         session.startTransaction();
-        assert.commandWorked(sessionColl.update({}, {$inc: {x: 1}}));
+        assert.commandWorked(sessionColl.update({k: 0}, {$inc: {x: 1}}));
         return sessionDb.adminCommand({
             commitTransaction: 1,
             txnNumber: NumberLong(session.getTxnNumber_forTesting()),
@@ -226,9 +229,7 @@ function testMongosError() {
 
     try {
         const commitTxnRes = commitTxnThread.returnData();
-        checkErrorCode(commitTxnRes,
-                       [ErrorCodes.InterruptedAtShutdown, ErrorCodes.CallbackCanceled],
-                       false /* isWCError */);
+        checkErrorCode(commitTxnRes, acceptableErrorsDuringShutdown, false /* isWCError */);
         assertContainRetryableErrorLabel(commitTxnRes);
     } catch (e) {
         if (!isNetworkError(e)) {
@@ -248,7 +249,7 @@ function testMongosError() {
         const sessionDb = session.getDatabase(dbName);
         const sessionColl = sessionDb.getCollection(collName);
         session.startTransaction();
-        assert.commandWorked(sessionColl.update({}, {$inc: {x: 1}}));
+        assert.commandWorked(sessionColl.update({k: 1}, {$inc: {x: 1}}));
         return sessionDb.adminCommand({
             abortTransaction: 1,
             txnNumber: NumberLong(session.getTxnNumber_forTesting()),
@@ -263,9 +264,7 @@ function testMongosError() {
 
     try {
         const abortTxnRes = abortTxnThread.returnData();
-        checkErrorCode(abortTxnRes,
-                       [ErrorCodes.InterruptedAtShutdown, ErrorCodes.CallbackCanceled],
-                       false /* isWCError */);
+        checkErrorCode(abortTxnRes, acceptableErrorsDuringShutdown, false /* isWCError */);
         assertContainRetryableErrorLabel(abortTxnRes);
     } catch (e) {
         if (!isNetworkError(e)) {

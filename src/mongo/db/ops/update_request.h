@@ -225,6 +225,14 @@ public:
         return _fromOplogApplication;
     }
 
+    void setBypassEmptyTsReplacement(OptionalBool bypassEmptyTsReplacement) {
+        _bypassEmptyTsReplacement = bypassEmptyTsReplacement;
+    }
+
+    OptionalBool getBypassEmptyTsReplacement() const {
+        return _bypassEmptyTsReplacement;
+    }
+
     void setExplain(boost::optional<ExplainOptions::Verbosity> verbosity) {
         _explain = verbosity;
     }
@@ -259,6 +267,10 @@ public:
 
     bool shouldReturnAnyDocs() const {
         return shouldReturnOldDocs() || shouldReturnNewDocs();
+    }
+
+    ReturnDocOption getReturnDocs() const {
+        return _returnDocs;
     }
 
     void setYieldPolicy(PlanYieldPolicy::YieldPolicy yieldPolicy) {
@@ -377,6 +389,8 @@ private:
     OptionalBool _allowShardKeyUpdatesWithoutFullShardKeyInQuery;
 
     OptionalBool _isTimeseriesNamespace;
+
+    OptionalBool _bypassEmptyTsReplacement;
 
     // Flags controlling the update.
 

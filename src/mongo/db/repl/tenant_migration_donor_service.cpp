@@ -471,7 +471,7 @@ boost::optional<BSONObj> TenantMigrationDonorService::Instance::reportForCurrent
         bob.append("blockTimestamp", *_stateDoc.getBlockTimestamp());
     }
     if (_stateDoc.getCommitOrAbortOpTime()) {
-        _stateDoc.getCommitOrAbortOpTime()->append(&bob, "commitOrAbortOpTime");
+        _stateDoc.getCommitOrAbortOpTime()->append("commitOrAbortOpTime", &bob);
     }
     if (_stateDoc.getAbortReason()) {
         bob.append("abortReason", *_stateDoc.getAbortReason());
@@ -865,8 +865,15 @@ ExecutorFuture<void> TenantMigrationDonorService::Instance::_sendRecipientSyncDa
                        << RecipientSyncData::kReturnAfterReachingDonorTimestampFieldName;
             errMsg << " failed";
 
-            return async_rpc::unpackRPCStatusIgnoringWriteConcernAndWriteErrors(status).addContext(
-                errMsg.str());
+            auto underlyingError =
+                async_rpc::unpackRPCStatusIgnoringWriteConcernAndWriteErrors(status);
+            if (ErrorCodes::isNotPrimaryError(underlyingError) ||
+                ErrorCodes::isShutdownError(underlyingError)) {
+                errMsg << " :: Merge recipient service interrupted; not resilient to stepdowns or "
+                          "node restarts";
+                return Status(ErrorCodes::TenantMigrationAborted, errMsg.str());
+            }
+            return underlyingError.addContext(errMsg.str());
         });
 }
 

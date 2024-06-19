@@ -81,6 +81,7 @@
 #include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/s/database_sharding_state.h"
 #include "mongo/db/s/operation_sharding_state.h"
+#include "mongo/db/server_feature_flags_gen.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/stats/top.h"
 #include "mongo/db/storage/record_data.h"
@@ -152,6 +153,17 @@ Status checkSourceAndTargetNamespaces(OperationContext* opCtx,
         return Status(ErrorCodes::NamespaceNotFound,
                       str::stream() << "Source collection " << source.toStringForErrorMsg()
                                     << " does not exist");
+    }
+
+    // TODO SERVER-89089 move this check up in the rename stack execution once we have the guarantee
+    // that all bucket collection have timeseries options.
+    if (source.isTimeseriesBucketsCollection() && sourceColl->getTimeseriesOptions() &&
+        !target.isTimeseriesBucketsCollection()) {
+        return Status(ErrorCodes::IllegalOperation,
+                      str::stream() << "Cannot rename timeseries buckets collection '"
+                                    << source.toStringForErrorMsg()
+                                    << "' to a namespace that is not timeseries buckets '"
+                                    << target.toStringForErrorMsg() << "'.");
     }
 
     if (sourceColl->getCollectionOptions().encryptedFieldConfig &&
@@ -569,6 +581,17 @@ Status renameCollectionAcrossDatabases(OperationContext* opCtx,
         return Status(ErrorCodes::NamespaceNotFound, "source namespace does not exist");
     }
 
+    // TODO SERVER-89089 move this check up in the rename stack execution once we have the guarante
+    // that all bucket collection have timeseries options.
+    if (source.isTimeseriesBucketsCollection() && sourceColl->getTimeseriesOptions() &&
+        !target.isTimeseriesBucketsCollection()) {
+        return Status(ErrorCodes::IllegalOperation,
+                      str::stream() << "Cannot rename timeseries buckets collection '"
+                                    << source.toStringForErrorMsg()
+                                    << "' to a namespace that is not timeseries buckets '"
+                                    << target.toStringForErrorMsg() << "'.");
+    }
+
     if (isReplicatedChanged(opCtx, source, target))
         return {ErrorCodes::IllegalOperation,
                 "Cannot rename collections across a replicated and an unreplicated database"};
@@ -928,13 +951,23 @@ void validateNamespacesForRenameCollection(OperationContext* opCtx,
                     ->isAuthorizedForActionsOnResource(
                         ResourcePattern::forClusterResource(target.tenantId()),
                         ActionType::setUserWriteBlockMode));
+    }
+
+    if (gFeatureFlagDisallowBucketCollectionWithoutTimeseriesOptions.isEnabled(
+            serverGlobalParams.featureCompatibility.acquireFCVSnapshot())) {
+        uassert(ErrorCodes::IllegalOperation,
+                str::stream() << "Cannot rename non timeseries buckets collection '"
+                              << source.toStringForErrorMsg()
+                              << "' to a timeseries buckets namespace '"
+                              << target.toStringForErrorMsg() << "'.",
+                source.isTimeseriesBucketsCollection() || !target.isTimeseriesBucketsCollection());
 
         uassert(ErrorCodes::IllegalOperation,
-                str::stream() << "Cannot rename time-series buckets collection {"
+                str::stream() << "Cannot rename timeseries buckets collection '"
                               << source.toStringForErrorMsg()
-                              << "} to a non-time-series buckets namespace {"
-                              << target.toStringForErrorMsg() << "}",
-                target.isTimeseriesBucketsCollection());
+                              << "' to a non timeseries buckets namespace '"
+                              << target.toStringForErrorMsg() << "'.",
+                !source.isTimeseriesBucketsCollection() || target.isTimeseriesBucketsCollection());
     }
 }
 

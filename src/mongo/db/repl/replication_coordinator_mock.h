@@ -236,9 +236,11 @@ public:
 
     Status setFollowerModeRollback(OperationContext* opCtx) override;
 
-    ApplierState getApplierState() override;
+    OplogSyncState getOplogSyncState() override;
 
-    void signalDrainComplete(OperationContext*, long long) noexcept override;
+    void signalWriterDrainComplete(OperationContext*, long long) noexcept override;
+
+    void signalApplierDrainComplete(OperationContext*, long long) noexcept override;
 
     void signalUpstreamUpdater() override;
 
@@ -369,6 +371,11 @@ public:
 
     Status processHeartbeatV1(const ReplSetHeartbeatArgsV1& args,
                               ReplSetHeartbeatResponse* response) override;
+
+    /**
+     * Set the value for getWriteConcernMajorityShouldJournal()
+     */
+    void setWriteConcernMajorityShouldJournal(bool shouldJournal);
 
     bool getWriteConcernMajorityShouldJournal() override;
 
@@ -504,7 +511,7 @@ public:
 
     void setSecondaryDelaySecs(Seconds sec);
 
-    void setApplierState(const ApplierState& newState);
+    void setOplogSyncState(const OplogSyncState& newState);
 
 private:
     void _setMyLastAppliedOpTimeAndWallTime(WithLock lk,
@@ -543,7 +550,9 @@ private:
     bool _updateCommittedSnapshot = true;
 
     Seconds _secondaryDelaySecs = Seconds(0);
-    ApplierState _applierState = ApplierState::Running;
+    OplogSyncState _oplogSyncState = OplogSyncState::Running;
+
+    bool _writeConcernMajorityShouldJournal = true;
 };
 
 }  // namespace repl

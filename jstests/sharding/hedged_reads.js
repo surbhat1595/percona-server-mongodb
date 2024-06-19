@@ -1,7 +1,7 @@
 /**
  * Tests hedging metrics in the serverStatus output.
  * @tags: [
- *    requires_fcv_70,
+ *    requires_fcv_80,
  *    temp_disabled_embedded_router_uncategorized,
  * ]
  */
@@ -81,11 +81,14 @@ function verifyCommandWorksWhenHedgeOperationsFailWithNetworkTimeout(
         errorCode: NumberInt(ErrorCodes.NetworkInterfaceExceededTimeLimit),
     });
 
-    const ps = startParallelShell(funWithArgs(function(dbName, collName) {
-                                      const testDB = db.getSiblingDB(dbName);
-                                      assert.commandWorked(testDB.runCommand(
-                                          {count: collName, $readPreference: {mode: "nearest"}}));
-                                  }, dbName, collName), port);
+    assert.commandWorked(st.shard0.adminCommand({clearLog: 'global'}));
+
+    const ps = startParallelShell(
+        funWithArgs(function(dbName, collName) {
+            const testDB = db.getSiblingDB(dbName);
+            assert.commandWorked(testDB.runCommand(
+                {count: collName, $readPreference: {mode: "nearest", hedge: {enabled: true}}}));
+        }, dbName, collName), port);
 
     fp2.wait();
     fp2.off();
@@ -94,6 +97,8 @@ function verifyCommandWorksWhenHedgeOperationsFailWithNetworkTimeout(
     fp1.off();
 
     ps();
+
+    checkLog.contains(st.shard0, "Hedged reads have been deprecated");
 }
 
 const st = new ShardingTest({
@@ -129,7 +134,7 @@ jsTest.log(
 assert.commandWorked(testDB.runCommand({
     count: collName,
     query: {$where: "sleep(100); return true;", x: {$gte: 0}},
-    $readPreference: {mode: "nearest"}
+    $readPreference: {mode: "nearest", hedge: {enabled: true}}
 }));
 
 let sortedNodes = [...st.rs0.nodes].sort((node1, node2) => node1.host.localeCompare(node2.host));
@@ -143,13 +148,15 @@ try {
     setCommandDelay(sortedNodes[0], "count", kBlockCmdTimeMS, ns);
 
     // Make the hedged request block for a while to allow the operation to start on the other node.
-    setCommandDelay(sortedNodes[1], "count", 100, ns);
+    // The delay is intentionally large so we avoid the race where a killOp can arrive before the
+    // request.
+    setCommandDelay(sortedNodes[1], "count", 1000, ns);
 
     const comment = "test_kill_initial_request_" + ObjectId();
     assert.commandWorked(testDB.runCommand({
         count: collName,
         query: {x: {$gte: 0}},
-        $readPreference: {mode: "nearest"},
+        $readPreference: {mode: "nearest", hedge: {enabled: true}},
         comment: comment
     }));
 
@@ -174,7 +181,9 @@ try {
     setCommandDelay(sortedNodes[1], "count", kBlockCmdTimeMS, ns);
 
     // Make the initial request block for a while to allow the operation to start on the other node.
-    setCommandDelay(sortedNodes[0], "count", 100, ns);
+    // The delay is intentionally large so we avoid the race where a killOp can arrive before the
+    // request.
+    setCommandDelay(sortedNodes[0], "count", 1000, ns);
 
     const comment = "test_kill_additional_request_" + ObjectId();
     assert.commandWorked(testDB.runCommand({

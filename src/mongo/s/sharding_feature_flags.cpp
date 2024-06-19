@@ -41,7 +41,7 @@ MONGO_INITIALIZER_GENERAL(SetShouldEmitLogService, ("EndServerParameterRegistrat
     logv2::setShouldEmitLogService([]() {
         // We need to use isEnabledUseLatestFCVWhenUninitialized instead of isEnabled because
         // this could run during startup while the FCV is still uninitialized.
-        return serverGlobalParams.clusterRole.has(ClusterRole::ShardServer) &&
+        return !serverGlobalParams.clusterRole.has(ClusterRole::None) &&
             feature_flags::gMultiServiceLogAndFTDCFormat.isEnabledUseLatestFCVWhenUninitialized(
                 serverGlobalParams.featureCompatibility.acquireFCVSnapshot());
     });

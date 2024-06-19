@@ -56,12 +56,17 @@ public:
     ~CollectionMock() override = default;
 
     std::shared_ptr<Collection> clone() const override {
-        return std::make_shared<CollectionMock>(*this);
+        std::unique_ptr<IndexCatalog> indexCatalogCopy =
+            _indexCatalog ? _indexCatalog->clone() : nullptr;
+        auto copy = std::make_shared<CollectionMock>(_uuid, _nss, std::move(indexCatalogCopy));
+        copy->_catalogId = _catalogId;
+        copy->_committed = _committed;
+        copy->_options = _options;
+        return copy;
     }
 
-
     SharedCollectionDecorations* getSharedDecorations() const override {
-        return nullptr;
+        return &_sharedCollectionDecorations;
     }
 
     void init(OperationContext* opCtx) override {
@@ -382,7 +387,7 @@ public:
 
     StatusWith<int> checkMetaDataForIndex(const std::string& indexName,
                                           const BSONObj& spec) const override {
-        MONGO_UNREACHABLE;
+        return 1;
     }
 
     void updateTTLSetting(OperationContext* opCtx,
@@ -474,7 +479,7 @@ public:
     }
 
     bool isIndexReady(StringData indexName) const override {
-        MONGO_UNREACHABLE;
+        return true;
     }
 
     void replaceMetadata(OperationContext* opCtx,
@@ -483,10 +488,6 @@ public:
     }
 
     bool isMetadataEqual(const BSONObj& otherMetadata) const override {
-        MONGO_UNREACHABLE;
-    }
-
-    void sanitizeCollectionOptions(OperationContext* opCtx) override {
         MONGO_UNREACHABLE;
     }
 
@@ -505,6 +506,7 @@ private:
     clonable_ptr<IndexCatalog> _indexCatalog;
     bool _committed = true;
     CollectionOptions _options;
+    mutable SharedCollectionDecorations _sharedCollectionDecorations;
 };
 
 }  // namespace mongo

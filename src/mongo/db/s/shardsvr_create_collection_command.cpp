@@ -67,6 +67,40 @@
 namespace mongo {
 namespace {
 
+bool requestsShouldBeSerialized(OperationContext* opCtx,
+                                const ShardsvrCreateCollectionRequest& incomingOp,
+                                const ShardsvrCreateCollectionRequest& ongoingOp) {
+    // The incoming requests could be either one of the following types:
+    //  - implicit collection creation
+    //  - explicit collection creation
+    //  - register collection
+    //  - shard    collection
+    //
+    // Implicit collection creations should serialized with all the other operations. The reason is
+    // that all the implicit requests are performed as part of user write operations and we do not
+    // want those to make explicit DDL operation to fail.
+    //
+    // For backward compatibility reason we also want to serialize explicit create requests. In fact
+    // before 8.0 explicit requests were always serialized.
+    //
+    // 'register' and 'shard' collection are normal DDL operation, thus we should throw in case they
+    // are issued concurrently with conflicting options.
+
+    const auto& incomingIsShardColl = !incomingOp.getUnsplittable();
+    const auto& ongoingIsShardColl = !ongoingOp.getUnsplittable();
+    if (incomingIsShardColl && ongoingIsShardColl) {
+        return false;
+    }
+
+    const auto& incomingIsRegister = incomingOp.getRegisterExistingCollectionInGlobalCatalog();
+    const auto& ongoingIsRegister = ongoingOp.getRegisterExistingCollectionInGlobalCatalog();
+    if (incomingIsRegister && ongoingIsRegister) {
+        return false;
+    }
+
+    return true;
+}
+
 void runCreateCommandDirectClient(OperationContext* opCtx,
                                   NamespaceString ns,
                                   const CreateCommand& cmd) {
@@ -81,19 +115,14 @@ void runCreateCommandDirectClient(OperationContext* opCtx,
 bool isAlwaysUntracked(OperationContext* opCtx,
                        NamespaceString&& nss,
                        const ShardsvrCreateCollection& request) {
-    bool isFromCreateCommand = !request.getIsFromCreateUnsplittableCollectionTestCommand();
-    bool isTimeseries = request.getTimeseries().has_value();
     bool isView = request.getViewOn().has_value();
-    bool isEncryptedCollection =
-        request.getEncryptedFields().has_value() || nss.isFLE2StateCollection();
     bool hasApiParams = APIParameters::get(opCtx).getParamsPassed();
 
-    // TODO SERVER-83878 Remove isFromCreateCommand && isTimeseries
-    // TODO SERVER-79248 or SERVER-79254 remove isEncryptedCollection once we both cleanup
-    // and compaction coordinator work on unsplittable collections
+    // TODO SERVER-83713 Reconsider isFLE2StateCollection check
+    // TODO SERVER-83714 Reconsider isFLE2StateCollection check
     // TODO SERVER-86018 Remove hasApiParams
-    return isView || nss.isNamespaceAlwaysUntracked() || (isFromCreateCommand && isTimeseries) ||
-        isEncryptedCollection || hasApiParams;
+    return isView || nss.isFLE2StateCollection() || nss.isNamespaceAlwaysUntracked() ||
+        hasApiParams;
 }
 
 class ShardsvrCreateCollectionCommand final : public TypedCommand<ShardsvrCreateCollectionCommand> {
@@ -173,6 +202,10 @@ public:
                 // not tracked yet or must always be local
                 if (isUnsplittable && !isFromCreateUnsplittableCommand) {
                     if (isAlwaysUntracked(opCtx, ns(), request())) {
+                        uassert(ErrorCodes::IllegalOperation,
+                                fmt::format("Tracking of collection '{}' is not supported.",
+                                            ns().toStringForErrorMsg()),
+                                !isTrackCollectionIfExists);
                         return _createUntrackedCollection(opCtx);
                     }
 
@@ -233,7 +266,12 @@ public:
                 try {
                     instance->checkIfOptionsConflict(coordinatorDoc);
                 } catch (const ExceptionFor<ErrorCodes::ConflictingOperationInProgress>& ex) {
-                    if (isUnsplittable) {
+                    const auto& ongoingCoordinatorReq =
+                        dynamic_pointer_cast<CreateCollectionResponseProvider>(instance)
+                            ->getOriginalRequest();
+                    const auto shouldSerializeRequests =
+                        requestsShouldBeSerialized(opCtx, requestToForward, ongoingCoordinatorReq);
+                    if (shouldSerializeRequests) {
                         LOGV2_DEBUG(8119001,
                                     1,
                                     "Found an incompatible create collection coordinator "

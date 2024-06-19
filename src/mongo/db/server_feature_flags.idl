@@ -35,14 +35,6 @@ feature_flags:
         cpp_varname: gFeatureFlagSecurityToken
         default: false
         shouldBeFCVGated: true
-    featureFlagRequireTenantID:
-        # Only available with the server parameter "multitenancySupport".
-        description: >-
-            When enabled in conjunction with the server parameter "multitenancySupport",
-            require tenantID to be a part of NamespaceString and TenantDatabase.
-        cpp_varname: gFeatureFlagRequireTenantID
-        default: false
-        shouldBeFCVGated: true
     featureFlagGlobalIndexes:
         description: "Enable support for global indexes"
         cpp_varname: gFeatureFlagGlobalIndexes
@@ -51,7 +43,8 @@ feature_flags:
     featureFlagAllowAdditionalParticipants:
         description: "Enable adding additional participants to active transaction"
         cpp_varname: gFeatureFlagAllowAdditionalParticipants
-        default: false
+        default: true
+        version: 8.0
         shouldBeFCVGated: true
     featureFlagBulkWriteCommand:
         description: "Support for bulkWrite command and one-shot transactions"
@@ -162,8 +155,15 @@ feature_flags:
     featureFlagIngressAdmissionControl:
         description: "Feature flag to enable data node ingress admission control"
         cpp_varname: gFeatureFlagIngressAdmissionControl
-        default: false
+        default: true
         shouldBeFCVGated: false
+    # TODO SERVER-89999 remove once the version becomes last LTS
+    featureFlagDisallowBucketCollectionWithoutTimeseriesOptions:
+        description: "Disallow creation of timeseries bucket collection without timeseries options"
+        cpp_varname: gFeatureFlagDisallowBucketCollectionWithoutTimeseriesOptions
+        default: true
+        shouldBeFCVGated: true
+        version: 8.0
     featureFlagPrefetch:
         description: "Feature flag to make pre-fetching available"
         cpp_varname: gFeatureFlagPrefetch
@@ -173,7 +173,8 @@ feature_flags:
         description: "Feature flag to allow setting a server-wide default maxTimeMS used for all
         read operations"
         cpp_varname: gFeatureFlagDefaultReadMaxTimeMS
-        default: false
+        default: true
+        version: 8.0
         shouldBeFCVGated: true
     featureFlagPeriodicServerParameterSampling:
         description: "Feature flag to enable periodic FTDC sampling of server parameters"

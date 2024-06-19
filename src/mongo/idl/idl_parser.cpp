@@ -39,7 +39,6 @@
 
 #include "mongo/base/error_codes.h"
 #include "mongo/bson/bsonobjbuilder.h"
-#include "mongo/idl/command_generic_argument.h"
 #include "mongo/idl/idl_parser.h"
 #include "mongo/util/str.h"
 
@@ -169,7 +168,7 @@ std::string IDLParserContext::getElementPath(StringData fieldName) const {
 
 void IDLParserContext::throwDuplicateField(StringData fieldName) const {
     std::string path = getElementPath(fieldName);
-    uasserted(ErrorCodes::IDLFailedToParse,
+    uasserted(ErrorCodes::IDLDuplicateField,
               str::stream() << "BSON field '" << path << "' is a duplicate field");
 }
 
@@ -183,17 +182,22 @@ void IDLParserContext::throwMissingField(StringData fieldName) const {
               str::stream() << "BSON field '" << path << "' is missing but a required field");
 }
 
+bool isMongocryptdArgument(StringData arg) {
+    return arg == "jsonSchema"_sd;
+}
+
 void IDLParserContext::throwUnknownField(StringData fieldName) const {
     std::string path = getElementPath(fieldName);
     if (isMongocryptdArgument(fieldName)) {
         uasserted(
-            4662500,
+            ErrorCodes::IDLUnknownFieldPossibleMongocryptd,
             str::stream()
                 << "BSON field '" << path
                 << "' is an unknown field. This command may be meant for a mongocryptd process.");
     }
 
-    uasserted(40415, str::stream() << "BSON field '" << path << "' is an unknown field.");
+    uasserted(ErrorCodes::IDLUnknownField,
+              str::stream() << "BSON field '" << path << "' is an unknown field.");
 }
 
 void IDLParserContext::throwBadArrayFieldNumberSequence(StringData actual,
@@ -253,7 +257,7 @@ StringData IDLParserContext::checkAndAssertCollectionName(const BSONElement& ele
         return collectionlessAggregateCursorCol;
     }
 
-    uassert(ErrorCodes::BadValue,
+    uassert(ErrorCodes::TypeMismatch,
             str::stream() << "collection name has invalid type " << typeName(element.type()),
             element.canonicalType() == canonicalizeBSONType(mongo::String));
 
@@ -267,21 +271,6 @@ std::variant<UUID, StringData> IDLParserContext::checkAndAssertCollectionNameOrU
     } else {
         // Ensure collection identifier is not a Command
         return checkAndAssertCollectionName(element, false);
-    }
-}
-
-void IDLParserContext::appendGenericCommandArguments(const BSONObj& commandPassthroughFields,
-                                                     const std::vector<StringData>& knownFields,
-                                                     BSONObjBuilder* builder) {
-
-    for (const auto& element : commandPassthroughFields) {
-
-        StringData name = element.fieldNameStringData();
-        // Include a passthrough field as long the IDL class has not defined it.
-        if (mongo::isGenericArgument(name) &&
-            std::find(knownFields.begin(), knownFields.end(), name) == knownFields.end()) {
-            builder->append(element);
-        }
     }
 }
 

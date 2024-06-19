@@ -239,11 +239,6 @@ feature_flags:
         default: true
         version: 6.0
         shouldBeFCVGated: true
-    featureFlagDerivedMetadata:
-        description: "When enabled, support storing derived collection and index metadata"
-        cpp_varname: feature_flags::gDerivedMetadata
-        default: false
-        shouldBeFCVGated: true
     featureFlagInternalWritesAreReplicatedTransactionally:
         description: Feature flag to enable internal writes to use the transactionally replicated WriteUnitOfWork API by default.
         cpp_varname: gFeatureFlagInternalWritesAreReplicatedTransactionally
@@ -277,8 +272,7 @@ feature_flags:
     featureFlagTSBucketingParametersUnchanged:
         description: "Enable storing the 'timeseriesBucketingParametersHaveChanged' parameter on disk"
         cpp_varname: feature_flags::gTSBucketingParametersUnchanged
-        default: true
-        version: 7.1
+        default: false
         shouldBeFCVGated: true
     featureFlagBlockBasedDecodingScalarAPI:
         description: "Enable support for decompressing BSON columns using the block based scalar API"
@@ -288,5 +282,5 @@ feature_flags:
     featureFlagBlockBasedDecodingPathAPI:
         description: "Enable support for decompressing BSON columns using the block based Path API"
         cpp_varname: feature_flags::gBlockBasedDecodingPathAPI
-        default: false
+        default: true
         shouldBeFCVGated: false

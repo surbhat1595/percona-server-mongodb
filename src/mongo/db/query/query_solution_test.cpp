@@ -51,10 +51,12 @@
 #include "mongo/db/query/index_bounds_builder.h"
 #include "mongo/db/query/index_entry.h"
 #include "mongo/db/query/interval.h"
+#include "mongo/db/query/planner_wildcard_helpers.h"
 #include "mongo/db/query/projection_parser.h"
 #include "mongo/db/query/projection_policies.h"
 #include "mongo/db/query/query_solution.h"
 #include "mongo/db/query/query_test_service_context.h"
+#include "mongo/db/query/wildcard_test_utils.h"
 #include "mongo/stdx/type_traits.h"
 #include "mongo/unittest/assert.h"
 #include "mongo/unittest/framework.h"
@@ -70,8 +72,6 @@ std::ostream& operator<<(std::ostream& os, FieldAvailability value) {
             return os << "NotProvided";
         case FieldAvailability::kHashedValueProvided:
             return os << "HashedValueProvided";
-        case FieldAvailability::kCollatedProvided:
-            return os << "CollatedValueProvided";
         case FieldAvailability::kFullyProvided:
             return os << "FullyProvided";
     }
@@ -123,25 +123,6 @@ IndexEntry buildSimpleIndexEntry(const BSONObj& kp) {
             nullptr,
             {},
             nullptr,
-            nullptr};
-}
-
-/**
- * Make a minimal IndexEntry from just a key pattern and a collation. A dummy name will be added.
- */
-IndexEntry buildSimpleIndexEntry(const BSONObj& kp, CollatorInterface* ci) {
-    return {kp,
-            IndexNames::nameToType(IndexNames::findPluginName(kp)),
-            IndexDescriptor::kLatestIndexVersion,
-            false,
-            {},
-            {},
-            false,
-            false,
-            CoreIndexInfo::Identifier("test_foo"),
-            nullptr,
-            {},
-            ci,
             nullptr};
 }
 
@@ -566,27 +547,6 @@ TEST(QuerySolutionTest, GetFieldsWithStringBoundsIdentifiesStringsWithInclusiveB
     ASSERT_TRUE(fields.count("a"));
 }
 
-TEST(QuerySolutionTest, IndexScanWithCollatedValues) {
-    IndexBounds bounds;
-    CollatorInterfaceMock queryCollator(CollatorInterfaceMock::MockType::kReverseString);
-
-    BSONObj keyPattern = BSON("a" << 1);
-    bounds.isSimpleRange = true;
-    bounds.startKey = fromjson("{'a': 1}");
-    bounds.endKey = fromjson("{'a': ''}");
-    bounds.boundInclusion = BoundInclusion::kIncludeBothStartAndEndKeys;
-
-    IndexScanNode node{buildSimpleIndexEntry(BSON("a" << 1))};
-    node.bounds = bounds;
-    node.index.collator = &queryCollator;
-    node.queryCollator = &queryCollator;
-    node.computeProperties();
-
-    ASSERT_TRUE(node.hasStringBounds("a"));
-    ASSERT_EQ(node.getFieldAvailability("a"), FieldAvailability::kCollatedProvided);
-    ASSERT_EQ(node.getFieldAvailability("any_field"), FieldAvailability::kNotProvided);
-}
-
 TEST(QuerySolutionTest, IndexScanNodeRemovesNonMatchingCollatedFieldsFromSortsOnSimpleBounds) {
     IndexScanNode node{buildSimpleIndexEntry(BSON("a" << 1 << "b" << 1))};
     CollatorInterfaceMock queryCollator(CollatorInterfaceMock::MockType::kReverseString);
@@ -670,6 +630,421 @@ TEST(QuerySolutionTest, IndexScanNodeDoesNotRemoveCollatedFieldsFromSortsIfColla
     ASSERT_EQ(sorts, ProvidedSortSet(BSON("a" << 1), {}));
 
     ASSERT_TRUE(sorts.contains(BSON("a" << 1)));
+}
+
+// Index: {a: 1, b: "hashed", c: 1}
+// Bounds: a: [1, 1], b: [MINKEY, MAXKEY], c: [1, 2]
+TEST(QuerySolutionTest, HashedIndexScanNodeTruncatesSort) {
+    IndexScanNode node{buildSimpleIndexEntry(BSON("a" << 1 << "b"
+                                                      << "hashed"
+                                                      << "c" << 1))};
+    OrderedIntervalList a{};
+    a.name = "a";
+    a.intervals.push_back(IndexBoundsBuilder::makePointInterval(BSON("" << 1)));
+    node.bounds.fields.push_back(a);
+
+    OrderedIntervalList b{};
+    b.name = "b";
+    b.intervals.push_back(IndexBoundsBuilder::makeRangeInterval(
+        BSON("" << MINKEY << "" << MAXKEY), BoundInclusion::kIncludeBothStartAndEndKeys));
+    node.bounds.fields.push_back(b);
+
+    OrderedIntervalList c{};
+    c.name = "c";
+    c.intervals.push_back(IndexBoundsBuilder::makeRangeInterval(
+        BSON("" << 1 << "" << 2), BoundInclusion::kIncludeBothStartAndEndKeys));
+    node.bounds.fields.push_back(c);
+
+    node.computeProperties();
+    auto sorts = node.providedSorts();
+
+    // The hashed field cannot be part of the provided sort and forces the rest of the sort to be
+    // truncated.
+    ASSERT_EQ(sorts, ProvidedSortSet(BSONObj(), {"a"} /* equality fields */));
+    ASSERT(sorts.contains(BSON("a" << 1)));
+    ASSERT_FALSE(sorts.contains(BSON("b" << 1)));
+    ASSERT_FALSE(sorts.contains(BSON("c" << 1)));
+    ASSERT_FALSE(sorts.contains(BSON("a" << 1 << "b" << 1)));
+    ASSERT_FALSE(sorts.contains(BSON("a" << 1 << "c" << 1)));
+    ASSERT_FALSE(sorts.contains(BSON("b" << 1 << "c" << 1)));
+}
+
+// Index: {a: 1, b: "hashed", c: 1}
+// Bounds: a: [1, 1], b: [MINKEY, MAXKEY], c: [1, 1]
+TEST(QuerySolutionTest, HashedIndexScanNodeTruncatesSortUnlessFollowedByEquality) {
+    IndexScanNode node{buildSimpleIndexEntry(BSON("a" << 1 << "b"
+                                                      << "hashed"
+                                                      << "c" << 1))};
+    OrderedIntervalList a{};
+    a.name = "a";
+    a.intervals.push_back(IndexBoundsBuilder::makePointInterval(BSON("" << 1)));
+    node.bounds.fields.push_back(a);
+
+    OrderedIntervalList b{};
+    b.name = "b";
+    b.intervals.push_back(IndexBoundsBuilder::makeRangeInterval(
+        BSON("" << MINKEY << "" << MAXKEY), BoundInclusion::kIncludeBothStartAndEndKeys));
+    node.bounds.fields.push_back(b);
+
+    OrderedIntervalList c{};
+    c.name = "c";
+    c.intervals.push_back(IndexBoundsBuilder::makePointInterval(BSON("" << 1)));
+    node.bounds.fields.push_back(c);
+
+    node.computeProperties();
+    auto sorts = node.providedSorts();
+
+    // The hashed field cannot be part of the provided sort and forces the rest of the sort to be
+    // truncated except for following equalities.
+    ASSERT_EQ(sorts, ProvidedSortSet(BSONObj(), {"a", "c"} /* equality fields */));
+    ASSERT(sorts.contains(BSON("a" << 1)));
+    ASSERT_FALSE(sorts.contains(BSON("b" << 1)));
+    ASSERT(sorts.contains(BSON("c" << 1)));
+    ASSERT_FALSE(sorts.contains(BSON("a" << 1 << "b" << 1)));
+    ASSERT(sorts.contains(BSON("a" << 1 << "c" << 1)));
+    ASSERT_FALSE(sorts.contains(BSON("b" << 1 << "c" << 1)));
+}
+
+// Index: {a: 1, b: "hashed", c: 1}
+// Bounds: a: [1, 1], b: [1, 1], c: [MINKEY, MAXKEY]
+TEST(QuerySolutionTest, HashedIndexScanNodeDoesNotTruncateSortWhenEquality) {
+    IndexScanNode node{buildSimpleIndexEntry(BSON("a" << 1 << "b"
+                                                      << "hashed"
+                                                      << "c" << 1))};
+    OrderedIntervalList a{};
+    a.name = "a";
+    a.intervals.push_back(IndexBoundsBuilder::makePointInterval(BSON("" << 1)));
+    node.bounds.fields.push_back(a);
+
+    OrderedIntervalList b{};
+    b.name = "b";
+    b.intervals.push_back(IndexBoundsBuilder::makePointInterval(BSON("" << 1)));
+    node.bounds.fields.push_back(b);
+
+    OrderedIntervalList c{};
+    c.name = "c";
+    c.intervals.push_back(IndexBoundsBuilder::makeRangeInterval(
+        BSON("" << MINKEY << "" << MAXKEY), BoundInclusion::kIncludeBothStartAndEndKeys));
+    node.bounds.fields.push_back(c);
+
+    node.computeProperties();
+    auto sorts = node.providedSorts();
+
+    // The hashed field can be part of the sort when its bounds are a point interval (equality). It
+    // does not cause truncation in this case.
+    ASSERT_EQ(sorts, ProvidedSortSet(BSON("c" << 1), {"a", "b"} /* equality fields */));
+    ASSERT(sorts.contains(BSON("a" << 1)));
+    ASSERT(sorts.contains(BSON("b" << 1)));
+    ASSERT(sorts.contains(BSON("c" << 1)));
+    ASSERT(sorts.contains(BSON("a" << 1 << "b" << 1)));
+    ASSERT(sorts.contains(BSON("a" << 1 << "c" << 1)));
+    ASSERT(sorts.contains(BSON("b" << 1 << "c" << 1)));
+}
+
+// Index: {a: 1, b: "hashed", c: 1}
+// Bounds: a: [1, 1], b: ["p", "p"], c: [MINKEY, MAXKEY]
+TEST(QuerySolutionTest, HashedIndexScanNodeDoesTruncatesSortWhenCollationDoesntMatch) {
+    IndexScanNode node{buildSimpleIndexEntry(BSON("a" << 1 << "b"
+                                                      << "hashed"
+                                                      << "c" << 1))};
+    CollatorInterfaceMock queryCollator(CollatorInterfaceMock::MockType::kToLowerString);
+    node.queryCollator = &queryCollator;
+
+    OrderedIntervalList a{};
+    a.name = "a";
+    a.intervals.push_back(IndexBoundsBuilder::makePointInterval(BSON("" << 1)));
+    node.bounds.fields.push_back(a);
+
+    OrderedIntervalList b{};
+    b.name = "b";
+    b.intervals.push_back(IndexBoundsBuilder::makePointInterval(BSON(""
+                                                                     << "p")));
+    node.bounds.fields.push_back(b);
+
+    OrderedIntervalList c{};
+    c.name = "c";
+    c.intervals.push_back(IndexBoundsBuilder::makeRangeInterval(
+        BSON("" << MINKEY << "" << MAXKEY), BoundInclusion::kIncludeBothStartAndEndKeys));
+    node.bounds.fields.push_back(c);
+
+    node.computeProperties();
+    auto sorts = node.providedSorts();
+
+    // The hashed field cannot be part of the sort when its bounds are a point interval (equality)
+    // that is affected by collation and the query and index collation do not match. It forces the
+    // rest of the sort to be truncated.
+    ASSERT_EQ(sorts, ProvidedSortSet(BSONObj(), {"a"} /* equality fields */));
+    ASSERT(sorts.contains(BSON("a" << 1)));
+    ASSERT_FALSE(sorts.contains(BSON("b" << 1)));
+    ASSERT_FALSE(sorts.contains(BSON("c" << 1)));
+    ASSERT_FALSE(sorts.contains(BSON("a" << 1 << "b" << 1)));
+    ASSERT_FALSE(sorts.contains(BSON("a" << 1 << "c" << 1)));
+    ASSERT_FALSE(sorts.contains(BSON("b" << 1 << "c" << 1)));
+}
+
+// Index: {a: 1, b: "hashed", c: 1}
+// Bounds: a: [1, 1], b: ["a", "b"], c: [MINKEY, MAXKEY]
+TEST(QuerySolutionTest,
+     HashedIndexScanNodeDoesTruncatesSortWhenCollationDoesntMatchWithRangeQuery) {
+    IndexScanNode node{buildSimpleIndexEntry(BSON("a" << 1 << "b"
+                                                      << "hashed"
+                                                      << "c" << 1))};
+    CollatorInterfaceMock queryCollator(CollatorInterfaceMock::MockType::kToLowerString);
+    node.queryCollator = &queryCollator;
+
+    OrderedIntervalList a{};
+    a.name = "a";
+    a.intervals.push_back(IndexBoundsBuilder::makePointInterval(BSON("" << 1)));
+    node.bounds.fields.push_back(a);
+
+    OrderedIntervalList b{};
+    b.name = "b";
+    b.intervals.push_back(
+        IndexBoundsBuilder::makeRangeInterval(BSON(""
+                                                   << "a"
+                                                   << ""
+                                                   << "b"),
+                                              BoundInclusion::kIncludeBothStartAndEndKeys));
+    node.bounds.fields.push_back(b);
+
+    OrderedIntervalList c{};
+    c.name = "c";
+    c.intervals.push_back(IndexBoundsBuilder::makeRangeInterval(
+        BSON("" << MINKEY << "" << MAXKEY), BoundInclusion::kIncludeBothStartAndEndKeys));
+    node.bounds.fields.push_back(c);
+
+    node.computeProperties();
+    auto sorts = node.providedSorts();
+
+    // The hashed field cannot be part of the sort when its bounds are a range interval that is
+    // affected by collation and the query and index collation do not match. It forces the rest of
+    // the sort to be truncated.
+    ASSERT_EQ(sorts, ProvidedSortSet(BSONObj(), {"a"} /* equality fields */));
+    ASSERT(sorts.contains(BSON("a" << 1)));
+    ASSERT_FALSE(sorts.contains(BSON("b" << 1)));
+    ASSERT_FALSE(sorts.contains(BSON("c" << 1)));
+    ASSERT_FALSE(sorts.contains(BSON("a" << 1 << "b" << 1)));
+    ASSERT_FALSE(sorts.contains(BSON("a" << 1 << "c" << 1)));
+    ASSERT_FALSE(sorts.contains(BSON("b" << 1 << "c" << 1)));
+}
+
+// Expanded wildcard index: {a: 1, b.$**: 1, c: 1}
+// Bounds: a: [1, 1], $_path: ["b", "b"], b: [1, 2], c: [2, 3]
+TEST(QuerySolutionTest, WildcardIndexSupportsSortWhenIndexOnlyNeedsToLookAtOnePath) {
+    mongo::wildcard_planning::WildcardIndexEntryMock wildcardIndex{
+        BSON("a" << 1 << "b.$**" << 1 << "c" << 1), BSONObj{}, {}};
+
+    // The following setup mimics a query that queries against fields "a", "b.d", and "c". This
+    // matches the bounds we generate for those fields below. However, only pass "b.d" as 'fields'
+    // here, because we only want to consider the expanded index with that field plugged in.
+    stdx::unordered_set<std::string> fields{"b.d"};
+    std::vector<IndexEntry> expandedIndexes{};
+    mongo::wildcard_planning::expandWildcardIndexEntry(
+        *wildcardIndex.indexEntry, fields, &expandedIndexes);
+
+    ASSERT_EQ(expandedIndexes.size(), 1);
+    IndexScanNode node{expandedIndexes.at(0)};
+
+    OrderedIntervalList a{};
+    a.name = "a";
+    a.intervals.push_back(IndexBoundsBuilder::makePointInterval(BSON("" << 1)));
+    node.bounds.fields.push_back(a);
+
+    OrderedIntervalList b{};
+    b.name = "b.d";
+    b.intervals.push_back(IndexBoundsBuilder::makeRangeInterval(
+        BSON("" << 1 << "" << 2), BoundInclusion::kIncludeBothStartAndEndKeys));
+
+    node.bounds.fields.push_back(b);
+
+    OrderedIntervalList c{};
+    c.name = "c";
+    c.intervals.push_back(IndexBoundsBuilder::makeRangeInterval(
+        BSON("" << 2 << "" << 3), BoundInclusion::kIncludeBothStartAndEndKeys));
+    node.bounds.fields.push_back(c);
+
+    std::vector<interval_evaluation_tree::Builder> ietBuilders;
+    mongo::wildcard_planning::finalizeWildcardIndexScanConfiguration(&node, &ietBuilders);
+
+    node.computeProperties();
+    auto sorts = node.providedSorts();
+
+    // When the wildcard path is only on one point, it can provide a sort on the wildcard field
+    // (b.d). "$_path" is a reserved key used for describing the wildcard path. It appears here in
+    // fields with equality bounds.
+    ASSERT_EQ(sorts,
+              ProvidedSortSet(BSON("b.d" << 1 << "c" << 1), {"a", "$_path"} /* equality fields */));
+    ASSERT(sorts.contains(BSON("a" << 1)));
+    ASSERT(sorts.contains(BSON("b.d" << 1)));
+    ASSERT_FALSE(sorts.contains(BSON("c" << 1)));
+    ASSERT(sorts.contains(BSON("a" << 1 << "b.d" << 1)));
+    ASSERT(sorts.contains(BSON("b.d" << 1 << "c" << 1)));
+    ASSERT(sorts.contains(BSON("a" << 1 << "b.d" << 1 << "c" << 1)));
+    ASSERT_FALSE(sorts.contains(BSON("a" << 1 << "c" << 1)));
+}
+
+// Index: {a: 1, b.$**: 1, c: 1}
+// Bounds: a: [1, 1], b: [MINKEY, MAXKEY], c: [2, 3]
+TEST(QuerySolutionTest, WildcardIndexDoesNotSupportSortWhenIndexNeedsToLookAtMultiplePaths) {
+    // The following setup mimics a query that queries against fields "a", "b", and "c". This
+    // matches the bounds we generate for those fields below. However, only pass "b" as 'fields'
+    // here, because we only want to consider the expanded index with that field plugged in.
+    mongo::wildcard_planning::WildcardIndexEntryMock wildcardIndex{
+        BSON("a" << 1 << "b.$**" << 1 << "c" << 1), BSONObj{}, {}};
+    stdx::unordered_set<std::string> fields{"b"};
+    std::vector<IndexEntry> expandedIndexes{};
+    mongo::wildcard_planning::expandWildcardIndexEntry(
+        *wildcardIndex.indexEntry, fields, &expandedIndexes);
+
+    ASSERT_EQ(expandedIndexes.size(), 1);
+    IndexScanNode node{expandedIndexes.at(0)};
+
+    OrderedIntervalList a{};
+    a.name = "a";
+    a.intervals.push_back(IndexBoundsBuilder::makePointInterval(BSON("" << 1)));
+    node.bounds.fields.push_back(a);
+
+    OrderedIntervalList b{};
+    b.name = "b";
+    b.intervals.push_back(IndexBoundsBuilder::makeRangeInterval(
+        BSON("" << MINKEY << "" << MAXKEY), BoundInclusion::kIncludeBothStartAndEndKeys));
+    node.bounds.fields.push_back(b);
+
+    OrderedIntervalList c{};
+    c.name = "c";
+    c.intervals.push_back(IndexBoundsBuilder::makeRangeInterval(
+        BSON("" << 2 << "" << 3), BoundInclusion::kIncludeBothStartAndEndKeys));
+    node.bounds.fields.push_back(c);
+
+    std::vector<interval_evaluation_tree::Builder> ietBuilders;
+    mongo::wildcard_planning::finalizeWildcardIndexScanConfiguration(&node, &ietBuilders);
+
+    node.computeProperties();
+    auto sorts = node.providedSorts();
+
+    // When the wildcard path is a union, it cannot provide a sort on any wildcard field.
+    ASSERT_EQ(sorts, ProvidedSortSet(BSONObj(), {"a"} /* equality fields */));
+    ASSERT(sorts.contains(BSON("a" << 1)));
+    ASSERT_FALSE(sorts.contains(BSON("b" << 1)));
+    ASSERT_FALSE(sorts.contains(BSON("b.d" << 1)));
+    ASSERT_FALSE(sorts.contains(BSON("c" << 1)));
+    ASSERT_FALSE(sorts.contains(BSON("a" << 1 << "b" << 1)));
+    ASSERT_FALSE(sorts.contains(BSON("a" << 1 << "c" << 1)));
+}
+
+// Index: {a: 1, b.$**: 1, c: 1}
+// Bounds: a: [1, 1], b: ["p", "p"], c: [2, 3]
+TEST(QuerySolutionTest, WildcardIndexDoesNotSupportSortWhenCollationDoesntMatch) {
+    // The following setup mimics a query that queries against fields "a", "b.d", and "c". This
+    // matches the bounds we generate for those fields below.  However, only pass "b.d" as 'fields'
+    // here, because we only want to consider the expanded index with that field plugged in.
+    mongo::wildcard_planning::WildcardIndexEntryMock wildcardIndex{
+        BSON("a" << 1 << "b.$**" << 1 << "c" << 1), BSONObj{}, {}};
+    stdx::unordered_set<std::string> fields{"b.d"};
+    std::vector<IndexEntry> expandedIndexes{};
+    mongo::wildcard_planning::expandWildcardIndexEntry(
+        *wildcardIndex.indexEntry, fields, &expandedIndexes);
+
+    ASSERT_EQ(expandedIndexes.size(), 1);
+    IndexScanNode node{expandedIndexes.at(0)};
+
+    CollatorInterfaceMock queryCollator(CollatorInterfaceMock::MockType::kToLowerString);
+    node.queryCollator = &queryCollator;
+
+    OrderedIntervalList a{};
+    a.name = "a";
+    a.intervals.push_back(IndexBoundsBuilder::makePointInterval(BSON("" << 1)));
+    node.bounds.fields.push_back(a);
+
+    OrderedIntervalList b{};
+    b.name = "b.d";
+    b.intervals.push_back(IndexBoundsBuilder::makePointInterval(BSON(""
+                                                                     << "p")));
+    node.bounds.fields.push_back(b);
+
+    OrderedIntervalList c{};
+    c.name = "c";
+    c.intervals.push_back(IndexBoundsBuilder::makeRangeInterval(
+        BSON("" << 2 << "" << 3), BoundInclusion::kIncludeBothStartAndEndKeys));
+    node.bounds.fields.push_back(c);
+
+
+    std::vector<interval_evaluation_tree::Builder> ietBuilders;
+    mongo::wildcard_planning::finalizeWildcardIndexScanConfiguration(&node, &ietBuilders);
+
+    node.computeProperties();
+
+    // When the wildcard path is only on one point, but the wildcard field matches string values
+    // and the query and indxex collation differ, then the index cannot provide a sort on the
+    // wildcard field (b.d). It does not cause truncation because the bounds for b.d are a point.
+    auto sorts = node.providedSorts();
+    ASSERT_EQ(sorts, ProvidedSortSet(BSON("c" << 1), {"a"} /* equality fields */));
+    ASSERT(sorts.contains(BSON("a" << 1)));
+    ASSERT_FALSE(sorts.contains(BSON("b.d" << 1)));
+    ASSERT(sorts.contains(BSON("c" << 1)));
+    ASSERT_FALSE(sorts.contains(BSON("a" << 1 << "b.d" << 1)));
+    ASSERT_FALSE(sorts.contains(BSON("b.d" << 1 << "c" << 1)));
+    ASSERT_FALSE(sorts.contains(BSON("a" << 1 << "b.d" << 1 << "c" << 1)));
+    ASSERT(sorts.contains(BSON("a" << 1 << "c" << 1)));
+}
+
+// Index: {a: 1, b.$**: 1, c: 1}
+// Bounds: a: [1, 1], b: ["a", "b"], c: [2, 3]
+TEST(QuerySolutionTest, WildcardIndexDoesNotSupportSortWhenCollationDoesntMatchWithRangeQuery) {
+    // The following setup mimics a query that queries against fields "a", "b.d", and "c". This
+    // matches the bounds we generate for those fields below. However, only pass "b.d" as 'fields'
+    // here, because we only want to consider the expanded index with that field plugged in.
+    mongo::wildcard_planning::WildcardIndexEntryMock wildcardIndex{
+        BSON("a" << 1 << "b.$**" << 1 << "c" << 1), BSONObj{}, {}};
+    stdx::unordered_set<std::string> fields{"b.d"};
+    std::vector<IndexEntry> expandedIndexes{};
+    mongo::wildcard_planning::expandWildcardIndexEntry(
+        *wildcardIndex.indexEntry, fields, &expandedIndexes);
+
+    ASSERT_EQ(expandedIndexes.size(), 1);
+    IndexScanNode node{expandedIndexes.at(0)};
+
+    CollatorInterfaceMock queryCollator(CollatorInterfaceMock::MockType::kToLowerString);
+    node.queryCollator = &queryCollator;
+
+    OrderedIntervalList a{};
+    a.name = "a";
+    a.intervals.push_back(IndexBoundsBuilder::makePointInterval(BSON("" << 1)));
+    node.bounds.fields.push_back(a);
+
+    OrderedIntervalList b{};
+    b.name = "b.d";
+    b.intervals.push_back(
+        IndexBoundsBuilder::makeRangeInterval(BSON(""
+                                                   << "a"
+                                                   << ""
+                                                   << "b"),
+                                              BoundInclusion::kIncludeBothStartAndEndKeys));
+    node.bounds.fields.push_back(b);
+
+    OrderedIntervalList c{};
+    c.name = "c";
+    c.intervals.push_back(IndexBoundsBuilder::makeRangeInterval(
+        BSON("" << 2 << "" << 3), BoundInclusion::kIncludeBothStartAndEndKeys));
+    node.bounds.fields.push_back(c);
+
+    std::vector<interval_evaluation_tree::Builder> ietBuilders;
+    mongo::wildcard_planning::finalizeWildcardIndexScanConfiguration(&node, &ietBuilders);
+
+    node.computeProperties();
+    auto sorts = node.providedSorts();
+
+    // When the wildcard path is only on one point, but the wildcard field matches string values
+    // and the query and indxex collation differ, then the index cannot provide a sort on the
+    // wildcard field (b.d). It also causes truncation because the bounds for b.d are a range.
+    ASSERT_EQ(sorts, ProvidedSortSet(BSONObj(), {"a"} /* equality fields */));
+    ASSERT(sorts.contains(BSON("a" << 1)));
+    ASSERT_FALSE(sorts.contains(BSON("b.d" << 1)));
+    ASSERT_FALSE(sorts.contains(BSON("c" << 1)));
+    ASSERT_FALSE(sorts.contains(BSON("a" << 1 << "b.d" << 1)));
+    ASSERT_FALSE(sorts.contains(BSON("b.d" << 1 << "c" << 1)));
+    ASSERT_FALSE(sorts.contains(BSON("a" << 1 << "b.d" << 1 << "c" << 1)));
+    ASSERT_FALSE(sorts.contains(BSON("a" << 1 << "c" << 1)));
 }
 
 // Index: {a: 1, b: 1, c: 1, d: 1, e: 1}
@@ -1291,16 +1666,12 @@ TEST(QuerySolutionTest, FieldAvailabilityOutputStreamOperator) {
     ASSERT_EQ(ex1.str(), "NotProvided");
 
     std::stringstream ex2;
-    ex2 << FieldAvailability::kHashedValueProvided;
-    ASSERT_EQ(ex2.str(), "HashedValueProvided");
+    ex2 << FieldAvailability::kFullyProvided;
+    ASSERT_EQ(ex2.str(), "FullyProvided");
 
     std::stringstream ex3;
-    ex3 << FieldAvailability::kCollatedProvided;
-    ASSERT_EQ(ex3.str(), "CollatedValueProvided");
-
-    std::stringstream ex4;
-    ex4 << FieldAvailability::kFullyProvided;
-    ASSERT_EQ(ex4.str(), "FullyProvided");
+    ex3 << FieldAvailability::kHashedValueProvided;
+    ASSERT_EQ(ex3.str(), "HashedValueProvided");
 }
 
 TEST(QuerySolutionTest, GetSecondaryNamespaceVectorOverSingleEqLookupNode) {

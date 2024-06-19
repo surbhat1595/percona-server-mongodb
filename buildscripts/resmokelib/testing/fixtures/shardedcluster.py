@@ -25,7 +25,9 @@ class ShardedClusterFixture(interface.Fixture, interface._DockerComposeInterface
                  num_rs_nodes_per_shard=1, num_mongos=1, enable_balancer=True, auth_options=None,
                  configsvr_options=None, shard_options=None, cluster_logging_prefix=None,
                  config_shard=None, use_auto_bootstrap_procedure=None, embedded_router=False,
-                 replica_set_endpoint=False, random_migrations=False, launch_mongot=False):
+                 replica_set_endpoint=False, random_migrations=False, launch_mongot=False,
+                 set_cluster_parameter=None,
+                 has_uninitialized_fcv_initial_sync_nodes_in_shards=False):
         """Initialize ShardedClusterFixture with different options for the cluster processes.
 
         :param embedded_router - True if this ShardedCluster is running in "embedded router mode". Today, this means that:
@@ -68,6 +70,8 @@ class ShardedClusterFixture(interface.Fixture, interface._DockerComposeInterface
         self.use_auto_bootstrap_procedure = use_auto_bootstrap_procedure
         self.embedded_router_mode = embedded_router
         self.replica_endpoint_mode = replica_set_endpoint
+        self.set_cluster_parameter = set_cluster_parameter
+        self.has_uninitialized_fcv_initial_sync_nodes_in_shards = has_uninitialized_fcv_initial_sync_nodes_in_shards
 
         # Options for roles - shardsvr, configsvr.
         self.configsvr_options = self.fixturelib.make_historic(
@@ -243,7 +247,27 @@ class ShardedClusterFixture(interface.Fixture, interface._DockerComposeInterface
         for shard in self.shards:
             self.refresh_logical_session_cache(shard)
 
+        if self.set_cluster_parameter:
+            self.run_set_cluster_parameter()
+
         self.is_ready = True
+
+    def run_set_cluster_parameter(self):
+        """Set a cluster parameter for the fixture."""
+        client = interface.build_client(self, self.auth_options)
+        command_request = {
+            "setClusterParameter": {
+                self.set_cluster_parameter["parameter"]: self.set_cluster_parameter["value"]
+            },
+        }
+        client.admin.command(command_request)
+
+        # Make sure all mongos are aware of the new parameter values before tests are ran. This is
+        # needed because mongos only refresh their cache of cluster parameters periodically.
+        # Running getClusterParameter on a router causes it to refresh its cache.
+        for mongos in self.mongos:
+            mongos.mongo_client().admin.command(
+                {"getClusterParameter": self.set_cluster_parameter["parameter"]})
 
     # TODO SERVER-76343 remove the join_migrations parameter and the if clause depending on it.
     def stop_balancer(self, timeout_ms=300000, join_migrations=True):
@@ -273,6 +297,19 @@ class ShardedClusterFixture(interface.Fixture, interface._DockerComposeInterface
                 # The feature flag is not present
                 return False
             raise err
+
+    def get_shard_object(self, conn_string):
+        """Return the shard object that matches the shard referenced in conn_string."""
+        hosts = conn_string.split("/")[1].split(",")
+        ports = []
+        for host in hosts:
+            ports += [host.split(":")[1]]
+
+        for shard in self.shards:
+            shard_info = shard.get_node_info()
+            for node in shard_info:
+                if str(node.port) in ports:
+                    return shard
 
     def _do_teardown(self, mode=None):
         """Shut down the sharded cluster."""
@@ -430,7 +467,6 @@ class ShardedClusterFixture(interface.Fixture, interface._DockerComposeInterface
             del mongod_options["shardsvr"]
             mongod_options["configsvr"] = ""
             replset_config_options["configsvr"] = True
-            mongod_options["set_parameters"]["featureFlagTransitionToCatalogShard"] = "true"
             mongod_options["storageEngine"] = "wiredTiger"
 
             configsvr_options = self.configsvr_options.copy()
@@ -483,7 +519,6 @@ class ShardedClusterFixture(interface.Fixture, interface._DockerComposeInterface
         if self.config_shard is not None:
             if "set_parameters" not in mongos_options:
                 mongos_options["set_parameters"] = {}
-            mongos_options["set_parameters"]["featureFlagTransitionToCatalogShard"] = "true"
         mongos_options["set_parameters"] = mongos_options.get("set_parameters",
                                                               self.fixturelib.make_historic(
                                                                   {})).copy()
@@ -507,6 +542,18 @@ class ShardedClusterFixture(interface.Fixture, interface._DockerComposeInterface
         else:
             self.logger.info("Adding %s as a shard...", connection_string)
             client.admin.command({"addShard": connection_string})
+
+        # Normally, the initial sync node has already been added to the replica set during the
+        # replica set's setup() function. However, if this cluster is supposed to have an initial
+        # sync node hung in the uninitialized FCV state, we defer adding in the initial sync node
+        # until now.
+        # This is because if the shard is a config shard and needs to run
+        # transitionFromDedicatedConfigServer as part of _add_shard(), the
+        # transitionFromDedicatedConfigServer command is done with {w: all} write concern, which
+        # requires the initial sync node to not be hung, so we can't add the initial sync node to
+        # the shard until after transitionFromDedicatedConfigServer is done.
+        if self.has_uninitialized_fcv_initial_sync_nodes_in_shards:
+            shard.add_initial_sync_node_to_replica_set()
 
 
 class ExternalShardedClusterFixture(external.ExternalFixture, ShardedClusterFixture):

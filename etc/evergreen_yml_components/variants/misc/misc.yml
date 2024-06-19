@@ -7,6 +7,7 @@
 buildvariants:
 - name: run-all-affected-jstests
   display_name: "! Run All Affected JStests"
+  tags: ["required"]
   patch_only: true
   run_on:
   - rhel80-medium
@@ -17,9 +18,7 @@ buildvariants:
     burn_in_tag_exclude_build_variants: >-
       macos-debug-suggested
       enterprise-rhel-80-64-bit-dynamic-embedded-router
-    burn_in_tag_include_build_variants: >-
-      enterprise-rhel-80-64-bit-inmem
-      enterprise-rhel-80-64-bit-multiversion
+    burn_in_tag_include_build_variants:
     burn_in_tag_compile_task_dependency: archive_dist_test_debug
     compile_variant: &amazon_linux2_arm64_dynamic_compile_variant_name amazon-linux2-arm64-dynamic-compile
   depends_on:
@@ -40,6 +39,7 @@ buildvariants:
 
 - name: &copybara-sync-between-repos copybara-sync-between-repos
   display_name: "* Copybara Sync Between Repos"
+  tags: ["suggested"]
   activate: true
   run_on:
   - ubuntu2204-small
@@ -50,6 +50,7 @@ buildvariants:
 
 - name: enterprise-windows-ninja
   display_name: "Ninja Build: Enterprise Windows"
+  tags: []
   cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
   expansions:
     compile_flags: >-
@@ -70,6 +71,7 @@ buildvariants:
 
 - name: macos-enterprise-ninja
   display_name: "Ninja Build: macOS Enterprise"
+  tags: []
   cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
   run_on:
   - macos-1100
@@ -83,6 +85,7 @@ buildvariants:
 
 - name: macos-ninja-build-profiles
   display_name: "Ninja Build Profiles: macOS"
+  tags: []
   cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
   run_on:
   - macos-1100
@@ -97,6 +100,7 @@ buildvariants:
 
 - name: macos-arm-ninja-build-profiles
   display_name: "Ninja Build Profiles: macOS ARM"
+  tags: []
   cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
   run_on:
   - macos-1100-arm64
@@ -111,6 +115,7 @@ buildvariants:
 
 - name: windows-ninja-build-profiles
   display_name: "Ninja Build Profiles: Windows"
+  tags: []
   cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
   expansions:
     compile_flags: >-
@@ -136,6 +141,7 @@ buildvariants:
 
 - name: ubuntu1804-ninja-build-profiles
   display_name: "Ninja Build Profiles: Ubuntu 18.04"
+  tags: []
   cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
   run_on:
   - ubuntu1804-small
@@ -164,6 +170,7 @@ buildvariants:
 
 - name: enterprise-rhel-80-64-bit-dynamic-ninja
   display_name: "Ninja Build: Enterprise RHEL 8.0"
+  tags: []
   cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
   run_on:
   - rhel80-small

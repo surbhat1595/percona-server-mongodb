@@ -61,6 +61,7 @@
 #include "mongo/util/itoa.h"
 #include "mongo/util/shared_buffer.h"
 #include "mongo/util/shared_buffer_fragment.h"
+#include "mongo/util/tracking_allocator.h"
 
 namespace mongo {
 
@@ -79,24 +80,33 @@ const int BSONObjMaxUserSize = 16 * 1024 * 1024;
 */
 const int BSONObjMaxInternalSize = BSONObjMaxUserSize + (16 * 1024);
 
-const int BufferMaxSize = 64 * 1024 * 1024;
+/**
+ * Maximum size of a builder buffer and for BSONObj with BsonLargeSizeTrait. Limiting it to 27 bits
+ * because SharedBuffer::Holder might bit pack information. Setting it to 125 MB to have some
+ * wiggle room before size crosses 27 bits.
+ */
+const int BufferMaxSize = 125 * 1024 * 1024;
+static_assert(BufferMaxSize < (1 << 27));
 
 /**
- * This is the maximum size size of a buffer needed for storing a BSON object in a response message.
+ * This is the maximum size of a buffer needed for storing a BSON object in a response message.
  */
 const int kOpMsgReplyBSONBufferMaxSize = BSONObjMaxUserSize + (64 * 1024);
 
+namespace allocator_aware {
+template <class Allocator = std::allocator<void>>
 class SharedBufferAllocator {
     SharedBufferAllocator(const SharedBufferAllocator&) = delete;
     SharedBufferAllocator& operator=(const SharedBufferAllocator&) = delete;
 
 public:
     SharedBufferAllocator() = default;
-    SharedBufferAllocator(size_t sz) {
+    explicit SharedBufferAllocator(const Allocator& allocator) : _buf(allocator) {}
+    SharedBufferAllocator(size_t sz, const Allocator& allocator = {}) : _buf(allocator) {
         if (sz > 0)
             malloc(sz);
     }
-    SharedBufferAllocator(SharedBuffer buf) : _buf(std::move(buf)) {
+    SharedBufferAllocator(SharedBuffer<Allocator> buf) : _buf(std::move(buf)) {
         invariant(!_buf.isShared());
     }
 
@@ -106,7 +116,7 @@ public:
     SharedBufferAllocator& operator=(SharedBufferAllocator&&) = default;
 
     void malloc(size_t sz) {
-        _buf = SharedBuffer::allocate(sz);
+        _buf = SharedBuffer<Allocator>::allocate(sz, _buf.allocator());
     }
 
     void realloc(size_t sz) {
@@ -114,10 +124,10 @@ public:
     }
 
     void free() {
-        _buf = {};
+        _buf = SharedBuffer<Allocator>{_buf.allocator()};
     }
 
-    SharedBuffer release() {
+    SharedBuffer<Allocator> release() {
         return std::move(_buf);
     }
 
@@ -129,12 +139,18 @@ public:
         return _buf.get();
     }
 
+    Allocator allocator() const {
+        return _buf.allocator();
+    }
+
     // The buffer holder size for 'SharedBufferAllocator' comes from 'SharedBuffer'
-    static constexpr size_t kBuffHolderSize = SharedBuffer::kHolderSize;
+    static constexpr size_t kBuffHolderSize = SharedBuffer<Allocator>::kHolderSize;
 
 private:
-    SharedBuffer _buf;
+    SharedBuffer<Allocator> _buf;
 };
+}  // namespace allocator_aware
+using SharedBufferAllocator = allocator_aware::SharedBufferAllocator<>;
 
 class SharedBufferFragmentAllocator {
     SharedBufferFragmentAllocator(const SharedBufferFragmentAllocator&) = delete;
@@ -255,29 +271,31 @@ public:
 
     void malloc(size_t sz) {
         if (sz > SZ) {
-            _ptr = mongoMalloc(sz);
+            _ptr = ::operator new(sz);
             _capacity = sz;
         }
     }
 
     void realloc(size_t sz) {
-        if (_ptr == _buf) {
-            if (sz > SZ) {
-                _ptr = mongoMalloc(sz);
-                memcpy(_ptr, _buf, SZ);
-                _capacity = sz;
-            } else {
-                _capacity = SZ;
-            }
-        } else {
-            _ptr = mongoRealloc(_ptr, sz);
-            _capacity = sz;
+        if (_ptr == _buf && sz <= SZ) {
+            _capacity = SZ;
+            return;
+        }
+
+        auto oldCap = _capacity;
+        auto oldPtr = _ptr;
+        _ptr = ::operator new(sz);
+        _capacity = sz;
+        std::memcpy(_ptr, oldPtr, std::min(oldCap, sz));
+
+        if (oldPtr != _buf) {
+            ::operator delete(oldPtr, oldCap);
         }
     }
 
     void free() {
         if (_ptr != _buf)
-            ::free(_ptr);
+            ::operator delete(_ptr, _capacity);
         _ptr = _buf;
         _capacity = SZ;
     }
@@ -511,7 +529,8 @@ protected:
         // Going beyond the maximum buffer size is not likely.
         if (MONGO_unlikely(minSize > BufferMaxSize)) {
             std::stringstream ss;
-            ss << "BufBuilder attempted to grow() to " << minSize << " bytes, past the 64MB limit.";
+            ss << "BufBuilder attempted to grow() to " << minSize << " bytes, past the "
+               << (BufferMaxSize / (1024 * 1024)) << "MB limit.";
             msgasserted(13548, ss.str().c_str());
         }
 
@@ -539,9 +558,9 @@ protected:
         } else if (MONGO_unlikely(reallocSize < 64)) {
             // The minimum allocation is 64 bytes.
             reallocSize = 64;
-        } else if (MONGO_unlikely(minSize > BufferMaxSize)) {
-            // If adding 'kBuffHolderSize' to 'minSize' pushes it beyond 'BufferMaxSize', then we'll
-            // allocate enough memory according to the 'BufferMaxSize'.
+        } else if (MONGO_unlikely(reallocSize + BufferAllocator::kBuffHolderSize > BufferMaxSize)) {
+            // If adding 'kBuffHolderSize' to 'reallocSize' pushes it beyond 'BufferMaxSize', then
+            // we'll allocate enough memory according to the 'BufferMaxSize'.
             reallocSize = BufferMaxSize + BufferAllocator::kBuffHolderSize;
         }
 
@@ -590,6 +609,36 @@ public:
         return _buf.release();
     }
 };
+
+// The following extern template declarations must follow BasicBufBuilder and come before their
+// instantiations as base classes for BufBuilder. Do not remove or re-order these lines w.r.t those
+// types without being sure that you are not undoing the advantages of the extern template
+// declarations.
+extern template class BasicBufBuilder<allocator_aware::SharedBufferAllocator<std::allocator<void>>>;
+extern template class BasicBufBuilder<
+    allocator_aware::SharedBufferAllocator<TrackingAllocator<void>>>;
+
+namespace allocator_aware {
+template <class Allocator = std::allocator<void>>
+class BufBuilder : public BasicBufBuilder<SharedBufferAllocator<Allocator>> {
+public:
+    static constexpr size_t kDefaultInitSizeBytes = mongo::BufBuilder::kDefaultInitSizeBytes;
+    BufBuilder(size_t size = kDefaultInitSizeBytes, const Allocator& allocator = {})
+        : BasicBufBuilder<SharedBufferAllocator<Allocator>>(size, allocator) {}
+
+    Allocator allocator() const {
+        return BasicBufBuilder<SharedBufferAllocator<Allocator>>::_buf.allocator();
+    }
+
+    /**
+     * Assume ownership of the buffer.
+     * Note: There should not be any other method calls on this object after a call to 'release'.
+     */
+    SharedBuffer<Allocator> release() {
+        return BasicBufBuilder<SharedBufferAllocator<Allocator>>::_buf.release();
+    }
+};
+}  // namespace allocator_aware
 
 // The following extern template declaration must follow
 // BasicBufBuilder and come before its instantiation as a base class

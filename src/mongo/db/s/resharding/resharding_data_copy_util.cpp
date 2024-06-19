@@ -214,6 +214,16 @@ void ensureTemporaryReshardingCollectionRenamed(OperationContext* opCtx,
         renameCollection(opCtx, metadata.getTempReshardingNss(), metadata.getSourceNss(), options));
 }
 
+bool isCollectionCapped(OperationContext* opCtx, const NamespaceString& nss) {
+    invariant(!shard_role_details::getLocker(opCtx)->isLocked());
+    invariant(!shard_role_details::getLocker(opCtx)->inAWriteUnitOfWork());
+
+    AutoGetCollection coll(opCtx, nss, MODE_IS);
+    uassert(
+        ErrorCodes::NamespaceNotFound, "Temporary resharding collection doesn't exist."_sd, coll);
+    return coll.getCollection()->isCapped();
+}
+
 void deleteRecipientResumeData(OperationContext* opCtx, const UUID& reshardingUUID) {
     writeConflictRetry(
         opCtx,
@@ -541,7 +551,8 @@ void updateSessionRecord(OperationContext* opCtx,
                          BSONObj o2Field,
                          std::vector<StmtId> stmtIds,
                          boost::optional<repl::OpTime> preImageOpTime,
-                         boost::optional<repl::OpTime> postImageOpTime) {
+                         boost::optional<repl::OpTime> postImageOpTime,
+                         NamespaceString sourceNss) {
     invariant(opCtx->getLogicalSessionId());
     invariant(opCtx->getTxnNumber());
 
@@ -555,7 +566,7 @@ void updateSessionRecord(OperationContext* opCtx,
     oplogEntry.setOpType(repl::OpTypeEnum::kNoop);
     oplogEntry.setObject(SessionCatalogMigration::kSessionOplogTag);
     oplogEntry.setObject2(std::move(o2Field));
-    oplogEntry.setNss({});
+    oplogEntry.setNss(std::move(sourceNss));
     oplogEntry.setSessionId(sessionId);
     oplogEntry.setTxnNumber(txnNumber);
     oplogEntry.setStatementIds(stmtIds);
@@ -570,7 +581,7 @@ void updateSessionRecord(OperationContext* opCtx,
         "resharding::data_copy::updateSessionRecord",
         NamespaceString::kSessionTransactionsTableNamespace,
         [&] {
-            AutoGetOplogFastPath oplogWrite(opCtx, OplogAccessMode::kWrite);
+            AutoGetOplog oplogWrite(opCtx, OplogAccessMode::kWrite);
 
             WriteUnitOfWork wuow(opCtx);
             repl::OpTime opTime = repl::logOp(opCtx, &oplogEntry);

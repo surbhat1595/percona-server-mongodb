@@ -38,7 +38,6 @@
 #include <boost/optional/optional.hpp>
 #include <cstddef>
 #include <cstdint>
-#include <map>
 #include <numeric>
 #include <string>
 #include <utility>
@@ -64,13 +63,11 @@
 #include "mongo/db/stats/counters.h"
 #include "mongo/db/tenant_id.h"
 #include "mongo/db/write_concern_options.h"
-#include "mongo/executor/remote_command_request.h"
 #include "mongo/executor/remote_command_response.h"
 #include "mongo/executor/task_executor_pool.h"
 #include "mongo/idl/idl_parser.h"
 #include "mongo/logv2/log.h"
 #include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
 #include "mongo/logv2/redaction.h"
 #include "mongo/s/cannot_implicitly_create_collection_info.h"
 #include "mongo/s/chunk_manager.h"
@@ -80,14 +77,12 @@
 #include "mongo/s/grid.h"
 #include "mongo/s/index_version.h"
 #include "mongo/s/multi_statement_transaction_requests_sender.h"
-#include "mongo/s/shard_cannot_refresh_due_to_locks_held_exception.h"
 #include "mongo/s/shard_version.h"
 #include "mongo/s/shard_version_factory.h"
 #include "mongo/s/stale_exception.h"
 #include "mongo/s/transaction_router.h"
 #include "mongo/s/write_ops/batch_write_op.h"
 #include "mongo/s/write_ops/batched_command_request.h"
-#include "mongo/s/write_ops/bulk_write_command_modifier.h"
 #include "mongo/s/write_ops/coordinate_multi_update_util.h"
 #include "mongo/s/write_ops/write_op.h"
 #include "mongo/s/write_ops/write_without_shard_key_util.h"
@@ -186,7 +181,12 @@ void executeChildBatches(OperationContext* opCtx,
             break;
         }
 
-        TargetedWriteBatch* writeBatch = childBatches.find(response.shardId)->second.get();
+        auto iter = childBatches.find(response.shardId);
+        tassert(8971901,
+                "Unexpectedly could not find batches sent to a shard",
+                iter != childBatches.end());
+
+        TargetedWriteBatch* writeBatch = iter->second.get();
         tassert(8048101, "Unexpectedly could not find write batch for shard", writeBatch);
 
         // When the responseStatus is not OK, this means that mongos was unable to receive a
@@ -604,8 +604,10 @@ void executeWriteWithoutShardKey(
             return childBatches.begin()->second.get();
         }();
 
+        // Note: It is fine to use 'getAproxNShardsOwningChunks' here because the result is only
+        // used to update stats.
         bulkWriteOp.noteTwoPhaseWriteProtocol(
-            *targetedWriteBatch, nsIdx, targeter->getNShardsOwningChunks());
+            *targetedWriteBatch, nsIdx, targeter->getAproxNShardsOwningChunks());
 
         auto cmdObj = bulkWriteOp
                           .buildBulkCommandRequest(targeters,
@@ -682,7 +684,7 @@ void executeWriteWithoutShardKey(
     }
 }
 
-void executeNonTargetedSingleWriteWithoutShardKeyWithId(
+void executeNonTargetedWriteWithoutShardKeyWithId(
     OperationContext* opCtx,
     const std::vector<std::unique_ptr<NSTargeter>>& targeters,
     TargetedBatchMap& childBatches,
@@ -776,7 +778,7 @@ BulkWriteReplyInfo execute(OperationContext* opCtx,
                 executeWriteWithoutShardKey(
                     opCtx, targeters, childBatches, bulkWriteOp, errorsPerNamespace);
             } else if (targetStatus.getValue() == WriteType::WithoutShardKeyWithId) {
-                executeNonTargetedSingleWriteWithoutShardKeyWithId(
+                executeNonTargetedWriteWithoutShardKeyWithId(
                     opCtx, targeters, childBatches, bulkWriteOp, errorsPerNamespace);
             } else if (targetStatus.getValue() == WriteType::MultiWriteBlockingMigrations) {
                 coordinateMultiUpdate(opCtx, childBatches, bulkWriteOp);
@@ -861,7 +863,10 @@ BulkWriteReplyInfo execute(OperationContext* opCtx,
     }
 
     for (size_t nsIdx = 0; nsIdx < targeters.size(); ++nsIdx) {
-        bulkWriteOp.noteNumShardsOwningChunks(nsIdx, targeters[nsIdx]->getNShardsOwningChunks());
+        // Note: It is fine to use 'getAproxNShardsOwningChunks' here because the result is only
+        // used to update stats.
+        bulkWriteOp.noteNumShardsOwningChunks(nsIdx,
+                                              targeters[nsIdx]->getAproxNShardsOwningChunks());
     }
 
     LOGV2_DEBUG(7263701, 4, "Finished execution of bulkWrite");
@@ -909,11 +914,18 @@ StatusWith<WriteType> BulkWriteOp::target(const std::vector<std::unique_ptr<NSTa
                                           TargetedBatchMap& targetedBatches) {
     const auto ordered = _clientRequest.getOrdered();
 
+    // targetWriteOps can target writes to different shards which will end up being executed as
+    // different child batches. We need to keep a map of shardId to a set of all of the nsInfo
+    // indexes we have account for the size of. We only want to count each nsInfoIdx once per child
+    // batch.
+    absl::flat_hash_map<ShardId, absl::flat_hash_set<int>> accountedForNsInfos;
+
     return targetWriteOps(
         _opCtx,
         _writeOps,
         ordered,
         recordTargetErrors,
+        _pauseMigrationsDuringMultiUpdatesParameter,
         // getTargeterFn:
         [&](const WriteOp& writeOp) -> const NSTargeter& {
             const auto opIdx = writeOp.getWriteItem().getItemIndex();
@@ -921,16 +933,50 @@ StatusWith<WriteType> BulkWriteOp::target(const std::vector<std::unique_ptr<NSTa
             return *targeters[bulkWriteOp.getNsInfoIdx()];
         },
         // getWriteSizeFn:
-        [&](const WriteOp& writeOp) {
+        [&](const WriteOp& writeOp, ShardId& shard) {
             // If retryable writes are used, MongoS needs to send an additional array of stmtId(s)
             // corresponding to the statements that got routed to each individual shard, so they
             // need to be accounted in the potential request size so it does not exceed the max BSON
             // size.
-            const int writeSizeBytes = writeOp.getWriteItem().getSizeForBulkWriteBytes() +
+            int writeSizeBytes = writeOp.getWriteItem().getSizeForBulkWriteBytes() +
                 write_ops::kWriteCommandBSONArrayPerElementOverheadBytes +
                 (_txnNum ? write_ops::kStmtIdSize +
                          write_ops::kWriteCommandBSONArrayPerElementOverheadBytes
                          : 0);
+
+            const auto opIdx = writeOp.getWriteItem().getItemIndex();
+            const auto& bulkWriteOp = BulkWriteCRUDOp(_clientRequest.getOps()[opIdx]);
+
+            // Get the set of nsInfos we've accounted for on this shardId.
+            accountedForNsInfos.try_emplace(shard, absl::flat_hash_set<int>());
+            auto iter = accountedForNsInfos.find(shard);
+            invariant(iter != accountedForNsInfos.end());
+
+            // If we have not accounted for this one already then increase the write size estimate
+            // by the nsInfo size and store this index so it does not get counted again.
+            if (!iter->second.contains(bulkWriteOp.getNsInfoIdx())) {
+                // Account for optional fields that can be set per namespace to have a conservative
+                // estimate.
+                static const ShardVersion mockShardVersion =
+                    ShardVersionFactory::make(ChunkVersion::IGNORED(), CollectionIndexes());
+                static const DatabaseVersion mockDBVersion =
+                    DatabaseVersion(UUID::gen(), Timestamp());
+
+                auto nsEntry = _clientRequest.getNsInfo()[bulkWriteOp.getNsInfoIdx()];
+                nsEntry.setShardVersion(mockShardVersion);
+                nsEntry.setDatabaseVersion(mockDBVersion);
+                if (!nsEntry.getNs().isTimeseriesBucketsCollection()) {
+                    // This could be a timeseries view. To be conservative about the estimate, we
+                    // speculatively account for the additional size needed for the timeseries
+                    // bucket transalation and the 'isTimeseriesCollection' field.
+                    nsEntry.setNs(nsEntry.getNs().makeTimeseriesBucketsNamespace());
+                    nsEntry.setIsTimeseriesNamespace(true);
+                }
+
+                iter->second.insert(bulkWriteOp.getNsInfoIdx());
+                writeSizeBytes += nsEntry.toBSON().objsize() +
+                    write_ops::kWriteCommandBSONArrayPerElementOverheadBytes;
+            }
             return writeSizeBytes;
         },
         getBaseChildBatchCommandSizeEstimate(),
@@ -947,6 +993,12 @@ BulkWriteCommandRequest BulkWriteOp::buildBulkCommandRequest(
     // types, i.e. they may be inserts, updates or deletes.
     std::vector<BulkWriteOpVariant> ops;
     std::vector<NamespaceInfoEntry> nsInfo = _clientRequest.getNsInfo();
+    std::vector<NamespaceInfoEntry> batchNsInfo = std::vector<NamespaceInfoEntry>();
+
+    // So we don't send unnecessary nsInfos in the subbatch we need to keep track of a mapping of
+    // the original nsInfoIdx to the new nsInfoidx. If we don't do this then document sequenced
+    // nsInfo array can cause child batches to be over the max BSON size.
+    absl::flat_hash_map<int, int> nsInfoIndexMap;
 
     std::vector<int> stmtIds;
     if (_isRetryableWrite)
@@ -976,7 +1028,24 @@ BulkWriteCommandRequest BulkWriteOp::buildBulkCommandRequest(
         // nsInfo.
         const auto& bulkWriteOp = BulkWriteCRUDOp(ops.back());
         auto nsIdx = bulkWriteOp.getNsInfoIdx();
-        auto& nsInfoEntry = nsInfo.at(nsIdx);
+
+        // See if we have already added this index to the childBatch. If not then we need to add it
+        // here.
+        auto iter = nsInfoIndexMap.find(nsIdx);
+        if (iter == nsInfoIndexMap.end()) {
+            batchNsInfo.push_back(nsInfo.at(nsIdx));
+            iter = nsInfoIndexMap.insert({nsIdx, batchNsInfo.size() - 1}).first;
+        }
+
+        // Set the new nsInfoIdx on the op for the childBatch.
+        visit(OverloadedVisitor{
+                  [&](mongo::BulkWriteInsertOp& op) { op.setInsert(iter->second); },
+                  [&](mongo::BulkWriteUpdateOp& op) { op.setUpdate(iter->second); },
+                  [&](mongo::BulkWriteDeleteOp& op) { op.setDeleteCommand(iter->second); },
+              },
+              ops.back());
+
+        auto& nsInfoEntry = batchNsInfo.at(iter->second);
         auto& targeter = targeters.at(nsIdx);
 
         auto isClientRequestOnTimeseriesBucketCollection =
@@ -1013,7 +1082,7 @@ BulkWriteCommandRequest BulkWriteOp::buildBulkCommandRequest(
     }
 
     request.setOps(ops);
-    request.setNsInfo(nsInfo);
+    request.setNsInfo(batchNsInfo);
 
     // It isn't necessary to copy the cursor options over, because the cursor options
     // are for use in the interaction between the mongos and the client and not
@@ -1026,6 +1095,8 @@ BulkWriteCommandRequest BulkWriteOp::buildBulkCommandRequest(
     if (_isRetryableWrite) {
         request.setStmtIds(stmtIds);
     }
+
+    request.setBypassEmptyTsReplacement(_clientRequest.getBypassEmptyTsReplacement());
 
     request.setDbName(DatabaseName::kAdmin);
 
@@ -1136,7 +1207,13 @@ std::vector<BulkWriteReplyItem> exhaustCursorForReplyItems(
         bob.append("getMore", id);
         bob.append("collection", collection);
 
-        logical_session_id_helpers::serializeLsidAndTxnNumber(opCtx, &bob);
+        if (opCtx->inMultiDocumentTransaction()) {
+            logical_session_id_helpers::serializeLsidAndTxnNumber(opCtx, &bob);
+        } else {
+            // Only want to append logical session id for retryable writes and not txnNumber.
+            // txnNumber cannot be sent to a getMore command since it is not retryable.
+            logical_session_id_helpers::serializeLsid(opCtx, &bob);
+        }
 
         std::vector<AsyncRequestsSender::Request> requests;
         requests.emplace_back(targetedBatch.getShardId(), bob.obj());
@@ -1789,7 +1866,6 @@ void BulkWriteOp::finishExecutingWriteWithoutShardKeyWithId() {
             if (targeterHasStaleShardResponse()) {
                 if (writeOp.getWriteState() != WriteOpState_Ready) {
                     writeOp.resetWriteToReady();
-                    _shouldStopCurrentRound = false;
                 }
             } else if (writeOp.getWriteState() != WriteOpState_Error) {
                 auto nVal = response.getNModified() + response.getNDeleted();
@@ -1818,6 +1894,10 @@ void BulkWriteOp::finishExecutingWriteWithoutShardKeyWithId() {
         }
         _deferredWCErrors = boost::none;
     }
+
+    // Setting _shouldStopCurrentRound to false here allows for the processing of any pending
+    // writeOps. The decision to stop retrying for the current writeOp is made before this point.
+    _shouldStopCurrentRound = false;
 }
 
 int BulkWriteOp::getBaseChildBatchCommandSizeEstimate() const {
@@ -1827,26 +1907,10 @@ int BulkWriteOp::getBaseChildBatchCommandSizeEstimate() const {
     // that are fixed-size and always present (e.g. 'ordered') won't affect the size calculation.
     BulkWriteCommandRequest request;
 
-    // These have not been set yet, but will be set later on for each namespace as part of the
-    // write targeting and batch building process. To ensure we save space for these fields, we
-    // add dummy versions to the namespaces before serializing.
-    static const ShardVersion mockShardVersion =
-        ShardVersionFactory::make(ChunkVersion::IGNORED(), CollectionIndexes());
-    static const DatabaseVersion mockDBVersion = DatabaseVersion(UUID::gen(), Timestamp());
-
-    auto nsInfo = _clientRequest.getNsInfo();
-    for (auto& nsEntry : nsInfo) {
-        nsEntry.setShardVersion(mockShardVersion);
-        nsEntry.setDatabaseVersion(mockDBVersion);
-        if (!nsEntry.getNs().isTimeseriesBucketsCollection()) {
-            // This could be a timeseries view. To be conservative about the estimate, we
-            // speculatively account for the additional size needed for the timeseries bucket
-            // transalation and the 'isTimeseriesCollection' field.
-            nsEntry.setNs(nsEntry.getNs().makeTimeseriesBucketsNamespace());
-            nsEntry.setIsTimeseriesNamespace(true);
-        }
-    }
-    request.setNsInfo(nsInfo);
+    // We'll account for the size to store each individual nsInfo as we add them, so just put an
+    // empty vector as a placeholder for the array. This will ensure we properly count the size of
+    // the field name and the empty array.
+    request.setNsInfo({});
 
     request.setDbName(_clientRequest.getDbName());
     request.setLet(_clientRequest.getLet());
@@ -1860,6 +1924,8 @@ int BulkWriteOp::getBaseChildBatchCommandSizeEstimate() const {
         // above with ops, we just put an empty vector as a placeholder for now.
         request.setStmtIds({});
     }
+
+    request.setBypassEmptyTsReplacement(_clientRequest.getBypassEmptyTsReplacement());
 
     BSONObjBuilder builder;
     request.serialize(BSONObj(), &builder);

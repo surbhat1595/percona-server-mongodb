@@ -31,19 +31,24 @@
 
 #include <boost/container/small_vector.hpp>
 
+#include "mongo/util/tracking_allocator.h"
+
 namespace mongo::timeseries::metadata {
 namespace {
 
-void normalizeArray(const BSONObj& obj, BSONArrayBuilder& builder);
-void normalizeObject(const BSONObj& obj, BSONObjBuilder& builder);
+template <class Allocator>
+void normalizeArray(const BSONObj& obj, allocator_aware::BSONArrayBuilder<Allocator>& builder);
+template <class Allocator>
+void normalizeObject(const BSONObj& obj, allocator_aware::BSONObjBuilder<Allocator>& builder);
 
-void normalizeArray(const BSONObj& obj, BSONArrayBuilder& builder) {
+template <class Allocator>
+void normalizeArray(const BSONObj& obj, allocator_aware::BSONArrayBuilder<Allocator>& builder) {
     for (auto& arrayElem : obj) {
         if (arrayElem.type() == BSONType::Array) {
-            BSONArrayBuilder subArray = builder.subarrayStart();
+            allocator_aware::BSONArrayBuilder<Allocator> subArray{builder.subarrayStart()};
             normalizeArray(arrayElem.Obj(), subArray);
         } else if (arrayElem.type() == BSONType::Object) {
-            BSONObjBuilder subObject = builder.subobjStart();
+            allocator_aware::BSONObjBuilder<Allocator> subObject{builder.subobjStart()};
             normalizeObject(arrayElem.Obj(), subObject);
         } else {
             builder.append(arrayElem);
@@ -51,7 +56,8 @@ void normalizeArray(const BSONObj& obj, BSONArrayBuilder& builder) {
     }
 }
 
-void normalizeObject(const BSONObj& obj, BSONObjBuilder& builder) {
+template <class Allocator>
+void normalizeObject(const BSONObj& obj, allocator_aware::BSONObjBuilder<Allocator>& builder) {
     // BSONObjIteratorSorted provides an abstraction similar to what this function does. However it
     // is using a lexical comparison that is slower than just doing a binary comparison of the field
     // names. That is all we need here as we are looking to create something that is binary
@@ -63,13 +69,12 @@ void normalizeObject(const BSONObj& obj, BSONObjBuilder& builder) {
         BSONElement element() const {
             return BSONElement(fieldName.rawData() - 1,  // Include type byte before field name
                                fieldName.size() + 1,     // Include null terminator after field name
-                               totalSize);
+                               BSONElement::TrustedInitTag{});
         }
         bool operator<(const Field& rhs) const {
             return fieldName < rhs.fieldName;
         }
         StringData fieldName;
-        int totalSize;
     };
 
     // Put all elements in a buffer, sort it and then continue normalize in sorted order
@@ -81,7 +86,7 @@ void normalizeObject(const BSONObj& obj, BSONObjBuilder& builder) {
     int i = 0;
     while (bsonIt.more()) {
         auto elem = bsonIt.next();
-        fields[i++] = {elem.fieldNameStringData(), elem.size()};
+        fields[i++] = {elem.fieldNameStringData()};
     }
     auto it = fields.begin();
     auto end = fields.end();
@@ -89,10 +94,12 @@ void normalizeObject(const BSONObj& obj, BSONObjBuilder& builder) {
     for (; it != end; ++it) {
         auto elem = it->element();
         if (elem.type() == BSONType::Array) {
-            BSONArrayBuilder subArray(builder.subarrayStart(elem.fieldNameStringData()));
+            allocator_aware::BSONArrayBuilder<Allocator> subArray(
+                builder.subarrayStart(elem.fieldNameStringData()));
             normalizeArray(elem.Obj(), subArray);
         } else if (elem.type() == BSONType::Object) {
-            BSONObjBuilder subObject(builder.subobjStart(elem.fieldNameStringData()));
+            allocator_aware::BSONObjBuilder<Allocator> subObject(
+                builder.subobjStart(elem.fieldNameStringData()));
             normalizeObject(elem.Obj(), subObject);
         } else {
             builder.append(elem);
@@ -102,13 +109,16 @@ void normalizeObject(const BSONObj& obj, BSONObjBuilder& builder) {
 
 }  // namespace
 
-void normalize(const BSONElement& elem, BSONObjBuilder& builder, boost::optional<StringData> as) {
+template <class Allocator>
+void normalize(const BSONElement& elem,
+               allocator_aware::BSONObjBuilder<Allocator>& builder,
+               boost::optional<StringData> as) {
     if (elem.type() == BSONType::Array) {
-        BSONArrayBuilder subArray(
+        allocator_aware::BSONArrayBuilder<Allocator> subArray(
             builder.subarrayStart(as.has_value() ? as.value() : elem.fieldNameStringData()));
         normalizeArray(elem.Obj(), subArray);
     } else if (elem.type() == BSONType::Object) {
-        BSONObjBuilder subObject(
+        allocator_aware::BSONObjBuilder<Allocator> subObject(
             builder.subobjStart(as.has_value() ? as.value() : elem.fieldNameStringData()));
         normalizeObject(elem.Obj(), subObject);
     } else {
@@ -119,5 +129,12 @@ void normalize(const BSONElement& elem, BSONObjBuilder& builder, boost::optional
         }
     }
 }
+
+template void normalize(const BSONElement& elem,
+                        allocator_aware::BSONObjBuilder<std::allocator<void>>& builder,
+                        boost::optional<StringData> as);
+template void normalize(const BSONElement& elem,
+                        allocator_aware::BSONObjBuilder<TrackingAllocator<void>>& builder,
+                        boost::optional<StringData> as);
 
 }  // namespace mongo::timeseries::metadata

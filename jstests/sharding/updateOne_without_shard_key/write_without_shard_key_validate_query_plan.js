@@ -54,7 +54,17 @@ function runTest(testCase, usingClusteredIndex) {
             assert.eq(
                 profileDoc.execStats.inputStage.inputStage.stage, "CLUSTERED_IXSCAN", profileDoc);
         } else {
-            assert.eq(profileDoc.execStats.inputStage.stage, "CLUSTERED_IXSCAN", profileDoc);
+            if (!profileDoc.execStats.inputStage) {
+                // for queries that use express, there is no inputStage
+                const expressWriteStages = ["EXPRESS_DELETE", "EXPRESS_UPDATE"];
+                assert.contains(
+                    profileDoc.execStats.stage,
+                    expressWriteStages,
+                    "Profile doc's execStats did not contain one of the expected values (" +
+                        expressWriteStages + "): " + tojson(profileDoc));
+            } else {
+                assert.eq(profileDoc.execStats.inputStage.stage, "CLUSTERED_IXSCAN", profileDoc);
+            }
         }
     } else {
         // The two phase write protocol will include the original query and collation for updates
@@ -69,7 +79,17 @@ function runTest(testCase, usingClusteredIndex) {
             assert.eq(
                 profileDoc.execStats.inputStage.inputStage.inputStage.stage, "IXSCAN", profileDoc);
         } else {
-            assert.eq(profileDoc.execStats.inputStage.stage, "IDHACK", profileDoc);
+            if (!profileDoc.execStats.inputStage) {
+                // for queries that use express, there is no inputStage
+                const expressWriteStages = ["EXPRESS_DELETE", "EXPRESS_UPDATE"];
+                assert.contains(
+                    profileDoc.execStats.stage,
+                    expressWriteStages,
+                    "Profile doc's execStats did not contain one of the expected values (" +
+                        expressWriteStages + "): " + tojson(profileDoc));
+            } else {
+                assert.eq(profileDoc.execStats.inputStage.stage, "IDHACK", profileDoc);
+            }
         }
     }
 

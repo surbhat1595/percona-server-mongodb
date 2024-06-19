@@ -29,11 +29,14 @@
 
 #include "mongo/db/query/index_hint.h"
 
+#include <boost/container_hash/extensions.hpp>
+
 #include "mongo/base/error_codes.h"
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/bsontypes.h"
 #include "mongo/bson/simple_bsonobj_comparator.h"
+#include "mongo/bson/util/builder_fwd.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/overloaded_visitor.h"  // IWYU pragma: keep
 #include "mongo/util/str.h"
@@ -41,7 +44,31 @@
 namespace mongo {
 namespace {
 static constexpr auto kNaturalFieldName = "$natural"_sd;
+
+std::strong_ordering compare(const IndexKeyPattern& a, const IndexKeyPattern& b) {
+    return a.woCompare(b) <=> 0;
+}
+
+std::strong_ordering compare(const IndexName& a, const IndexName& b) {
+    // NOTE: spaceship operator is not available on macos for strings, therefore implementing one
+    // myself instead.
+    return a.compare(b) <=> 0;
+}
+
+std::strong_ordering compare(const NaturalOrderHint& a, const NaturalOrderHint& b) {
+    return a <=> b;
+}
 };  // namespace
+
+bool isForward(NaturalOrderHint::Direction dir) {
+    return dir == NaturalOrderHint::Direction::kForward;
+}
+
+std::string toString(NaturalOrderHint::Direction dir) {
+    StackStringBuilder ssb;
+    ssb << dir;
+    return ssb.str();
+}
 
 IndexHint IndexHint::parse(const BSONElement& element) {
     if (element.type() == BSONType::String) {
@@ -113,11 +140,34 @@ size_t IndexHint::hash() const {
             [&](const IndexKeyPattern& keyPattern) {
                 return SimpleBSONObjComparator::kInstance.hash(keyPattern);
             },
-            [&](const IndexName& indexName) { return absl::Hash<std::string>{}(indexName); },
+            [&](const IndexName& indexName) { return boost::hash<std::string>{}(indexName); },
             [&](const NaturalOrderHint& naturalOrderHint) {
-                return absl::Hash<NaturalOrderHint::Direction>{}(naturalOrderHint.direction);
+                return boost::hash<NaturalOrderHint::Direction>{}(naturalOrderHint.direction);
             }},
         _hint);
+}
+
+std::strong_ordering IndexHint::operator<=>(const IndexHint& other) const {
+    if (auto cmp = _hint.valueless_by_exception() <=> other._hint.valueless_by_exception();
+        !std::is_eq(cmp)) {
+        return cmp;
+    }
+
+    if (auto cmp = _hint.index() <=> other._hint.index(); !std::is_eq(cmp)) {
+        return cmp;
+    }
+
+    return std::visit(
+        [&other](auto&& a) { return compare(a, std::get<std::decay_t<decltype(a)>>(other._hint)); },
+        _hint);
+};
+
+bool IndexHint::operator==(const IndexHint& other) const {
+    return std::is_eq(*this <=> other);
+}
+
+size_t hash_value(const IndexHint& hint) {
+    return hint.hash();
 }
 
 };  // namespace mongo

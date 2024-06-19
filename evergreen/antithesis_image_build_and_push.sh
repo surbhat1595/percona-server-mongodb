@@ -28,6 +28,20 @@ sudo docker logout
 sudo docker rm $(docker ps -a -q) --force || echo "No pre-existing containers"
 sudo docker network prune --force
 
+# Temporary fix until DEVPROD-6961 is complete
+# move docker data dir out of the root partition
+sudo service docker stop
+sudo mkdir -p /data/mci/docker
+if ! sudo jq -e . /etc/docker/daemon.json; then
+  echo "docker daemon.json did not exist or was invalid"
+  echo "setting docker daemon.json to {}"
+  sudo sh -c 'echo "{}" > /etc/docker/daemon.json'
+fi
+MODIFIED_JSON=$(sudo jq '."data-root" |= "/data/mci/docker"' /etc/docker/daemon.json)
+sudo echo "${MODIFIED_JSON}" | sudo tee /etc/docker/daemon.json
+echo "docker daemon.json: set data-root to /data/mci/docker"
+sudo service docker start
+
 # Login
 echo "${antithesis_repo_key}" > mongodb.key.json
 cat mongodb.key.json | sudo docker login -u _json_key https://us-central1-docker.pkg.dev --password-stdin
@@ -43,7 +57,21 @@ $python buildscripts/resmoke.py run --suite ${suite} ${resmoke_args} --dockerCom
 docker-compose -f docker_compose/${suite}/docker-compose.yml up -d
 echo "ALL RUNNING CONTAINERS: "
 docker ps
+set +o errexit
 docker exec workload buildscripts/resmoke.py run --suite ${suite} ${resmoke_args} --sanityCheck --externalSUT
+RET=$?
+set -o errexit
+
+docker-compose -f docker_compose/${suite}/docker-compose.yml logs > docker_logs.txt
+docker-compose -f docker_compose/${suite}/docker-compose.yml down
+
+# Change the permissions of all of the files in the docker compose directory to the current user.
+# Some of the data files cannot be archived otherwise.
+sudo chown -R $USER docker_compose/${suite}/
+if [ $RET -ne 0 ]; then
+  echo "Resmoke sanity check has failed"
+  exit $RET
+fi
 
 # Push Image
 sudo docker tag "${suite}:$tag" "$antithesis_repo/${task_name}:$tag"

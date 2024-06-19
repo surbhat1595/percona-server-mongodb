@@ -182,6 +182,10 @@ struct QueryPlannerParams {
 
         // Set this to ignore the query settings imposed constraints over plan selection.
         IGNORE_QUERY_SETTINGS = 1 << 13,
+
+        // Set this if you want the planner to generate a QSN that will be compatible with the
+        // SBE stage builder.
+        TARGET_SBE_STAGE_BUILDER = 1 << 14,
     };
 
     /**
@@ -289,6 +293,20 @@ struct QueryPlannerParams {
                                                   const CanonicalQuery& canonicalQuery,
                                                   const MultipleCollectionAccessor& collections);
 
+    /**
+     * This method updates this QueryPlannerParams object as needed so that it can be used with
+     * the SBE engine.
+     */
+    void setTargetSbeStageBuilder(OperationContext* opCtx,
+                                  const CanonicalQuery& canonicalQuery,
+                                  const MultipleCollectionAccessor& collections);
+
+    /**
+     * If query supports index filters, filters params.indices according to the configuration. In
+     * addition, sets that there were index filters.
+     * NOTE: method is marked public for testing purposes only.
+     */
+    void applyIndexFilters(const CanonicalQuery& canonicalQuery, const CollectionPtr& collection);
 
     // Options as provided when constructing the params, without any collection specific
     // modifications.
@@ -380,21 +398,13 @@ private:
         const CanonicalQuery& canonicalQuery, const MultipleCollectionAccessor& collections);
 
     /**
-     * If query supports index filters, filters params.indices according to the configuration. In
-     * addition, sets that there were index filters.
-     */
-    void applyIndexFilters(const CanonicalQuery& canonicalQuery, const CollectionPtr& collection);
-
-    /**
      * Applies 'indexHints' query settings for the given 'collection'.In addition, sets that there
      * were query settings applied.
      */
-    void applyQuerySettingsForCollection(
-        const CanonicalQuery& canonicalQuery,
-        const CollectionPtr& collection,
-        const std::variant<std::vector<mongo::query_settings::IndexHintSpec>,
-                           mongo::query_settings::IndexHintSpec>& indexHintSpecs,
-        CollectionInfo& collectionInfo);
+    void applyQuerySettingsForCollection(const CanonicalQuery& canonicalQuery,
+                                         const CollectionPtr& collection,
+                                         const query_settings::IndexHintSpecs& indexHintSpecs,
+                                         CollectionInfo& collectionInfo);
 
     void applyQuerySettingsIndexHintsForCollection(const CanonicalQuery& canonicalQuery,
                                                    const CollectionPtr& collection,

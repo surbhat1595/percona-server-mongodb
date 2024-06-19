@@ -301,7 +301,7 @@ void _logOplogEntriesForInvalidResults(OperationContext* opCtx, ValidateResults*
 
     // Set up read on oplog collection.
     try {
-        AutoGetOplogFastPath oplogRead(opCtx, OplogAccessMode::kRead);
+        AutoGetOplog oplogRead(opCtx, OplogAccessMode::kRead);
         const auto& oplogCollection = oplogRead.getCollection();
 
         if (!oplogCollection) {
@@ -590,7 +590,8 @@ Status validate(OperationContext* opCtx,
     }
 
     if (gFeatureFlagPrefetch.isEnabled(
-            serverGlobalParams.featureCompatibility.acquireFCVSnapshot())) {
+            serverGlobalParams.featureCompatibility.acquireFCVSnapshot()) &&
+        !opCtx->getServiceContext()->getStorageEngine()->isEphemeral()) {
         shard_role_details::getRecoveryUnit(opCtx)->setPrefetching(true);
     }
 

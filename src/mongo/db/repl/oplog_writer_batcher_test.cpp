@@ -27,11 +27,12 @@
  *    it in the license file.
  */
 
+#include "mongo/db/repl/oplog_applier_batcher_test_fixture.h"
 #include "mongo/db/repl/oplog_batch.h"
-#include "mongo/db/repl/oplog_batcher_test_fixture.h"
 #include "mongo/db/repl/oplog_writer_batcher.h"
 #include "mongo/db/repl/replication_coordinator_mock.h"
 #include "mongo/db/service_context_d_test_fixture.h"
+#include "mongo/idl/server_parameter_test_util.h"
 #include "mongo/unittest/assert.h"
 #include "mongo/unittest/death_test.h"
 
@@ -115,7 +116,10 @@ public:
     }
 
     bool waitForDataUntil(Date_t deadline, Interruptible* interruptible) override {
-        MONGO_UNIMPLEMENTED;
+        stdx::unique_lock<Latch> lk(_mutex);
+        interruptible->waitForConditionOrInterruptUntil(
+            _notEmptyCv, lk, deadline, [&] { return !_queue.empty(); });
+        return !_queue.empty();
     }
 
     bool peek(OperationContext*, Value* value) override {
@@ -134,11 +138,6 @@ public:
     void exitDrainMode() override {
         stdx::lock_guard<Latch> lk(_mutex);
         _drainMode = false;
-    }
-
-    bool inDrainModeAndEmpty() override {
-        stdx::lock_guard<Latch> lk(_mutex);
-        return _drainMode && _queue.empty();
     }
 
     mutable Mutex _mutex = MONGO_MAKE_LATCH("OplogWriterBufferMock::mutex");
@@ -183,7 +182,7 @@ public:
     void setUp() override;
     void tearDown() override;
 
-    ReplicationCoordinator* getReplCoord() const;
+    ReplicationCoordinatorMock* getReplCoord() const;
     OperationContext* opCtx() const;
 
 protected:
@@ -211,8 +210,8 @@ void OplogWriterBatcherTest::tearDown() {
     ServiceContextMongoDTest::tearDown();
 }
 
-ReplicationCoordinator* OplogWriterBatcherTest::getReplCoord() const {
-    return ReplicationCoordinator::get(_serviceContext);
+ReplicationCoordinatorMock* OplogWriterBatcherTest::getReplCoord() const {
+    return dynamic_cast<ReplicationCoordinatorMock*>(ReplicationCoordinator::get(_serviceContext));
 }
 
 OperationContext* OplogWriterBatcherTest::opCtx() const {
@@ -312,7 +311,7 @@ TEST_F(OplogWriterBatcherTest, BatcherWaitSecondaryDelaySecs) {
     OplogWriterBatcher writerBatcher(&writerBuffer);
 
     // Set SecondaryDelaySecs to a large number, so we should get empty batches at the beginning.
-    dynamic_cast<ReplicationCoordinatorMock*>(getReplCoord())->setSecondaryDelaySecs(Seconds(500));
+    getReplCoord()->setSecondaryDelaySecs(Seconds(500));
     auto startTime = durationCount<Seconds>(Date_t::now().toDurationSinceEpoch());
 
     // Put one entry that is over secondaryDelaySecs and one entry not, the batcher will wait until
@@ -327,7 +326,7 @@ TEST_F(OplogWriterBatcherTest, BatcherWaitSecondaryDelaySecs) {
     }
 
     // Set SecondaryDelaySecs to a small number, then we can get the batch.
-    dynamic_cast<ReplicationCoordinatorMock*>(getReplCoord())->setSecondaryDelaySecs(Seconds(5));
+    getReplCoord()->setSecondaryDelaySecs(Seconds(5));
 
     auto batch = writerBatcher.getNextBatch(opCtx(), Seconds(1), _limits);
     auto endTime = durationCount<Seconds>(Date_t::now().toDurationSinceEpoch());
@@ -338,7 +337,7 @@ TEST_F(OplogWriterBatcherTest, BatcherWaitSecondaryDelaySecsReturnFirstBatch) {
     OplogWriterBufferMock writerBuffer;
     OplogWriterBatcher writerBatcher(&writerBuffer);
 
-    dynamic_cast<ReplicationCoordinatorMock*>(getReplCoord())->setSecondaryDelaySecs(Seconds(5));
+    getReplCoord()->setSecondaryDelaySecs(Seconds(5));
     auto startTime = durationCount<Seconds>(Date_t::now().toDurationSinceEpoch());
 
     // If we have two batches from the buffer that can be merged into one and the second batch
@@ -355,35 +354,75 @@ TEST_F(OplogWriterBatcherTest, BatcherWaitSecondaryDelaySecsReturnFirstBatch) {
 TEST_F(OplogWriterBatcherTest, BatcherCheckDraining) {
     OplogWriterBufferMock writerBuffer;
     OplogWriterBatcher writerBatcher(&writerBuffer);
-    writerBuffer.enterDrainMode();
 
-    // Keep polling from the batcher, we should get an empty draining batch every time and wait 1s
-    // inside.
+    // Enter drain mode and keep polling from the batcher, we should get an empty draining
+    // batch every time and wait 1s inside.
+    getReplCoord()->setOplogSyncState(ReplicationCoordinator::OplogSyncState::WriterDraining);
+    writerBuffer.enterDrainMode();
     for (auto i = 0; i < 5; i++) {
         auto startTime = durationCount<Seconds>(Date_t::now().toDurationSinceEpoch());
         auto drainedBatch = writerBatcher.getNextBatch(opCtx(), Seconds(1), _limits);
-        ASSERT_TRUE(drainedBatch.exhausted());
+        ASSERT_TRUE(drainedBatch.termWhenExhausted());
         auto endTime = durationCount<Seconds>(Date_t::now().toDurationSinceEpoch());
         ASSERT_TRUE(endTime - startTime >= 1);
     }
 
     // Exit drain mode and the batcher should be able to get the batch from the buffer.
+    getReplCoord()->setOplogSyncState(ReplicationCoordinator::OplogSyncState::Running);
     writerBuffer.exitDrainMode();
     OplogWriterBatch batch1({makeNoopOplogEntry(Seconds(123))}, _limits.minBytes);
     writerBuffer.push_forTest(batch1);
     auto batch = writerBatcher.getNextBatch(opCtx(), Days(1), _limits);
-    ASSERT_FALSE(batch.exhausted());
+    ASSERT_FALSE(batch.termWhenExhausted());
     ASSERT_EQ(_limits.minBytes, batch.byteSize());
 
     // Draining again, should still work.
+    getReplCoord()->setOplogSyncState(ReplicationCoordinator::OplogSyncState::WriterDraining);
     writerBuffer.enterDrainMode();
     for (auto i = 0; i < 5; i++) {
         auto startTime = durationCount<Seconds>(Date_t::now().toDurationSinceEpoch());
         auto drainedBatch = writerBatcher.getNextBatch(opCtx(), Seconds(1), _limits);
-        ASSERT_TRUE(drainedBatch.exhausted());
+        ASSERT_TRUE(drainedBatch.termWhenExhausted());
         auto endTime = durationCount<Seconds>(Date_t::now().toDurationSinceEpoch());
         ASSERT_TRUE(endTime - startTime >= 1);
     }
+}
+
+TEST_F(OplogWriterBatcherTest, BatcherWaitDelayMillisWhenBatchIsSmall) {
+    RAIIServerParameterControllerForTest controller("oplogBatchDelayMillis", 100);
+    OplogWriterBufferMock writerBuffer;
+    OplogWriterBatcher writerBatcher(&writerBuffer);
+    OplogWriterBatch batch({makeNoopOplogEntry(Seconds(123))}, 1);
+    writerBuffer.push_forTest(batch);
+    auto startTime = durationCount<Milliseconds>(Date_t::now().toDurationSinceEpoch());
+    ASSERT_EQ(1, writerBatcher.getNextBatch(opCtx(), Seconds(1), _limits).byteSize());
+    auto endTime = durationCount<Milliseconds>(Date_t::now().toDurationSinceEpoch());
+    ASSERT_TRUE(endTime - startTime >= 100);
+}
+
+TEST_F(OplogWriterBatcherTest, BatcherNotWaitDelayMillisWhenBatchIsLarge) {
+    RAIIServerParameterControllerForTest controller("oplogBatchDelayMillis", 5000);
+    OplogWriterBufferMock writerBuffer;
+    OplogWriterBatcher writerBatcher(&writerBuffer);
+    OplogWriterBatch batch({makeNoopOplogEntry(Seconds(123))}, _limits.minBytes + 1);
+    writerBuffer.push_forTest(batch);
+    auto startTime = durationCount<Milliseconds>(Date_t::now().toDurationSinceEpoch());
+    ASSERT_EQ(_limits.minBytes + 1,
+              writerBatcher.getNextBatch(opCtx(), Seconds(10), _limits).byteSize());
+    auto endTime = durationCount<Milliseconds>(Date_t::now().toDurationSinceEpoch());
+    ASSERT_TRUE(endTime - startTime < 5000);
+}
+
+TEST_F(OplogWriterBatcherTest, OplogBatchDelayMillisCapAtMaxWaitTime) {
+    RAIIServerParameterControllerForTest controller("oplogBatchDelayMillis", 10000);
+    OplogWriterBufferMock writerBuffer;
+    OplogWriterBatcher writerBatcher(&writerBuffer);
+    OplogWriterBatch batch({makeNoopOplogEntry(Seconds(123))}, 1);
+    writerBuffer.push_forTest(batch);
+    auto startTime = durationCount<Milliseconds>(Date_t::now().toDurationSinceEpoch());
+    ASSERT_EQ(1, writerBatcher.getNextBatch(opCtx(), Seconds(1), _limits).byteSize());
+    auto endTime = durationCount<Milliseconds>(Date_t::now().toDurationSinceEpoch());
+    ASSERT_TRUE(endTime - startTime >= 1000 && endTime - startTime < 10000);
 }
 
 }  // namespace repl

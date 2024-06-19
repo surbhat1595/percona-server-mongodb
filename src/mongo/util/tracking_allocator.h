@@ -36,7 +36,6 @@
 #include "mongo/platform/atomic_word.h"
 #include "mongo/stdx/thread.h"
 #include "mongo/util/aligned.h"
-#include "mongo/util/processinfo.h"
 #include "mongo/util/shared_buffer.h"
 
 namespace mongo {
@@ -47,10 +46,7 @@ namespace mongo {
  */
 class TrackingAllocatorStats {
 public:
-    // The counter will be partitioned based on the number of available cores.
-    TrackingAllocatorStats()
-        : _numPartitions(ProcessInfo::getNumLogicalCores() * 2), _bytesAllocated(_numPartitions) {}
-    TrackingAllocatorStats(size_t numPartitions)
+    explicit TrackingAllocatorStats(size_t numPartitions)
         : _numPartitions(numPartitions), _bytesAllocated(_numPartitions) {}
 
     void bytesAllocated(size_t n) {
@@ -70,8 +66,7 @@ public:
         }
 
         // After summing the memory usage, we should not have a negative number.
-        invariant(sum >= 0,
-                  str::stream() << "Tracking allocator memory usage was negative " << sum);
+        invariant(sum >= 0, std::to_string(sum));
         return static_cast<uint64_t>(sum);
     }
 
@@ -139,69 +134,5 @@ template <class T, class U>
 bool operator!=(const TrackingAllocator<T>& lhs, const TrackingAllocator<U>& rhs) noexcept {
     return &lhs.getStats() != &rhs.getStats();
 }
-
-class TrackingSharedBufferAllocator {
-public:
-    static constexpr size_t kBuffHolderSize = SharedBuffer::kHolderSize;
-
-    TrackingSharedBufferAllocator(TrackingAllocatorStats& stats, size_t size = 0) : _stats(stats) {
-        if (size > 0) {
-            malloc(size);
-        }
-    }
-
-    ~TrackingSharedBufferAllocator() {
-        _stats.get().bytesDeallocated(_buf.capacity());
-    }
-
-    TrackingSharedBufferAllocator(TrackingSharedBufferAllocator&&) = default;
-    TrackingSharedBufferAllocator& operator=(TrackingSharedBufferAllocator&& other) {
-        if (&other == this) {
-            return *this;
-        }
-
-        _stats.get().bytesDeallocated(_buf.capacity());
-        _buf = std::move(other._buf);
-        _stats = other._stats;
-
-        return *this;
-    }
-
-    void malloc(size_t size) {
-        _stats.get().bytesAllocated(size);
-        _buf = SharedBuffer::allocate(size);
-    }
-
-    void realloc(size_t size) {
-        if (size > _buf.capacity()) {
-            _stats.get().bytesAllocated(size - _buf.capacity());
-        } else {
-            _stats.get().bytesDeallocated(_buf.capacity() - size);
-        }
-        _buf.realloc(size);
-    }
-
-    void free() {
-        _stats.get().bytesDeallocated(_buf.capacity());
-        _buf = {};
-    }
-
-    SharedBuffer release() {
-        _stats.get().bytesDeallocated(_buf.capacity());
-        return std::move(_buf);
-    }
-
-    size_t capacity() const {
-        return _buf.capacity();
-    }
-
-    char* get() const {
-        return _buf.get();
-    }
-
-private:
-    SharedBuffer _buf;
-    std::reference_wrapper<TrackingAllocatorStats> _stats;
-};
 
 }  // namespace mongo

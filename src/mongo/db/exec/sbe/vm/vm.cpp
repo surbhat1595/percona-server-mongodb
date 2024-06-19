@@ -68,6 +68,7 @@
 #include "mongo/db/exec/sbe/columnar.h"
 #include "mongo/db/exec/sbe/expressions/expression.h"
 #include "mongo/db/exec/sbe/expressions/runtime_environment.h"
+#include "mongo/db/exec/sbe/in_list.h"
 #include "mongo/db/exec/sbe/makeobj_spec.h"
 #include "mongo/db/exec/sbe/sbe_pattern_value_cmp.h"
 #include "mongo/db/exec/sbe/sort_spec.h"
@@ -84,7 +85,6 @@
 #include "mongo/db/fts/fts_matcher.h"
 #include "mongo/db/hasher.h"
 #include "mongo/db/index/btree_key_generator.h"
-#include "mongo/db/matcher/in_list_data.h"
 #include "mongo/db/query/collation/collation_index_key.h"
 #include "mongo/db/query/datetime/date_time_support.h"
 #include "mongo/db/query/query_knobs_gen.h"
@@ -185,7 +185,7 @@ int Instruction::stackOffset[Instruction::Tags::lastInstruction] = {
     0,  // isNull
     0,  // isObject
     0,  // isArray
-    0,  // isInListData
+    0,  // isInList
     0,  // isString
     0,  // isNumber
     0,  // isBinData
@@ -196,6 +196,7 @@ int Instruction::stackOffset[Instruction::Tags::lastInstruction] = {
     0,  // isMinKey
     0,  // isMaxKey
     0,  // isTimestamp
+    0,  // isKeyString
     0,  // typeMatchImm
 
     0,  // function is special, the stack offset is encoded in the instruction itself
@@ -222,8 +223,13 @@ void ByteCode::allocStackImpl(size_t newSizeDelta) noexcept {
     auto oldSize = _argStackEnd - _argStack;
     auto oldTop = _argStackTop - _argStack;
 
-    _argStack = reinterpret_cast<uint8_t*>(mongoRealloc(_argStack, oldSize + newSizeDelta));
-    _argStackEnd = _argStack + oldSize + newSizeDelta;
+    auto newSize = oldSize + newSizeDelta;
+    uint8_t* newArgStack = static_cast<uint8_t*>(::operator new(newSize));
+    memcpy(newArgStack, _argStack, oldSize);
+    ::operator delete(_argStack, oldSize);
+
+    _argStack = newArgStack;
+    _argStackEnd = _argStack + newSize;
     _argStackTop = _argStack + oldTop;
 }
 
@@ -856,8 +862,8 @@ void CodeFragment::appendIsArray(Instruction::Parameter input) {
     appendSimpleInstruction(Instruction::isArray, input);
 }
 
-void CodeFragment::appendIsInListData(Instruction::Parameter input) {
-    appendSimpleInstruction(Instruction::isInListData, input);
+void CodeFragment::appendIsInList(Instruction::Parameter input) {
+    appendSimpleInstruction(Instruction::isInList, input);
 }
 
 void CodeFragment::appendIsString(Instruction::Parameter input) {
@@ -898,6 +904,10 @@ void CodeFragment::appendIsMaxKey(Instruction::Parameter input) {
 
 void CodeFragment::appendIsTimestamp(Instruction::Parameter input) {
     appendSimpleInstruction(Instruction::isTimestamp, input);
+}
+
+void CodeFragment::appendIsKeyString(Instruction::Parameter input) {
+    appendSimpleInstruction(Instruction::isKeyString, input);
 }
 
 void CodeFragment::appendTraverseP() {
@@ -2361,11 +2371,11 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinKeyStringToStrin
     auto [owned, tagInKey, valInKey] = getFromStack(0);
 
     // We operate only on keys.
-    if (tagInKey != value::TypeTags::ksValue) {
+    if (tagInKey != value::TypeTags::keyString) {
         return {false, value::TypeTags::Nothing, 0};
     }
 
-    auto key = value::getKeyStringView(valInKey);
+    auto key = value::getKeyString(valInKey);
 
     auto [tagStr, valStr] = value::makeNewString(key->toString());
 
@@ -2557,9 +2567,7 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::genericNewKeyString(
 
     kb.appendDiscriminator(ksDiscriminator);
 
-    return {true,
-            value::TypeTags::ksValue,
-            value::bitcastFrom<key_string::Value*>(new key_string::Value(kb.release()))};
+    return {true, value::TypeTags::keyString, value::makeKeyString(kb.release()).second};
 }
 
 FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinNewKeyString(ArityType arity) {
@@ -4173,6 +4181,38 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinAggConcatArraysC
     return {ownArr, tagArr, valArr};
 }
 
+#if 0
+FastTuple<bool, value::TypeTags, value::Value> ByteCode::isMemberImpl(value::TypeTags exprTag,
+                                                                      value::Value exprVal,
+                                                                      value::TypeTags arrTag,
+                                                                      value::Value arrVal,
+                                                                      CollatorInterface* collator) {
+    if (!value::isArray(arrTag) && arrTag != value::TypeTags::inList) {
+        return {false, value::TypeTags::Nothing, 0};
+    }
+
+    if (exprTag == value::TypeTags::Nothing) {
+        return {false, value::TypeTags::Boolean, value::bitcastFrom<bool>(false)};
+    }
+
+    if (arrTag == value::TypeTags::inList) {
+        if (exprTag == value::TypeTags::Nothing) {
+            return {false, value::TypeTags::Boolean, value::bitcastFrom<bool>(false)};
+        }
+
+        // For InLists, we intentionally ignore the 'collator' parmeter and we use the
+        // InList's collator instead.
+        InList* inList = value::getInListView(arrVal);
+        const bool found = inList->contains(exprTag, exprVal);
+
+        return {false, value::TypeTags::Boolean, value::bitcastFrom<bool>(found)};
+    } else if (arrTag == value::TypeTags::ArraySet) {
+        // An empty ArraySet may not have a collation, but we don't need one to definitively
+        // determine that the empty set doesn't contain the value we are checking.
+        auto arrSet = value::getArraySetView(arrVal);
+        if (arrSet->size() == 0) {
+#endif
+
 FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinIsMember(ArityType arity) {
     invariant(arity == 2);
 
@@ -4182,17 +4222,19 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinIsMember(ArityTy
     auto inputTag = inputTag_;
     auto inputVal = inputVal_;
 
-    if (!value::isArray(arrTag) && arrTag != value::TypeTags::inListData) {
+    if (!value::isArray(arrTag) && arrTag != value::TypeTags::inList) {
         return {false, value::TypeTags::Nothing, 0};
     }
 
-    if (arrTag == value::TypeTags::inListData) {
+    if (arrTag == value::TypeTags::inList) {
         if (inputTag == value::TypeTags::Nothing) {
             return {false, value::TypeTags::Boolean, value::bitcastFrom<bool>(false)};
         }
 
-        auto inListData = value::getInListDataView(arrVal);
-        const bool found = inListData->contains(inputTag, inputVal);
+        // For InLists, we intentionally ignore the 'collator' parmeter and we use the
+        // InList's collator instead.
+        InList* inList = value::getInListView(arrVal);
+        const bool found = inList->contains(inputTag, inputVal);
 
         return {false, value::TypeTags::Boolean, value::bitcastFrom<bool>(found)};
     } else if (arrTag == value::TypeTags::ArraySet) {
@@ -5470,9 +5512,8 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinGenerateSortKey(
     }();
 
     return {true,
-            value::TypeTags::ksValue,
-            value::bitcastFrom<key_string::Value*>(
-                new key_string::Value(sortSpec->generateSortKey(bsonObj, collator)))};
+            value::TypeTags::keyString,
+            value::makeKeyString(sortSpec->generateSortKey(bsonObj, collator)).second};
 }
 
 FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinSortKeyComponentVectorGetElement(
@@ -5567,14 +5608,14 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinMakeBsonObj(
     int numInputFields = hasInputFields && spec->numInputFields ? *spec->numInputFields : 0;
     const int fieldsStackOff = 3;
     const int argsStackOff = fieldsStackOff + numInputFields;
-    const auto stackOffsets = MakeObjStackOffsets{fieldsStackOff, argsStackOff};
+    const auto ctx = ProduceObjContext{fieldsStackOff, argsStackOff, code};
 
     UniqueBSONObjBuilder bob;
 
     if (!hasInputFields) {
-        produceBsonObject(spec, stackOffsets, code, bob, objTag, objVal);
+        produceBsonObject(ctx, spec, bob, objTag, objVal);
     } else {
-        produceBsonObjectWithInputFields(spec, stackOffsets, code, bob, objTag, objVal);
+        produceBsonObjectWithInputFields(ctx, spec, bob, objTag, objVal);
     }
 
     bob.doneFast();
@@ -6110,7 +6151,7 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinArrayToObject(Ar
     return {true, objTag, objVal};
 }
 
-ByteCode::multiAccState ByteCode::getMultiAccState(value::TypeTags stateTag,
+ByteCode::MultiAccState ByteCode::getMultiAccState(value::TypeTags stateTag,
                                                    value::Value stateVal) {
     uassert(
         7548600, "The accumulator state should be an array", stateTag == value::TypeTags::Array);
@@ -9188,8 +9229,7 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinAggRemovableMinM
     ArityType arity) {
     auto [stateTag, stateVal] = moveOwnedFromStack(0);
     value::ValueGuard stateGuard{stateTag, stateVal};
-    auto [elTag, elVal] = moveOwnedFromStack(1);
-    value::ValueGuard elGuard{elTag, elVal};
+    auto [_, elTag, elVal] = getFromStack(1);
 
     if (value::isNullish(elTag)) {
         stateGuard.reset();
@@ -9210,7 +9250,6 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinAggRemovableMinM
     stateArr->setAt(static_cast<size_t>(AggAccumulatorNElems::kMemUsage),
                     value::TypeTags::NumberInt32,
                     value::bitcastFrom<int32_t>(memUsage - elSize));
-    elGuard.reset();
     tassert(8178116, "Element was not removed", accMultiSet->remove(elTag, elVal));
 
     stateGuard.reset();
@@ -11385,8 +11424,8 @@ void ByteCode::runInternal(const CodeFragment* code, int64_t position) {
                 runTagCheck(pcPointer, value::isArray);
                 break;
             }
-            case Instruction::isInListData: {
-                runTagCheck(pcPointer, value::isInListData);
+            case Instruction::isInList: {
+                runTagCheck(pcPointer, value::isInList);
                 break;
             }
             case Instruction::isString: {
@@ -11452,6 +11491,10 @@ void ByteCode::runInternal(const CodeFragment* code, int64_t position) {
             }
             case Instruction::isTimestamp: {
                 runTagCheck(pcPointer, value::TypeTags::Timestamp);
+                break;
+            }
+            case Instruction::isKeyString: {
+                runTagCheck(pcPointer, value::TypeTags::keyString);
                 break;
             }
             case Instruction::typeMatchImm: {

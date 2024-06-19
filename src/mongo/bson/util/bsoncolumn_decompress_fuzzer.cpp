@@ -51,7 +51,7 @@ static bool isDataInterleaved(const char* binary, size_t size) {
 
         if (bsoncolumn::isUncompressedLiteralControlByte(control)) {
             // Scan over the entire literal.
-            BSONElement literal(pos, 1, -1);
+            BSONElement literal(pos, 1, BSONElement::TrustedInitTag{});
             pos += literal.size();
             continue;
         }
@@ -71,11 +71,6 @@ extern "C" int LLVMFuzzerTestOneInput(const char* Data, size_t Size) {
 
     // Skip inputs that do not pass validation.
     if (!validateBSONColumn(Data, Size).isOK()) {
-        return 0;
-    }
-
-    // Interleaved mode in the block-based API is not fully implemented.
-    if (isDataInterleaved(Data, Size)) {
         return 0;
     }
 

@@ -114,6 +114,7 @@ ALLOW_ANY_TYPE_LIST: List[str] = [
     'aggregate-param-cursor',
     'aggregate-param-hint',
     'aggregate-param-allowedIndexes',
+    'aggregate-param-indexHints',
     'aggregate-param-needsMerge',
     'aggregate-param-fromMongos',
     'aggregate-param-$_requestReshardingResumeToken',
@@ -129,6 +130,7 @@ ALLOW_ANY_TYPE_LIST: List[str] = [
     'find-param-sort',
     'find-param-hint',
     'find-param-allowedIndexes',
+    'find-param-indexHints',
     'find-param-collation',
     'find-param-singleBatch',
     'find-param-allowDiskUse',
@@ -169,7 +171,13 @@ ALLOW_ANY_TYPE_LIST: List[str] = [
     'create-param-min',
     'create-param-max',
     'bulkWrite-param-updateMods',
-    'bulkWrite-param-hint'
+    'bulkWrite-param-hint',
+
+    # No actual user-facing difference
+    'bulkWrite-reply-opTime',
+    'getMore-param-lastKnownCommittedOpTime',
+    'hello-reply-opTime',
+    'hello-reply-majorityOpTime',
 ]
 
 # Permit a parameter to move from bson serialisation type any
@@ -180,6 +188,16 @@ IGNORE_ANY_TO_NON_ANY_LIST: List[str] = [
     # of permitted values
     'find-param-maxTimeMS',
     'count-param-maxTimeMS',
+]
+
+# Permit a parameter to move from a non-any bson serialisation type to any.
+IGNORE_NON_ANY_TO_ANY_LIST: List[str] = [
+    'aggregate-param-indexHints',
+    'bulkWrite-reply-opTime',
+    'find-param-indexHints',
+    'getMore-param-lastKnownCommittedOpTime',
+    'hello-reply-opTime',
+    'hello-reply-majorityOpTime',
 ]
 
 # Permit the cpp type of a parameter to change
@@ -217,6 +235,11 @@ IGNORE_STABLE_TO_UNSTABLE_LIST: List[str] = [
     # Real use cases for changing a field from 'stable' to 'unstable'.
     'find-param-maxTimeMS',
     'count-param-maxTimeMS',
+
+    # No actual user-facing difference
+    'bulkWrite-reply-opTime',
+    'hello-reply-opTime',
+    'hello-reply-majorityOpTime',
 ]
 
 # Once a field is part of the stable API, either by direct addition or by changing it from unstable
@@ -457,6 +480,11 @@ def is_unstable(stability: Optional[str]) -> bool:
     return stability is not None and stability != 'stable'
 
 
+def is_stable(stability: Optional[str]) -> bool:
+    """Check whether the given stability value is considered as stable."""
+    return not is_unstable(stability)
+
+
 def get_new_commands(
         ctxt: IDLCompatibilityContext, new_idl_dir: str, import_directories: List[str]
 ) -> Tuple[Dict[str, syntax.Command], Dict[str, syntax.IDLParsedSpec], Dict[str, str]]:
@@ -576,9 +604,10 @@ def check_reply_field_type_recursive(ctxt: IDLCompatibilityContext,
 
     # If bson_serialization_type switches from non-any to 'any' type.
     if "any" not in old_field_type.bson_serialization_type and "any" in new_field_type.bson_serialization_type:
-        ctxt.add_new_reply_field_bson_any_error(cmd_name, field_name, old_field_type.name,
-                                                new_field_type.name, new_field.idl_file_path)
-        return
+        if ignore_list_name not in IGNORE_NON_ANY_TO_ANY_LIST:
+            ctxt.add_new_reply_field_bson_any_error(cmd_name, field_name, old_field_type.name,
+                                                    new_field_type.name, new_field.idl_file_path)
+            return
 
     if "any" in old_field_type.bson_serialization_type:
         # If 'any' is not explicitly allowed as the bson_serialization_type.
@@ -921,7 +950,7 @@ def check_param_or_command_type_recursive(ctxt: IDLCompatibilityContext,
             return
 
     # If bson_serialization_type switches from non-any to 'any' type.
-    if "any" not in old_type.bson_serialization_type and "any" in new_type.bson_serialization_type:
+    if "any" not in old_type.bson_serialization_type and "any" in new_type.bson_serialization_type and ignore_list_name not in IGNORE_NON_ANY_TO_ANY_LIST:
         ctxt.add_new_command_or_param_type_bson_any_error(cmd_name, old_type.name, new_type.name,
                                                           new_field.idl_file_path, param_name,
                                                           is_command_parameter)
@@ -1623,7 +1652,8 @@ def check_compatibility(old_idl_dir: str, new_idl_dir: str, old_import_directori
     return ctxt.errors
 
 
-def get_generic_arguments(gen_args_file_path: str, includes: str) -> Tuple[Set[str], Set[str]]:
+def get_generic_arguments(gen_args_file_path: str,
+                          includes: List[str]) -> Tuple[Set[str], Set[str]]:
     """Get arguments and reply fields from generic_argument.idl and check validity."""
     arguments: Set[str] = set()
     reply_fields: Set[str] = set()
@@ -1633,21 +1663,41 @@ def get_generic_arguments(gen_args_file_path: str, includes: str) -> Tuple[Set[s
                                        CompilerImportResolver(includes), False)
         if parsed_idl_file.errors:
             parsed_idl_file.errors.dump_errors()
-            raise ValueError(f"Cannot parse {gen_args_file_path}")
-        for argument in parsed_idl_file.spec.symbols.get_generic_argument_list(
-                "generic_args_api_v1").fields:
-            arguments.add(argument.name)
+            raise ValueError(f"Cannot parse {gen_args_file_path} {parsed_idl_file.errors}")
 
-        for reply_field in parsed_idl_file.spec.symbols.get_generic_reply_field_list(
-                "generic_reply_fields_api_v1").fields:
-            reply_fields.add(reply_field.name)
+        # The generic argument/reply field structs have been renamed a few times, so to
+        # account for this when comparing against older releases, we try each set of names.
+        struct_names = [
+            # 8.0.0rc5 and forward
+            ("GenericArguments", "GenericReplyFields"),
+            # 8.0.0rc4
+            ("GenericArgsAPIV1", "GenericReplyFieldsAPIV1"),
+            # Before 8.0.0rc4
+            ("generic_args_api_v1", "generic_reply_fields_api_v1")
+        ]
+        for args_struct, reply_struct in struct_names:
+            generic_arguments = parsed_idl_file.spec.symbols.get_generic_argument_list(args_struct)
+            if generic_arguments is None:
+                continue
+            else:
+                generic_reply_fields = parsed_idl_file.spec.symbols.get_generic_reply_field_list(
+                    reply_struct)
+                break
+
+        for argument in generic_arguments.fields:
+            if is_stable(argument.stability):
+                arguments.add(argument.name)
+
+        for reply_field in generic_reply_fields.fields:
+            if is_stable(reply_field.stability):
+                reply_fields.add(reply_field.name)
 
     return arguments, reply_fields
 
 
-def check_generic_arguments_compatibility(old_gen_args_file_path: str, new_gen_args_file_path: str,
-                                          old_includes: str,
-                                          new_includes: str) -> IDLCompatibilityErrorCollection:
+def check_generic_arguments_compatibility(
+        old_gen_args_file_path: str, new_gen_args_file_path: str, old_includes: List[str],
+        new_includes: List[str]) -> IDLCompatibilityErrorCollection:
     """Check IDL compatibility between old and new generic_argument.idl files."""
     # IDLCompatibilityContext takes in both 'old_idl_dir' and 'new_idl_dir',
     # but for generic_argument.idl, the parent directories aren't helpful for logging purposes.

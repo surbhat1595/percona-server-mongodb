@@ -16,6 +16,7 @@ env.Library(
     LIBDEPS_PRIVATE=[
         '$BUILD_DIR/mongo/base',
         '$BUILD_DIR/mongo/db/commands',
+        '$BUILD_DIR/mongo/db/server_base',
         '$BUILD_DIR/mongo/db/server_feature_flags',
         '$BUILD_DIR/mongo/db/service_context',
         '$BUILD_DIR/mongo/util/concurrency/ticketholder',
@@ -32,6 +33,18 @@ env.Library(
     ],
     LIBDEPS_PRIVATE=[
         '$BUILD_DIR/mongo/db/service_context',
+    ],
+)
+
+env.CppUnitTest(
+    target="ingress_admission_control_test",
+    source=[
+        "ingress_admission_control_test.cpp",
+    ],
+    LIBDEPS=[
+        "$BUILD_DIR/mongo/db/service_context_test_fixture",
+        "$BUILD_DIR/mongo/unittest/unittest",
+        "ingress_admission_control",
     ],
 )
 
@@ -96,9 +109,9 @@ env.Library(
 )
 
 env.Library(
-    target='admission_server_status_section',
+    target='queues_server_status_section',
     source=[
-        'admission_server_status_section.cpp',
+        'queues_server_status_section.cpp',
     ],
     LIBDEPS_PRIVATE=[
         '$BUILD_DIR/mongo/db/commands/server_status_core',

@@ -1126,7 +1126,7 @@ env_vars.Add(
     help=
     'Enables/disables building with bazel. Note that this project is in flight, and thus subject to breaking changes. See https://jira.mongodb.org/browse/PM-3332 for details.',
     converter=functools.partial(bool_var_converter, var='BAZEL_BUILD_ENABLED'),
-    default="1",
+    default="0",
 )
 
 env_vars.Add(
@@ -2087,6 +2087,7 @@ if env.get('ENABLE_OOM_RETRY'):
                 'c1xx : fatal error C1063: INTERNAL COMPILER ERROR',
                 r'LNK1171: unable to load mspdbcore\.dll',
                 "LNK1201: error writing to program database ",
+                "The paging file is too small for this operation to complete.",
             ]
             env['OOM_RETRY_RETURNCODES'] = [1102]
 
@@ -2199,7 +2200,6 @@ else:
 
 if env['MONGO_ALLOCATOR'] == "tcmalloc-google":
     env.Append(CPPDEFINES=["ABSL_ALLOCATOR_NOTHROW"])
-    env.Append(CXXFLAGS=['-faligned-new=8'])
 
 if has_option("cache"):
     if has_option("gcov"):
@@ -5272,10 +5272,9 @@ def doConfigure(myenv):
 
     if use_system_version_of_library("libunwind"):
         conf.FindSysLibDep("unwind", ["unwind"])
-
-    if use_libunwind:
         if not conf.FindSysLibDep("lzma", ["lzma"]):
-            myenv.ConfError("Cannot find system library 'lzma' required for use with libunwind")
+            myenv.ConfError(
+                "Cannot find system library 'lzma' required for use with system libunwind")
 
     if use_system_version_of_library("intel_decimal128"):
         conf.FindSysLibDep("intel_decimal128", ["bid"])

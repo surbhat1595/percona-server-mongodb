@@ -142,7 +142,7 @@ void reopenAllDatabasesAndReloadCollectionCatalog(OperationContext* opCtx,
                 // batched catalog write and continue on a new batch afterwards.
                 catalogWriter.reset();
 
-                repl::establishOplogRecordStoreForLogging(opCtx, collection->getRecordStore());
+                repl::establishOplogCollectionForLogging(opCtx, collection);
                 catalogWriter.emplace(opCtx);
             }
         }
@@ -215,7 +215,7 @@ PreviousCatalogState closeCatalog(OperationContext* opCtx) {
 
     // Reset the stats counter for extended range time-series collections. This is maintained
     // outside the catalog itself.
-    catalog_stats::requiresTimeseriesExtendedRangeSupport.store(0);
+    catalog_stats::requiresTimeseriesExtendedRangeSupport.storeRelaxed(0);
 
     reopenOnFailure.dismiss();
     return previousCatalogState;

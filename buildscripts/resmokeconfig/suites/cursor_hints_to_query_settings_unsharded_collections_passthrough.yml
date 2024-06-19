@@ -4,9 +4,14 @@ test_kind: js_test
 
 selector:
   roots:
+    - jstests/aggregation/**/*.js
     - jstests/core/**/*.js
     - jstests/core_sharding/**/*.js
   exclude_files:
+    # TODO SERVER-87318: Investigate why `verify_index_stats_output` fails with embedded
+    # router and 2 shards.
+    - jstests/aggregation/sources/indexStats/verify_index_stats_output.js
+
     # TODO SERVER-86996 Apply QuerySettings for queries involving timeseries collections.
     - jstests/core/timeseries/**/*.js
 
@@ -51,9 +56,15 @@ selector:
     - jstests/core/index/index_diag.js
     - jstests/core/index/index_multikey.js
     - jstests/core/query/covered_multikey.js
+    - jstests/core/query/cursor/getmore_invalidated_cursors.js
     - jstests/core/query/explain/explain_shell_helpers.js
     - jstests/core/query/internal_hash_eq/lookup_using_hash_key.js
     - jstests/core/return_key.js
+
+    # Test which asserts on the number of execution metrics. The additional commands emitted by
+    # this suite might cause the test to fail.
+    - jstests/aggregation/sources/geonear/geonear_hint.js
+    - jstests/aggregation/sources/lookup/lookup_query_stats.js
 
     # This suite emits additional explains alongside the tested command. This interferes with the number of
     # expected plan cache entries.
@@ -67,11 +78,6 @@ selector:
     # additional hashed shard key indexes that are automatically added by this passthrough.
     - jstests/core/query/mr/mr_merge.js
     - jstests/core/query/mr/mr_preserve_indexes.js
-
-    # This suite intercepts exceptions in order to override only commands which worked originally. This interferes
-    # with the expected exit code of the test and/or 'assert.throws()'.
-    - jstests/core/query/count/count_plan_summary.js
-    - jstests/core/query/cursor/getmore_invalidated_cursors.js
 
     # Query settings have a higher precedence over index filters.
     - jstests/core/index/index_filter_catalog_independent.js
@@ -97,6 +103,7 @@ selector:
     - assumes_against_mongod_not_mongos
     - requires_non_retryable_commands
     - requires_profiling
+    - requires_fsync
 executor:
   archive:
     hooks:

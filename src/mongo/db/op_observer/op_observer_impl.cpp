@@ -105,7 +105,6 @@
 
 
 namespace mongo {
-using repl::DurableOplogEntry;
 using repl::MutableOplogEntry;
 using ChangeStreamPreImageRecordingMode = repl::ReplOperation::ChangeStreamPreImageRecordingMode;
 
@@ -622,7 +621,7 @@ std::vector<repl::OpTime> _logInsertOps(OperationContext* opCtx,
                             << ", is non-empty but not equal to count: " << count);
 
     // Use OplogAccessMode::kLogOp to avoid recursive locking.
-    AutoGetOplogFastPath oplogWrite(opCtx, OplogAccessMode::kLogOp);
+    AutoGetOplog oplogWrite(opCtx, OplogAccessMode::kLogOp);
 
     WriteUnitOfWork wuow(opCtx);
 
@@ -1338,7 +1337,9 @@ void OpObserverImpl::onCollMod(OperationContext* opCtx,
     invariant(coll->uuid() == uuid);
 }
 
-void OpObserverImpl::onDropDatabase(OperationContext* opCtx, const DatabaseName& dbName) {
+void OpObserverImpl::onDropDatabase(OperationContext* opCtx,
+                                    const DatabaseName& dbName,
+                                    bool markFromMigrate) {
     const auto nss = NamespaceString::makeCommandNamespace(dbName);
     if (repl::ReplicationCoordinator::get(opCtx)->isOplogDisabledFor(opCtx, nss)) {
         return;
@@ -1349,6 +1350,7 @@ void OpObserverImpl::onDropDatabase(OperationContext* opCtx, const DatabaseName&
 
     oplogEntry.setTid(dbName.tenantId());
     oplogEntry.setNss(nss);
+    oplogEntry.setFromMigrate(markFromMigrate);
     oplogEntry.setObject(BSON("dropDatabase" << 1));
     auto opTime =
         logOperation(opCtx, &oplogEntry, true /*assignWallClockTime*/, _operationLogger.get());
@@ -1831,29 +1833,29 @@ void OpObserverImpl::onBatchedWriteCommit(OperationContext* opCtx,
         return;
     }
 
+    // Serialize batched statements to BSON and determine their assignment to "applyOps"
+    // entries.
+    // By providing limits on operation count and size, this makes the processing of batched writes
+    // more consistent with our treatment of multi-doc transactions.
+    const auto applyOpsOplogSlotAndOperationAssignment =
+        batchedOps->getApplyOpsInfo(getMaxNumberOfBatchedOperationsInSingleOplogEntry(),
+                                    getMaxSizeOfBatchedOperationsInSingleOplogEntryBytes(),
+                                    /*prepare=*/false);
+
     // Reserve all the optimes in advance, so we only need to get the optime mutex once.  We
     // reserve enough entries for all statements in the transaction.
-    auto oplogSlots = _operationLogger->getNextOpTimes(opCtx, batchedOps->numOperations());
+    auto oplogSlots = _operationLogger->getNextOpTimes(
+        opCtx, applyOpsOplogSlotAndOperationAssignment.numberOfOplogSlotsRequired);
 
     // Throw TenantMigrationConflict error if the database for the transaction statements is being
-    // migrated. We only need check the namespace of the first statement since a transaction's
-    // statements must all be for the same tenant.
+    // migrated. We only need check the namespace of the first statement since a batch's statements
+    // must all be for the same tenant.
     const auto& statements = batchedOps->getOperationsForOpObserver();
     const auto& firstOpNss = statements.begin()->getNss();
     tenant_migration_access_blocker::checkIfCanWriteOrThrow(
         opCtx, firstOpNss.dbName(), oplogSlots.back().getTimestamp());
 
     boost::optional<repl::ReplOperation::ImageBundle> noPrePostImage;
-
-    // Serialize batched statements to BSON and determine their assignment to "applyOps"
-    // entries.
-    // By providing limits on operation count and size, this makes the processing of batched writes
-    // more consistent with our treatment of multi-doc transactions.
-    const auto applyOpsOplogSlotAndOperationAssignment =
-        batchedOps->getApplyOpsInfo(oplogSlots,
-                                    getMaxNumberOfBatchedOperationsInSingleOplogEntry(),
-                                    getMaxSizeOfBatchedOperationsInSingleOplogEntryBytes(),
-                                    /*prepare=*/false);
 
     if (!gFeatureFlagLargeBatchedOperations.isEnabled(
             serverGlobalParams.featureCompatibility.acquireFCVSnapshot())) {
@@ -1947,7 +1949,7 @@ void OpObserverImpl::onBatchedWriteCommit(OperationContext* opCtx,
 
     if (opAccumulator) {
         for (const auto& entry : applyOpsOplogSlotAndOperationAssignment.applyOpsEntries) {
-            opAccumulator->insertOpTimes.emplace_back(entry.oplogSlot);
+            opAccumulator->insertOpTimes.emplace_back(oplogSlots[entry.oplogSlotIndex]);
         }
     }
 }
@@ -1999,9 +2001,6 @@ void OpObserverImpl::onTransactionPrepare(
 
     // Don't write oplog entry on secondaries.
     invariant(opCtx->writesAreReplicated());
-
-    // We should have reserved enough slots.
-    invariant(reservedSlots.size() >= statements.size());
 
     // Writes to the oplog only require a Global intent lock. Guaranteed by
     // OplogSlotReserver.

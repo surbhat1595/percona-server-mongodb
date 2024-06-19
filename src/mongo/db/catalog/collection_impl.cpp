@@ -814,6 +814,20 @@ boost::optional<bool> CollectionImpl::getTimeseriesBucketsMayHaveMixedSchemaData
 }
 
 boost::optional<bool> CollectionImpl::timeseriesBucketingParametersHaveChanged() const {
+    if (!getTimeseriesOptions()) {
+        return boost::none;
+    }
+
+    if (!feature_flags::gTSBucketingParametersUnchanged.isEnabled(
+            serverGlobalParams.featureCompatibility.acquireFCVSnapshot())) {
+        // Pessimistically return true because v7.1+ versions may have missed cloning this catalog
+        // option upon chunk migrations, movePrimary, resharding, initial sync or backup/restore
+        // (SERVER-91193).
+        // TODO SERVER-91195: rely on timeseriesBucketingParametersHaveChanged once we are sure the
+        // value set in the durable catalog is correct.
+        return true;
+    }
+
     return _metadata->timeseriesBucketingParametersHaveChanged;
 }
 
@@ -865,7 +879,7 @@ void CollectionImpl::setRequiresTimeseriesExtendedRangeSupport(OperationContext*
     bool expected = false;
     bool set = _shared->_requiresTimeseriesExtendedRangeSupport.compareAndSwap(&expected, true);
     if (set) {
-        catalog_stats::requiresTimeseriesExtendedRangeSupport.fetchAndAdd(1);
+        catalog_stats::requiresTimeseriesExtendedRangeSupport.fetchAndAddRelaxed(1);
         if (!timeseries::collectionHasTimeIndex(opCtx, *this)) {
             LOGV2_WARNING(
                 6679402,
@@ -1024,7 +1038,7 @@ void CollectionImpl::registerCappedInserts(OperationContext* opCtx,
     // that we are operating with the wrong global lock semantics, and either hold too weak a lock
     // (e.g. IS) or that we upgraded in a way we shouldn't (e.g. IS -> IX).
     invariant(!shard_role_details::getLocker(opCtx)->hasReadTicket() ||
-              !shard_role_details::getLocker(opCtx)->uninterruptibleLocksRequested());
+              !opCtx->uninterruptibleLocksRequested_DO_NOT_USE());  // NOLINT
 
     auto* uncommitted =
         CappedWriter::get(opCtx).getUncommitedRecordsFor(_shared->_recordStore->getIdent());
@@ -1908,15 +1922,6 @@ void CollectionImpl::replaceMetadata(OperationContext* opCtx,
 
 bool CollectionImpl::isMetadataEqual(const BSONObj& otherMetadata) const {
     return !_metadata->toBSON().woCompare(otherMetadata);
-}
-
-void CollectionImpl::sanitizeCollectionOptions(OperationContext* opCtx) {
-    _writeMetadata(opCtx, [&](BSONCollectionCatalogEntry::MetaData& md) {
-        const auto storageEngine = opCtx->getServiceContext()->getStorageEngine();
-        const auto& storageEngineOptions = md.options.storageEngine;
-        md.options.storageEngine =
-            storageEngine->getSanitizedStorageOptionsForSecondaryReplication(storageEngineOptions);
-    });
 }
 
 template <typename Func>

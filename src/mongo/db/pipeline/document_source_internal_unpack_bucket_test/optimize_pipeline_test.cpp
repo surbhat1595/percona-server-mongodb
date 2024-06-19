@@ -468,6 +468,7 @@ TEST_F(OptimizePipeline, ComputedProjectThenMetaMatchPushedDown) {
     // Note that the $match substitutes 'y' with 'myMeta', allowing it to be moved before the
     // project and enabling pushdown.
     auto serialized = pipeline->serializeToBson();
+
     ASSERT_EQ(3u, serialized.size());
     ASSERT_BSONOBJ_EQ(fromjson("{$match: {meta: {$gte: 'abc'}}}"), serialized[0]);
     ASSERT_BSONOBJ_EQ(fromjson("{$addFields: {y: '$meta'}}"), serialized[1]);
@@ -477,7 +478,49 @@ TEST_F(OptimizePipeline, ComputedProjectThenMetaMatchPushedDown) {
         serialized[2]);
 }
 
-TEST_F(OptimizePipeline, ComputedProjectThenMetaMatchNotPushedDown) {
+TEST_F(OptimizePipeline, ComputedMetaProjectPushedDown) {
+    auto pipeline = Pipeline::parse(
+        makeVector(fromjson("{$_internalUnpackBucket: { exclude: [], timeField: 'time', metaField: "
+                            "'myMeta', bucketMaxSpanSeconds: 3600}}"),
+                   fromjson("{$project: {a: {$sum: ['$myMeta.a', '$myMeta.b']}}}")),
+        getExpCtx());
+    ASSERT_EQ(2u, pipeline->getSources().size());
+
+    pipeline->optimizePipeline();
+
+    // We should push down the project.
+    auto serialized = pipeline->serializeToBson();
+    ASSERT_EQ(2u, serialized.size());
+    ASSERT_BSONOBJ_EQ(fromjson("{$addFields: {a: {$sum: ['$meta.a', '$meta.b']}}}"), serialized[0]);
+    ASSERT_BSONOBJ_EQ(
+        fromjson(
+            "{$_internalUnpackBucket: { include: [ '_id', 'a' ], timeField: 'time', "
+            "metaField: 'myMeta', bucketMaxSpanSeconds: 3600, computedMetaProjFields: ['a']}}"),
+        serialized[1]);
+}
+
+TEST_F(OptimizePipeline, ComputedShadowingMetaProjectPushedDown) {
+    auto pipeline = Pipeline::parse(
+        makeVector(fromjson("{$_internalUnpackBucket: { exclude: [], timeField: 'time', metaField: "
+                            "'myMeta', bucketMaxSpanSeconds: 3600}}"),
+                   fromjson("{$project: {myMeta: {$sum: ['$myMeta.a', '$myMeta.b']}}}")),
+        getExpCtx());
+    ASSERT_EQ(2u, pipeline->getSources().size());
+
+    pipeline->optimizePipeline();
+
+    // We should push down the project.
+    auto serialized = pipeline->serializeToBson();
+    ASSERT_EQ(2u, serialized.size());
+    ASSERT_BSONOBJ_EQ(fromjson("{$addFields: {meta: {$sum: ['$meta.a', '$meta.b']}}}"),
+                      serialized[0]);
+    ASSERT_BSONOBJ_EQ(
+        fromjson("{$_internalUnpackBucket: { include: [ '_id', 'myMeta' ], timeField: 'time', "
+                 "metaField: 'myMeta', bucketMaxSpanSeconds: 3600}}"),
+        serialized[1]);
+}
+
+TEST_F(OptimizePipeline, ComputedProjectThenMetaMatchPushedDownWithoutReorder) {
     auto pipeline = Pipeline::parse(
         makeVector(fromjson("{$_internalUnpackBucket: { exclude: [], timeField: 'time', metaField: "
                             "'myMeta', bucketMaxSpanSeconds: 3600}}"),
@@ -491,18 +534,17 @@ TEST_F(OptimizePipeline, ComputedProjectThenMetaMatchNotPushedDown) {
     // We should both push down the project and internalize the remaining project, but we can't
     // push down the meta match due to the (now invalid) renaming.
     auto serialized = pipeline->serializeToBson();
-    ASSERT_EQ(2u, serialized.size());
-    ASSERT_BSONOBJ_EQ(fromjson("{$addFields: {myMeta: {$sum: ['$meta.a', '$meta.b']}}}"),
+    ASSERT_EQ(3u, serialized.size());
+    ASSERT_BSONOBJ_EQ(fromjson("{$addFields: {meta: {$sum: ['$meta.a', '$meta.b']}}}"),
                       serialized[0]);
+    ASSERT_BSONOBJ_EQ(fromjson("{$match: {meta: {$gte: 'abc'}}}"), serialized[1]);
     ASSERT_BSONOBJ_EQ(
-        fromjson("{ $_internalUnpackBucket: { include: [ \"_id\", \"myMeta\" ], timeField: "
-                 "\"time\", metaField: \"myMeta\", "
-                 "bucketMaxSpanSeconds: 3600, computedMetaProjFields: [ \"myMeta\" ], "
-                 "eventFilter: { myMeta: { $gte: \"abc\" } } } }"),
-        serialized[1]);
-}  // namespace
+        fromjson("{$_internalUnpackBucket: { include: [ '_id', 'myMeta' ], timeField: 'time', "
+                 "metaField: 'myMeta', bucketMaxSpanSeconds: 3600}}"),
+        serialized[2]);
+}
 
-TEST_F(OptimizePipeline, ComputedProjectThenMatchNotPushedDown) {
+TEST_F(OptimizePipeline, ComputedProjectThenMatchPushedDown) {
     auto pipeline = Pipeline::parse(
         makeVector(fromjson("{$_internalUnpackBucket: { exclude: [], timeField: 'time', metaField: "
                             "'myMeta', bucketMaxSpanSeconds: 3600}}"),
@@ -516,13 +558,13 @@ TEST_F(OptimizePipeline, ComputedProjectThenMatchNotPushedDown) {
     // We should push down the computed project but not the match, because it depends on the newly
     // computed values.
     auto serialized = pipeline->serializeToBson();
-    ASSERT_EQ(2u, serialized.size());
+    ASSERT_EQ(3u, serialized.size());
     ASSERT_BSONOBJ_EQ(fromjson("{$addFields: {y: {$sum: ['$meta.a', '$meta.b']}}}"), serialized[0]);
-    ASSERT_BSONOBJ_EQ(fromjson("{ $_internalUnpackBucket: { include: [ \"_id\", \"y\" ], "
-                               "timeField: \"time\", metaField: \"myMeta\", "
-                               "bucketMaxSpanSeconds: 3600, computedMetaProjFields: [ \"y\" ], "
-                               "eventFilter: { y: { $gt: \"abc\" } } } }"),
+    ASSERT_BSONOBJ_EQ(fromjson("{$_internalUnpackBucket: {include: ['_id', 'y'], timeField: "
+                               "'time', metaField: 'myMeta', bucketMaxSpanSeconds: 3600, "
+                               "computedMetaProjFields: [ 'y' ]}}"),
                       serialized[1]);
+    ASSERT_BSONOBJ_EQ(fromjson("{$match: {y: {$gt: 'abc'}}}"), serialized[2]);
 }
 
 TEST_F(OptimizePipeline, MetaSortThenProjectPushedDown) {
@@ -582,13 +624,14 @@ TEST_F(OptimizePipeline, ComputedProjectThenSortPushedDown) {
     // sort pushdown due to the renaming.
     auto serialized = pipeline->serializeToBson();
     ASSERT_EQ(3u, serialized.size());
-    ASSERT_BSONOBJ_EQ(fromjson("{$addFields: {myMeta: '$meta.a'}}"), serialized[0]);
+    ASSERT_BSONOBJ_EQ(fromjson("{$addFields: {meta: '$meta.a'}}"), serialized[0]);
+    ASSERT_BSONOBJ_EQ(fromjson("{$sort: {meta: 1}}"), serialized[1]);
     ASSERT_BSONOBJ_EQ(
         fromjson(
             "{$_internalUnpackBucket: { include: ['_id', 'myMeta'], timeField: 'time', metaField: "
-            "'myMeta', bucketMaxSpanSeconds: 3600, computedMetaProjFields: ['myMeta']}}"),
-        serialized[1]);
-    ASSERT_BSONOBJ_EQ(fromjson("{$sort: {myMeta: 1}}"), serialized[2]);
+            "'myMeta', bucketMaxSpanSeconds: 3600}}"),
+        serialized[2]);
+    ;
 }
 
 TEST_F(OptimizePipeline, ExclusionProjectThenMatchPushDown) {
@@ -671,13 +714,53 @@ TEST_F(OptimizePipeline, ComputedProjectThenProjectPushDown) {
     // remaining project in the pipeline.
     auto serialized = pipeline->serializeToBson();
     ASSERT_EQ(3u, serialized.size());
-    ASSERT_BSONOBJ_EQ(fromjson("{$addFields: {myMeta: '$meta.a'}}"), serialized[0]);
+    ASSERT_BSONOBJ_EQ(fromjson("{$addFields: {meta: '$meta.a'}}"), serialized[0]);
+    ASSERT_BSONOBJ_EQ(fromjson("{$project: {meta: false, _id: true}}"), serialized[1]);
     ASSERT_BSONOBJ_EQ(
         fromjson(
             "{$_internalUnpackBucket: { include: ['_id', 'myMeta'], timeField: 'time', metaField: "
-            "'myMeta', bucketMaxSpanSeconds: 3600, computedMetaProjFields: ['myMeta']}}"),
+            "'myMeta', bucketMaxSpanSeconds: 3600}}"),
+        serialized[2]);
+}
+
+TEST_F(OptimizePipeline, AddFieldsOfShadowingMetaPushedDown) {
+    auto pipeline = Pipeline::parse(
+        makeVector(fromjson("{$_internalUnpackBucket: { exclude: [], timeField: 'time', metaField: "
+                            "'myMeta', bucketMaxSpanSeconds: 3600}}"),
+                   fromjson("{$addFields: {myMeta: '$myMeta.a'}}")),
+        getExpCtx());
+    ASSERT_EQ(2u, pipeline->getSources().size());
+
+    pipeline->optimizePipeline();
+
+    // We should push down the $addFields and then the $sort.
+    auto serialized = pipeline->serializeToBson();
+    ASSERT_EQ(2u, serialized.size());
+    ASSERT_BSONOBJ_EQ(fromjson("{$addFields: {meta: '$meta.a'}}"), serialized[0]);
+    ASSERT_BSONOBJ_EQ(
+        fromjson("{$_internalUnpackBucket: { exclude: [], timeField: 'time', metaField: 'myMeta', "
+                 "bucketMaxSpanSeconds: 3600}}"),
         serialized[1]);
-    ASSERT_BSONOBJ_EQ(fromjson("{$project: {myMeta: false, _id: true}}"), serialized[2]);
+}
+
+TEST_F(OptimizePipeline, AddFieldsOfComputedMetaPushedDown) {
+    auto pipeline = Pipeline::parse(
+        makeVector(fromjson("{$_internalUnpackBucket: { exclude: [], timeField: 'time', metaField: "
+                            "'myMeta', bucketMaxSpanSeconds: 3600}}"),
+                   fromjson("{$addFields: {a: '$myMeta.a'}}")),
+        getExpCtx());
+    ASSERT_EQ(2u, pipeline->getSources().size());
+
+    pipeline->optimizePipeline();
+
+    // We should push down the $addFields and then the $sort.
+    auto serialized = pipeline->serializeToBson();
+    ASSERT_EQ(2u, serialized.size());
+    ASSERT_BSONOBJ_EQ(fromjson("{$addFields: {a: '$meta.a'}}"), serialized[0]);
+    ASSERT_BSONOBJ_EQ(
+        fromjson("{$_internalUnpackBucket: { exclude: [], timeField: 'time', metaField: 'myMeta', "
+                 "bucketMaxSpanSeconds: 3600, computedMetaProjFields: ['a']}}"),
+        serialized[1]);
 }
 
 TEST_F(OptimizePipeline, AddFieldsThenSortPushedDown) {
@@ -691,15 +774,15 @@ TEST_F(OptimizePipeline, AddFieldsThenSortPushedDown) {
 
     pipeline->optimizePipeline();
 
-    // We should push down the $addFields, but we can't do the sort pushdown due to the renaming.
+    // We should push down the $addFields and then the $sort.
     auto serialized = pipeline->serializeToBson();
     ASSERT_EQ(3u, serialized.size());
-    ASSERT_BSONOBJ_EQ(fromjson("{$addFields: {myMeta: '$meta.a'}}"), serialized[0]);
+    ASSERT_BSONOBJ_EQ(fromjson("{$addFields: {meta: '$meta.a'}}"), serialized[0]);
+    ASSERT_BSONOBJ_EQ(fromjson("{$sort: {meta: 1}}"), serialized[1]);
     ASSERT_BSONOBJ_EQ(
         fromjson("{$_internalUnpackBucket: { exclude: [], timeField: 'time', metaField: 'myMeta', "
-                 "bucketMaxSpanSeconds: 3600, computedMetaProjFields: ['myMeta']}}"),
-        serialized[1]);
-    ASSERT_BSONOBJ_EQ(fromjson("{$sort: {myMeta: 1}}"), serialized[2]);
+                 "bucketMaxSpanSeconds: 3600}}"),
+        serialized[2]);
 }
 
 TEST_F(OptimizePipeline, PushDownAddFieldsAndInternalizeProjection) {
@@ -773,6 +856,31 @@ TEST_F(OptimizePipeline, InternalizeProjectAndPushdownAddFields) {
                                "'myMeta'], timeField: 'time', metaField: 'myMeta', "
                                "bucketMaxSpanSeconds: 3600, computedMetaProjFields: ['newMeta']}}"),
                       serialized[1]);
+}
+
+TEST_F(OptimizePipeline, InternalizeProjectAndPushdownAddFieldsWithShadowingMeta) {
+    auto unpackSpecObj = fromjson(
+        "{$_internalUnpackBucket: { exclude: [], timeField: 'time', metaField: 'myMeta', "
+        "bucketMaxSpanSeconds: 3600}}");
+    auto projectSpecObj = fromjson("{$project: {x: true, y: true, myMeta: true}}");
+    // The new 'myMeta' shadows the original 'myMeta'.
+    auto addFieldsSpec = fromjson("{$addFields: {myMeta: '$myMeta.a'}}");
+
+    auto pipeline =
+        Pipeline::parse(makeVector(unpackSpecObj, projectSpecObj, addFieldsSpec), getExpCtx());
+
+    pipeline->optimizePipeline();
+
+    // We should internalize the $project and push down the $addFields.
+    auto serialized = pipeline->serializeToBson();
+    ASSERT_EQ(2u, serialized.size());
+    ASSERT_BSONOBJ_EQ(fromjson("{$addFields: {meta: '$meta.a'}}"), serialized[0]);
+    ASSERT_BSONOBJ_EQ(
+        fromjson("{$_internalUnpackBucket: { include: ['_id', 'x', 'y', 'myMeta'], "
+                 // The shadowing meta isn't considered as a computed meta and so no
+                 // 'computedMetaProjFields'.
+                 "timeField: 'time', metaField: 'myMeta', bucketMaxSpanSeconds: 3600}}"),
+        serialized[1]);
 }
 
 TEST_F(OptimizePipeline, DoNotSwapAddFieldsIfDependencyIsExcluded) {
@@ -1077,6 +1185,32 @@ TEST_F(OptimizePipeline, ComputedMetaProjectFieldsAfterInclusionGetsAddedToInclu
         "{$_internalUnpackBucket: { include: ['_id','newMeta', 'myMeta'], timeField: 'time', "
         "metaField: 'myMeta', "
         "bucketMaxSpanSeconds: 3600, computedMetaProjFields: ['newMeta']}}");
+    ASSERT_BSONOBJ_EQ(expectedSpecObj, serialized[1]);
+}
+
+TEST_F(OptimizePipeline, ShadowingMetaProjectFieldsAfterInclusionGetsAddedToIncludes) {
+    auto pipeline = Pipeline::parse(
+        makeVector(fromjson("{$_internalUnpackBucket: { exclude: [], timeField: 'time', metaField: "
+                            "'myMeta', bucketMaxSpanSeconds: 3600, computedMetaProjFields: []}}"),
+                   fromjson("{$project: {myMeta: 1}}"),
+                   // The new 'myMeta' shadows the original 'myMeta'.
+                   fromjson("{$addFields: {myMeta: {$toUpper : '$myMeta'}}}")),
+        getExpCtx());
+    ASSERT_EQ(3u, pipeline->getSources().size());
+
+    pipeline->optimizePipeline();
+
+    auto serialized = pipeline->serializeToBson();
+    ASSERT_EQ(2u, serialized.size());
+
+    ASSERT_BSONOBJ_EQ(fromjson("{$addFields: {meta: {$toUpper: ['$meta']}}}"), serialized[0]);
+
+    // 'newMeta' field gets added to 'computedMetaProjFields' and to 'include'.
+    auto expectedSpecObj = fromjson(
+        "{$_internalUnpackBucket: { include: ['_id', 'myMeta'], timeField: 'time', "
+        // The shadowing meta isn't considered as a computed meta and so no
+        // 'computedMetaProjFields'.
+        "metaField: 'myMeta', bucketMaxSpanSeconds: 3600}}");
     ASSERT_BSONOBJ_EQ(expectedSpecObj, serialized[1]);
 }
 }  // namespace

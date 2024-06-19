@@ -57,7 +57,7 @@ BSONObj createDebugQueryShape(const BSONObj& representativeQuery,
     // Get the serialized query shape by creating the representative information for the given
     // representative query.
     const auto representativeInfo =
-        query_settings::createRepresentativeInfo(representativeQuery, opCtx, tenantId);
+        query_settings::createRepresentativeInfo(opCtx, representativeQuery, tenantId);
     return representativeInfo.serializedQueryShape;
 }
 
@@ -104,7 +104,9 @@ boost::intrusive_ptr<DocumentSource> DocumentSourceQuerySettings::createFromBson
         // results.
         auto tenantId = expCtx->ns.tenantId();
         auto& manager = QuerySettingsManager::get(expCtx->opCtx);
-        auto settingsArray = manager.getAllQueryShapeConfigurations(expCtx->opCtx, tenantId);
+        auto settingsArray =
+            std::move(manager.getAllQueryShapeConfigurations(expCtx->opCtx, tenantId)
+                          .queryShapeConfigurations);
         std::deque<DocumentSource::GetNextResult> queue;
         std::transform(std::make_move_iterator(settingsArray.begin()),
                        std::make_move_iterator(settingsArray.end()),

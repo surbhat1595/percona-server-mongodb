@@ -456,7 +456,7 @@ public:
 
     static Value serializeConstant(const SerializationOptions& opts,
                                    Value val,
-                                   bool wrapRepresentativeValue = false);
+                                   bool wrapRepresentativeValue = true);
 
     bool selfAndChildrenAreConstant() const final {
         return true;
@@ -3055,7 +3055,7 @@ public:
 private:
     // The first element in the pair represent the position on the constant in the '_children'
     // array. The second element is the constant set.
-    boost::optional<std::pair<size_t, ValueUnorderedSet>> _cachedConstant;
+    boost::optional<std::pair<size_t, ValueFlatUnorderedSet>> _cachedConstant;
 
     template <typename H>
     friend class ExpressionHashVisitor;

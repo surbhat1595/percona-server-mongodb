@@ -173,7 +173,7 @@ AsyncRequestsSender::Response establishMergingShardCursor(OperationContext* opCt
         {{mergingShardId, mergeCmdObj}},
         ReadPreferenceSetting::get(opCtx),
         sharded_agg_helpers::getDesiredRetryPolicy(opCtx));
-    auto response = ars.next();
+    auto response = ars.next(true /* forMergeCursors*/);
     tassert(6273807,
             "requested and received data from just one shard, but results are still pending",
             ars.done());
@@ -324,7 +324,7 @@ BSONObj createCommandForMergingShard(Document serializedCommand,
         }
 
         if (arrayBuilder.arrSize() > 0) {
-            mergeCmd[Generic_args_unstable_v1::kRequestGossipRoutingCacheFieldName] =
+            mergeCmd[GenericArguments::kRequestGossipRoutingCacheFieldName] =
                 Value(arrayBuilder.arr());
         }
     }
@@ -336,6 +336,12 @@ BSONObj createCommandForMergingShard(Document serializedCommand,
         ShardVersionFactory::make(ChunkVersion::IGNORED(),
                                   sii ? boost::make_optional(sii->getCollectionIndexes())
                                       : boost::none));
+
+    // Attach query settings to the command.
+    if (auto querySettingsBSON = mergeCtx->getQuerySettings().toBSON();
+        !querySettingsBSON.isEmpty()) {
+        mergeCmd[AggregateCommandRequest::kQuerySettingsFieldName] = Value(querySettingsBSON);
+    }
 
     // Attach the read and write concerns if needed, and return the final command object.
     return applyReadWriteConcern(mergeCtx->opCtx,
@@ -556,13 +562,12 @@ BSONObj establishMergingMongosCursor(OperationContext* opCtx,
 
     if (exhausted) {
         opDebug.additiveMetrics.aggregateDataBearingNodeMetrics(ccc->takeRemoteMetrics());
-        collectQueryStatsMongos(opCtx, ccc->getKey());
+        collectQueryStatsMongos(opCtx, ccc->takeKey());
     } else {
         collectQueryStatsMongos(opCtx, ccc);
     }
 
     ccc->detachFromOperationContext();
-
     CursorId clusterCursorId = 0;
     if (!exhausted) {
         auto authUser = AuthorizationSession::get(opCtx->getClient())->getAuthenticatedUserName();
@@ -965,6 +970,7 @@ Status runPipelineOnSpecificShardOnly(const boost::intrusive_ptr<ExpressionConte
     if (explain) {
         // If this was an explain, then we get back an explain result object rather than a cursor.
         result = response.swResponse.getValue().data;
+        collectQueryStatsMongos(opCtx, std::move(CurOp::get(opCtx)->debug().queryStatsInfo.key));
     } else {
         result = uassertStatusOK(storePossibleCursor(
             opCtx,

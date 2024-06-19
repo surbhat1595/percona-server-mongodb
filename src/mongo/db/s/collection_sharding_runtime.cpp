@@ -80,6 +80,8 @@
 namespace mongo {
 namespace {
 
+MONGO_FAIL_POINT_DEFINE(alwaysThrowStaleConfigInfo);
+
 class UntrackedCollection : public ScopedCollectionDescription::Impl {
 public:
     UntrackedCollection() = default;
@@ -487,6 +489,14 @@ CollectionShardingRuntime::_getMetadataWithVersionCheckAt(
         ? *optReceivedShardVersion
         : ShardVersionPlacementIgnoredNoIndexes();
 
+    alwaysThrowStaleConfigInfo.execute([&](const auto&) {
+        uasserted(StaleConfigInfo(_nss,
+                                  receivedShardVersion,
+                                  boost::none /* wantedVersion */,
+                                  ShardingState::get(opCtx)->shardId()),
+                  "Failing with StaleConfig as alwaysThrowStaleConfigInfo is enabled");
+    });
+
     {
         auto criticalSectionSignal =
             _critSec.getSignal(shard_role_details::getLocker(opCtx)->isWriteLocked()
@@ -707,7 +717,7 @@ CollectionCriticalSection::CollectionCriticalSection(OperationContext* opCtx,
 
 CollectionCriticalSection::~CollectionCriticalSection() {
     // TODO (SERVER-71444): Fix to be interruptible or document exception.
-    UninterruptibleLockGuard noInterrupt(shard_role_details::getLocker(_opCtx));  // NOLINT.
+    UninterruptibleLockGuard noInterrupt(_opCtx);  // NOLINT.
     AutoGetCollection autoColl(_opCtx, _nss, MODE_IX);
     auto scopedCsr =
         CollectionShardingRuntime::assertCollectionLockedAndAcquireExclusive(_opCtx, _nss);

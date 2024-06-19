@@ -433,16 +433,19 @@ Status ReplicationCoordinatorMock::setFollowerModeRollback(OperationContext* opC
     return setFollowerMode(MemberState::RS_ROLLBACK);
 }
 
-void ReplicationCoordinatorMock::setApplierState(const ApplierState& newState) {
+void ReplicationCoordinatorMock::setOplogSyncState(const OplogSyncState& newState) {
     stdx::lock_guard<Mutex> lk(_mutex);
-    _applierState = newState;
+    _oplogSyncState = newState;
 }
 
-ReplicationCoordinator::ApplierState ReplicationCoordinatorMock::getApplierState() {
-    return _applierState;
+ReplicationCoordinator::OplogSyncState ReplicationCoordinatorMock::getOplogSyncState() {
+    return _oplogSyncState;
 }
 
-void ReplicationCoordinatorMock::signalDrainComplete(OperationContext*, long long) noexcept {}
+void ReplicationCoordinatorMock::signalWriterDrainComplete(OperationContext*, long long) noexcept {}
+
+void ReplicationCoordinatorMock::signalApplierDrainComplete(OperationContext*, long long) noexcept {
+}
 
 void ReplicationCoordinatorMock::signalUpstreamUpdater() {}
 
@@ -717,8 +720,12 @@ Status ReplicationCoordinatorMock::processHeartbeatV1(const ReplSetHeartbeatArgs
     return Status::OK();
 }
 
+void ReplicationCoordinatorMock::setWriteConcernMajorityShouldJournal(bool shouldJournal) {
+    _writeConcernMajorityShouldJournal = shouldJournal;
+}
+
 bool ReplicationCoordinatorMock::getWriteConcernMajorityShouldJournal() {
-    return true;
+    return _writeConcernMajorityShouldJournal;
 }
 
 long long ReplicationCoordinatorMock::getTerm() const {
@@ -854,7 +861,14 @@ std::shared_ptr<const HelloResponse> ReplicationCoordinatorMock::awaitHelloRespo
 
 StatusWith<OpTime> ReplicationCoordinatorMock::getLatestWriteOpTime(
     OperationContext* opCtx) const noexcept {
-    return getMyLastAppliedOpTime();
+    OpTime o = getMyLastWrittenOpTime();
+    if (o.isNull()) {
+        // ErrorCodes::OplogOperationUnsupported allows the status to be transparently upgraded to
+        // OK in setLastOpToSystemLastOpTime.
+        return StatusWith<OpTime>(ErrorCodes::OplogOperationUnsupported,
+                                  "uninitialized lastWritten");
+    }
+    return o;
 }
 
 HostAndPort ReplicationCoordinatorMock::getCurrentPrimaryHostAndPort() const {

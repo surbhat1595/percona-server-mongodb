@@ -27,32 +27,43 @@
  *    it in the license file.
  */
 
+#include "command_generic_argument.h"
 #include "mongo/base/string_data.h"
+#include "mongo/db/namespace_string.h"
 #include "mongo/idl/generic_argument_gen.h"
+#include "mongo/util/serialization_context.h"
 
 namespace mongo {
 
 bool isGenericArgument(StringData arg) {
-    return Generic_args_api_v1::hasField(arg) || Generic_args_unstable_v1::hasField(arg);
+    return GenericArguments::hasField(arg);
 }
 
 bool isGenericReply(StringData arg) {
-    return Generic_reply_fields_api_v1::hasField(arg) ||
-        Generic_reply_fields_unstable_v1::hasField(arg);
+    return GenericReplyFields::hasField(arg);
 }
 
 bool shouldForwardToShards(StringData arg) {
-    return Generic_args_api_v1::shouldForwardToShards(arg) &&
-        Generic_args_unstable_v1::shouldForwardToShards(arg);
+    return GenericArguments::shouldForwardToShards(arg);
 }
 
 bool shouldForwardFromShards(StringData replyField) {
-    return Generic_reply_fields_api_v1::shouldForwardFromShards(replyField) &&
-        Generic_reply_fields_unstable_v1::shouldForwardFromShards(replyField);
+    return GenericReplyFields::shouldForwardFromShards(replyField);
 }
 
-bool isMongocryptdArgument(StringData arg) {
-    return arg == "jsonSchema"_sd;
+void appendGenericCommandArguments(const BSONObj& commandPassthroughFields,
+                                   const std::vector<StringData>& knownFields,
+                                   BSONObjBuilder* builder) {
+
+    for (const auto& element : commandPassthroughFields) {
+
+        StringData name = element.fieldNameStringData();
+        // Include a passthrough field as long the IDL class has not defined it.
+        if (isGenericArgument(name) &&
+            std::find(knownFields.begin(), knownFields.end(), name) == knownFields.end()) {
+            builder->append(element);
+        }
+    }
 }
 
 }  // namespace mongo

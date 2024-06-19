@@ -15,6 +15,7 @@
 import {
     uniformDistTransitions
 } from "jstests/concurrency/fsm_workload_helpers/state_transition_utils.js";
+import {FeatureFlagUtil} from "jstests/libs/feature_flag_util.js";
 
 const testDbName = jsTestName() + "_DB";
 const collPrefix = "coll_";
@@ -64,10 +65,46 @@ export const $config = (function() {
             assert.commandWorkedOrFailedWithCode(res, errorCodes, "Failed to create view");
         },
 
+        createFLEUnsharded: function createFLEUnsharded(db, collName) {
+            const coll = getRandomCollection(db);
+            jsTestLog("Executing state createFLEUnsharded: " + coll.getFullName());
+            const sampleEncryptedFields = {
+                "fields": [
+                    {
+                        "path": "firstName",
+                        "keyId": UUID("11d58b8a-0c6c-4d69-a0bd-70c6d9befae9"),
+                        "bsonType": "string",
+                        "queries": {"queryType": "equality"}
+                    },
+                    {
+                        "path": "paymentMethods.creditCards.number",
+                        "keyId": UUID("12341234-1234-1234-1234-123412341234"),
+                        "bsonType": "string",
+                        "queries": {"queryType": "equality"}
+                    },
+                ]
+            };
+
+            const res = coll.getDB().createCollection(coll.getName(),
+                                                      {encryptedFields: sampleEncryptedFields});
+
+            const errorCodes = [
+                // Concurrent creation on the same namespace.
+                ErrorCodes.NamespaceExists
+            ];
+            assert.commandWorkedOrFailedWithCode(
+                res, errorCodes, "Failed to create unsharded FLE collection");
+        },
+
         createTimeseriesUnsharded: function createTimeseriesUnsharded(db, collName) {
             if (TestData.runInsideTransaction) {
                 // TODO SERVER-50484: creating a timeseries/view is not supported
                 // in multi-document transactions.
+                return;
+            }
+            if (TestData.runningWithShardStepdowns &&
+                !FeatureFlagUtil.isPresentAndEnabled(db, "TrackUnshardedCollectionsUponCreation")) {
+                // TODO SERVER-90742: Remove the early exit.
                 return;
             }
             const coll = getRandomCollection(db);

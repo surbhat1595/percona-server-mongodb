@@ -2,6 +2,7 @@ import {Cluster} from "jstests/concurrency/fsm_libs/cluster.js";
 import {parseConfig} from "jstests/concurrency/fsm_libs/parse_config.js";
 import {ThreadManager} from "jstests/concurrency/fsm_libs/thread_mgr.js";
 import {uniqueCollName, uniqueDBName} from "jstests/concurrency/fsm_utils/name_utils.js";
+import {ConfigShardUtil} from "jstests/libs/config_shard_util.js";
 
 export const runner = (function() {
     function validateExecutionMode(mode) {
@@ -216,9 +217,25 @@ export const runner = (function() {
                 myDB[collName].drop();
 
                 if (cluster.isSharded()) {
-                    var shardKey = context[workload].config.data.shardKey || {_id: 'hashed'};
-                    // TODO: allow workload config data to specify split
-                    cluster.shardCollection(myDB[collName], shardKey, false);
+                    // If the suite specifies shardCollection probability, only shard this
+                    // collection with that probability unless the workload expects it to be sharded
+                    // (i.e. specified a custom shard key).
+                    const shouldShard =
+                        (typeof context[workload].config.data.shardKey !== "undefined") ||
+                        (typeof TestData.shardCollectionProbability == "undefined") ||
+                        (Math.random() < TestData.shardCollectionProbability);
+                    print("Preparing test collection " + tojsononeline({
+                              dbName,
+                              collName,
+                              customShardKey: context[workload].config.data.shardKey,
+                              shardCollectionProbability: TestData.shardCollectionProbability,
+                              shouldShard,
+                          }));
+                    if (shouldShard) {
+                        var shardKey = context[workload].config.data.shardKey || {_id: "hashed"};
+                        // TODO: allow workload config data to specify split
+                        cluster.shardCollection(myDB[collName], shardKey, false);
+                    }
                 }
             }
 
@@ -357,8 +374,16 @@ export const runner = (function() {
         var myDB = context[workload].db;
         var collName = context[workload].collName;
 
-        var config = context[workload].config;
-        config.setup.call(config.data, myDB, collName, cluster);
+        const fn = () => {
+            var config = context[workload].config;
+            config.setup.call(config.data, myDB, collName, cluster);
+        };
+
+        if (TestData.transitioningConfigShard) {
+            ConfigShardUtil.retryOnConfigTransitionErrors(fn);
+        } else {
+            fn();
+        }
     }
 
     function teardownWorkload(workload, context, cluster) {
@@ -567,7 +592,7 @@ export const runner = (function() {
             workloads, context, executionOptions, true /* applyMultipliers */);
         var threadMgr = new ThreadManager(clusterOptions);
 
-        var cluster = new Cluster(clusterOptions);
+        var cluster = new Cluster(clusterOptions, executionOptions.sessionOptions);
         cluster.setup();
 
         // Clean up the state left behind by other tests in the concurrency suite

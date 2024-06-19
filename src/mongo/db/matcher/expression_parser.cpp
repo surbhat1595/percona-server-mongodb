@@ -177,7 +177,6 @@ enum class DocumentParseLevel {
 };
 
 namespace {
-
 // Forward declarations.
 
 Status parseSub(boost::optional<StringData> name,
@@ -379,7 +378,8 @@ StatusWithMatchExpression parse(const BSONObj& obj,
                                 const boost::intrusive_ptr<ExpressionContext>& expCtx,
                                 const ExtensionsCallback* extensionsCallback,
                                 MatchExpressionParser::AllowedFeatureSet allowedFeatures,
-                                DocumentParseLevel currentLevel) {
+                                DocumentParseLevel currentLevel,
+                                const BSONObj& parentObj = BSONObj()) {
     auto root = std::make_unique<AndMatchExpression>(createAnnotation(expCtx, "$and", BSONObj()));
 
     const DocumentParseLevel nextLevel = (currentLevel == DocumentParseLevel::kPredicateTopLevel)
@@ -391,7 +391,33 @@ StatusWithMatchExpression parse(const BSONObj& obj,
             auto name = e.fieldNameStringData().substr(1);
             auto parseExpressionMatchFunction = retrievePathlessParser(name);
 
-            if (!parseExpressionMatchFunction) {
+            if (parseExpressionMatchFunction) {
+                auto parsedExpression = parseExpressionMatchFunction(
+                    name, e, expCtx, extensionsCallback, allowedFeatures, currentLevel);
+                if (parsedExpression.isOK()) {
+                    // A nullptr for 'parsedExpression' indicates that the particular operator
+                    // should not be added to 'root', because it is handled outside of the
+                    // MatchExpressionParser library. The following operators currently follow this
+                    // convention:
+                    //    - $comment  has no action associated with the operator.
+                    if (auto&& expr = parsedExpression.getValue())
+                        root->add(std::move(expr));
+
+                    expCtx->incrementMatchExprCounter(e.fieldNameStringData());
+                    continue;
+                } else if (parentObj.toString().find("$_internalSchema") == std::string::npos) {
+                    // Only return error if the input is not the parsed form of a $jsonSchema
+                    // MatchExpression. It is legal to have dollar-prefixed field paths that are the
+                    // same as MQL keywords ($or, $and, $nor, etc.). If this is the case, we will
+                    // disregard the corresponding operator's parser and simply treat the
+                    // BSONElement as a regular field path.
+                    // TODO SERVER-89844: Make $jsonSchema with dollar fields in all keyword fields
+                    // reparseable.
+                    return parsedExpression;
+                }
+            } else if (parentObj.toString().find("$_internalSchema") == std::string::npos) {
+                // If the field is dollar-prefixed and not an operator, error if the current
+                // expression doesn't support dollar-prefixed field paths.
                 std::string hint = "";
                 if (name == "not") {
                     hint = ". If you are trying to negate an entire expression, use $nor.";
@@ -404,23 +430,6 @@ StatusWithMatchExpression parse(const BSONObj& obj,
                                str::stream() << "unknown top level operator: "
                                              << e.fieldNameStringData() << hint)};
             }
-
-            auto parsedExpression = parseExpressionMatchFunction(
-                name, e, expCtx, extensionsCallback, allowedFeatures, currentLevel);
-
-            if (!parsedExpression.isOK()) {
-                return parsedExpression;
-            }
-
-            // A nullptr for 'parsedExpression' indicates that the particular operator should not
-            // be added to 'root', because it is handled outside of the MatchExpressionParser
-            // library. The following operators currently follow this convention:
-            //    - $comment  has no action associated with the operator.
-            if (auto&& expr = parsedExpression.getValue())
-                root->add(std::move(expr));
-
-            expCtx->incrementMatchExprCounter(e.fieldNameStringData());
-            continue;
         }
 
         // Ensure the path length does not exceed the maximum allowed depth.
@@ -484,6 +493,7 @@ StatusWithMatchExpression parseWhere(StringData name,
                                      const ExtensionsCallback* extensionsCallback,
                                      MatchExpressionParser::AllowedFeatureSet allowedFeatures,
                                      DocumentParseLevel currentLevel) {
+    expCtx->hasServerSideJs.where = true;
     if ((allowedFeatures & MatchExpressionParser::AllowedFeatures::kJavascript) == 0u) {
         return {Status(ErrorCodes::BadValue, "$where is not allowed in this context")};
     }
@@ -1334,10 +1344,8 @@ StatusWithMatchExpression parseTreeTopLevel(
         return {Status(ErrorCodes::BadValue,
                        str::stream() << T::kName << " argument must be an array")};
     }
-
     auto temp =
         std::make_unique<T>(createAnnotation(expCtx, elem.fieldNameStringData(), BSONObj()));
-
     auto arr = elem.Obj();
     if (arr.isEmpty()) {
         return Status(ErrorCodes::BadValue,
@@ -1349,7 +1357,7 @@ StatusWithMatchExpression parseTreeTopLevel(
             return Status(ErrorCodes::BadValue,
                           str::stream() << T::kName << " argument's entries must be objects");
 
-        auto sub = parse(e.Obj(), expCtx, extensionsCallback, allowedFeatures, currentLevel);
+        auto sub = parse(e.Obj(), expCtx, extensionsCallback, allowedFeatures, currentLevel, arr);
         if (!sub.isOK())
             return sub.getStatus();
 

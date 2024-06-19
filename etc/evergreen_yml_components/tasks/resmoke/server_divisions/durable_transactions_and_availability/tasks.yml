@@ -221,7 +221,7 @@ tasks:
 
 - <<: *gen_task_template
   name: concurrency_replication_bulk_write_with_replica_set_endpoint_gen
-  tags: ["assigned_to_jira_team_server_cluster_scalability", "default", "requires_all_feature_flags", "bulk_write", "sharding", "feature_flag_guarded"]
+  tags: ["assigned_to_jira_team_server_cluster_scalability", "default", "replica_set_endpoint", "requires_all_feature_flags"]
   commands:
   - func: "generate resmoke tasks"
     vars:
@@ -244,13 +244,21 @@ tasks:
     vars:
       use_large_distro: "true"
 
-- <<: *gen_task_template
-  name: magic_restore_sharding_jscore_passthrough_gen
-  tags: ["assigned_to_jira_team_server_repl", "default", "large"]
-  commands:
-  - func: "generate resmoke tasks"
-    vars:
-      use_large_distro: "true"
+# - <<: *gen_task_template
+#   name: magic_restore_sharding_jscore_passthrough_gen
+#   tags: ["assigned_to_jira_team_server_repl", "default", "large"]
+#   commands:
+#   - func: "generate resmoke tasks"
+#     vars:
+#       use_large_distro: "true"
+
+# - <<: *gen_task_template
+#   name: magic_restore_sharded_collections_jscore_passthrough_gen
+#   tags: ["assigned_to_jira_team_server_repl", "default", "large"]
+#   commands:
+#     - func: "generate resmoke tasks"
+#       vars:
+#         use_large_distro: "true"
 
 - <<: *task_template
   name: causally_consistent_jscore_txns_passthrough
@@ -276,7 +284,7 @@ tasks:
 
 - <<: *gen_task_template
   name: concurrency_replication_causal_consistency_with_replica_set_endpoint_gen
-  tags: ["assigned_to_jira_team_server_cluster_scalability", "requires_all_feature_flags", "release_critical", "incompatible_mac", "incompatible_ibm", "concurrency", "sharding", "large", "non_live_record", "feature_flag_guarded"]
+  tags: ["assigned_to_jira_team_server_cluster_scalability", "default", "replica_set_endpoint", "requires_all_feature_flags"]
   commands:
   - func: "generate resmoke tasks"
     vars:
@@ -292,7 +300,7 @@ tasks:
 
 - <<: *gen_task_template
   name: concurrency_replication_with_replica_set_endpoint_gen
-  tags: ["assigned_to_jira_team_server_cluster_scalability", "requires_all_feature_flags", "release_critical", "incompatible_mac", "incompatible_ibm", "concurrency", "common", "sharding", "feature_flag_guarded"]
+  tags: ["assigned_to_jira_team_server_cluster_scalability", "default", "replica_set_endpoint", "requires_all_feature_flags"]
   commands:
   - func: "generate resmoke tasks"
     vars:
@@ -308,7 +316,7 @@ tasks:
 
 - <<: *gen_task_template
   name: concurrency_replication_multi_stmt_txn_with_replica_set_endpoint_gen
-  tags: ["assigned_to_jira_team_server_cluster_scalability", "requires_all_feature_flags", "release_critical", "incompatible_mac", "incompatible_ibm", "concurrency", "common", "sharding", "txn", "no_debug_mode", "feature_flag_guarded"]
+  tags: ["assigned_to_jira_team_server_cluster_scalability", "default", "replica_set_endpoint", "requires_all_feature_flags"]
   commands:
   - func: "generate resmoke tasks"
     vars:
@@ -328,7 +336,6 @@ tasks:
       concurrency_replication_last_lts_old_new_new: last_lts
   - func: "generate resmoke tasks"
     vars:
-      suite: concurrency_replication
       run_no_feature_flag_tests: "true"
 
 - <<: *gen_task_template
@@ -404,7 +411,6 @@ tasks:
       concurrency_sharded_replication_last_lts_new_old_old_new: last_lts
   - func: "generate resmoke tasks"
     vars:
-      suite: concurrency_sharded_replication
       run_no_feature_flag_tests: "true"
 
 - <<: *gen_task_template
@@ -499,7 +505,6 @@ tasks:
       num_tasks: 5
       jstestfuzz_vars: --useEsModules
       npm_command: initsync-fuzzer
-      suite: initial_sync_fuzzer
       resmoke_args: "--mongodSetParameters='{logComponentVerbosity: {command: 2}}'"
       run_no_feature_flag_tests: "true"
 
@@ -652,7 +657,6 @@ tasks:
       <<: *jstestfuzz_config_vars
       jstestfuzz_vars: --jsTestsDir ../jstests
       resmoke_args: "--mongodSetParameters='{logComponentVerbosity: {command: 2}}'"
-      suite: jstestfuzz_replication
       npm_command: jstestfuzz
       run_no_feature_flag_tests: "true"
 
@@ -671,7 +675,7 @@ tasks:
 ## jstestfuzz replica set endpoint ##
 - <<: *jstestfuzz_template
   name: jstestfuzz_replication_with_replica_set_endpoint_gen
-  tags: ["assigned_to_jira_team_server_cluster_scalability", "default", "requires_all_feature_flags", "jstestfuzz", "common", "sharding", "require_npm", "random_name", "feature_flag_guarded"]
+  tags: ["assigned_to_jira_team_server_cluster_scalability", "default", "replica_set_endpoint", "requires_all_feature_flags"]
   commands:
   - func: "generate resmoke tasks"
     vars:
@@ -769,6 +773,12 @@ tasks:
   commands:
   - func: "generate resmoke tasks"
 
+- <<: *gen_task_template
+  name: replica_sets_initsync_lagged_sync_source_jscore_passthrough_gen
+  tags: ["assigned_to_jira_team_server_repl", "default", "replica_sets", "san", "large"]
+  commands:
+    - func: "generate resmoke tasks"
+
 - <<: *task_template
   name: replica_sets_initsync_static_jscore_passthrough
   tags: ["assigned_to_jira_team_server_repl", "default", "replica_sets", "san", "large"]
@@ -788,9 +798,10 @@ tasks:
       replica_sets_jscore_passthrough_last_lts_new_new_old: last_lts
       replica_sets_jscore_passthrough_last_lts_new_old_new: last_lts
       replica_sets_jscore_passthrough_last_lts_old_new_new: last_lts
+      replica_sets_kill_primary_jscore_passthrough_last_lts_new_new_old: last_lts
+      replica_sets_kill_primary_jscore_passthrough_last_lts_new_old_old: last_lts
   - func: "generate resmoke tasks"
     vars:
-      suite: replica_sets_jscore_passthrough
       run_no_feature_flag_tests: "true"
 
 - <<: *gen_task_template
@@ -803,7 +814,7 @@ tasks:
 
 - <<: *gen_task_template
   name: replica_sets_jscore_passthrough_with_replica_set_endpoint_gen
-  tags: ["assigned_to_jira_team_server_cluster_scalability", "default", "requires_all_feature_flags", "sharding", "jscore", "feature_flag_guarded"]
+  tags: ["assigned_to_jira_team_server_cluster_scalability", "default", "replica_set_endpoint", "requires_all_feature_flags"]
   commands:
   - func: "generate resmoke tasks"
 
@@ -823,6 +834,14 @@ tasks:
     vars:
       exec_timeout_secs: 4800 # 80min
       timeout_secs: 4800 # 80min
+
+- <<: *gen_task_template
+  name: replica_sets_lag_oplog_application_jscore_passthrough_gen
+  tags: ["assigned_to_jira_team_server_repl", "release_critical", "replica_sets", "common", "san", "large"]
+  commands:
+    - func: "generate resmoke tasks"
+      vars:
+        use_large_distro: "true"
 
 - <<: *gen_task_template
   name: replica_sets_large_txns_format_jscore_passthrough_gen
@@ -875,7 +894,6 @@ tasks:
       replica_sets_last_continuous: last_continuous
   - func: "generate resmoke tasks"
     vars:
-      suite: replica_sets
       run_no_feature_flag_tests: "true"
 
 - <<: *gen_task_template
@@ -983,7 +1001,6 @@ tasks:
       num_tasks: 5
       jstestfuzz_vars: --useEsModules
       npm_command: rollback-fuzzer
-      suite: rollback_fuzzer
       # Rollback suites create indexes with majority of nodes not available for replication. So, disabling
       # index build commit quorum.
       resmoke_args: "--mongodSetParameters='{logComponentVerbosity: {command: 2}, enableIndexBuildCommitQuorum: false}'"
@@ -999,7 +1016,7 @@ tasks:
 
 - <<: *gen_task_template
   name: secondary_reads_passthrough_with_replica_set_endpoint_gen
-  tags: ["assigned_to_jira_team_server_cluster_scalability", "default", "requires_all_feature_flags", "sharding", "jscore", "feature_flag_guarded"]
+  tags: ["assigned_to_jira_team_server_cluster_scalability", "default", "replica_set_endpoint", "requires_all_feature_flags"]
   commands:
   - func: "generate resmoke tasks"
 
@@ -1024,7 +1041,7 @@ tasks:
   commands:
   - func: "generate resmoke tasks"
     vars:
-      use_large_distro: "true"
+      use_xlarge_distro: "true"
 
 - <<: *gen_task_template
   name: sharded_collections_txns_uninitialized_fcv_jscore_passthrough_gen
@@ -1032,7 +1049,7 @@ tasks:
   commands:
   - func: "generate resmoke tasks"
     vars:
-      use_large_distro: "true"
+      use_xlarge_distro: "true"
 
 - <<: *gen_task_template
   name: sharding_api_version_jscore_passthrough_gen
@@ -1048,7 +1065,7 @@ tasks:
   commands:
   - func: "generate resmoke tasks"
     vars:
-      use_large_distro: "true"
+      use_xlarge_distro: "true"
 
 - <<: *gen_task_template
   name: sharding_txns_uninitialized_fcv_jscore_passthrough_gen
@@ -1056,7 +1073,7 @@ tasks:
   commands:
   - func: "generate resmoke tasks"
     vars:
-      use_large_distro: "true"
+      use_xlarge_distro: "true"
 
 - name: tla_plus
   tags: ["assigned_to_jira_team_server_repl", "experimental"]
@@ -1073,13 +1090,14 @@ tasks:
     vars:
       resmoke_jobs_max: 1
 
-- <<: *gen_task_template
-  name: write_concern_majority_passthrough_gen
-  tags: ["assigned_to_jira_team_server_repl", "release_critical", "incompatible_mac", "incompatible_all_feature_flags", "read_write_concern", "large", "write", "secondary_read_after_majority_write"]
-  commands:
-  - func: "generate resmoke tasks"
-    vars:
-      use_large_distro: "true"
+# Disable this test due to wrong secondary read after majority write assumption.
+# - <<: *gen_task_template
+#   name: write_concern_majority_passthrough_gen
+#   tags: ["assigned_to_jira_team_server_repl", "release_critical", "incompatible_mac", "incompatible_all_feature_flags", "read_write_concern", "large", "write", "secondary_read_after_majority_write"]
+#   commands:
+#   - func: "generate resmoke tasks"
+#     vars:
+#       use_large_distro: "true"
 
 
 ################################################
@@ -1112,7 +1130,7 @@ tasks:
 
 - <<: *gen_task_template
   name: concurrency_replication_metrics_with_replica_set_endpoint_gen
-  tags: ["assigned_to_jira_team_server_cluster_scalability", "default", "requires_all_feature_flags", "concurrency", "sharding", "disabled_on_code_coverage", "feature_flag_guarded"]
+  tags: ["assigned_to_jira_team_server_cluster_scalability", "default", "replica_set_endpoint", "requires_all_feature_flags"]
   commands:
   - func: "generate resmoke tasks"
     vars:
@@ -1128,7 +1146,7 @@ tasks:
 
 - <<: *gen_task_template
   name: concurrency_replication_wiredtiger_cursor_sweeps_with_replica_set_endpoint_gen
-  tags: ["assigned_to_jira_team_server_cluster_scalability", "default", "requires_all_feature_flags", "concurrency", "sharding", "cursor_sweeps", "feature_flag_guarded"]
+  tags: ["assigned_to_jira_team_server_cluster_scalability", "default", "replica_set_endpoint", "requires_all_feature_flags"]
   commands:
   - func: "generate resmoke tasks"
     vars:
@@ -1360,7 +1378,16 @@ tasks:
 
 - <<: *gen_task_template
   name: noPassthrough_gen
-  tags: ["assigned_to_jira_team_server_execution", "release_critical", "incompatible_mac", "misc_js", "no_debug_mode"]
+  tags:
+    [
+      "assigned_to_jira_team_server_execution",
+      "release_critical",
+      "incompatible_mac",
+      "incompatible_ppc",
+      "incompatible_s390x",
+      "misc_js",
+      "no_debug_mode"
+    ]
   commands:
   - func: "generate resmoke tasks"
     vars:

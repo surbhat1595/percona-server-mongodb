@@ -160,6 +160,12 @@ int getWriteCommandRequestBaseSize(const WriteCommandRequestBase& base) {
             encryptionInfo->toBSON().objsize() + kPerElementOverhead;
     }
 
+    if (auto bypassEmptyTsReplacement = base.getBypassEmptyTsReplacement();
+        bypassEmptyTsReplacement.has_value()) {
+        estSize += write_ops::WriteCommandRequestBase::kBypassEmptyTsReplacementFieldName.size() +
+            kBoolSize + kPerElementOverhead;
+    }
+
     if (auto query = base.getOriginalQuery(); query) {
         estSize += write_ops::WriteCommandRequestBase::kOriginalQueryFieldName.size() +
             query->objsize() + kPerElementOverhead;
@@ -204,7 +210,7 @@ void opTimeSerializerWithTermCheck(repl::OpTime opTime, StringData fieldName, BS
     if (opTime.getTerm() == repl::OpTime::kUninitializedTerm) {
         bob->append(fieldName, opTime.getTimestamp());
     } else {
-        opTime.append(bob, fieldName.toString());
+        opTime.append(fieldName, bob);
     }
 }
 

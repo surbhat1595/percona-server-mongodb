@@ -59,13 +59,8 @@ public:
         return std::string(_key, 0, _lengthOfQueryShape);
     }
 
-    bool operator==(const PlanCacheKeyInfo& other) const {
-        return other._lengthOfQueryShape == _lengthOfQueryShape && other._key == _key;
-    }
-
-    bool operator!=(const PlanCacheKeyInfo& other) const {
-        return !(*this == other);
-    }
+    bool operator==(const PlanCacheKeyInfo& other) const = default;
+    bool operator!=(const PlanCacheKeyInfo& other) const = default;
 
     uint32_t queryHash() const {
         return canonical_query_encoder::computeHash(getQueryShapeStringData());

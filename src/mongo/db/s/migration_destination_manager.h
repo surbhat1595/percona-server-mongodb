@@ -143,7 +143,9 @@ public:
         const CollectionShardingRuntime::ScopedSharedCollectionShardingRuntime& scopedCsrLock);
 
     /**
-     * Returns OK if migration started successfully.
+     * Returns OK if migration started successfully. Requires a ScopedReceiveChunk, which guarantees
+     * that there can only be one start() or restoreRecoveredMigrationState() call at any given
+     * time.
      */
     Status start(OperationContext* opCtx,
                  const NamespaceString& nss,
@@ -152,7 +154,9 @@ public:
                  const WriteConcernOptions& writeConcern);
 
     /**
-     * Restores the MigrationDestinationManager state for a migration recovered on step-up.
+     * Restores the MigrationDestinationManager state for a migration recovered on step-up. Requires
+     * a ScopedReceiveChunk, which guarantees that there can only be one start() or
+     * restoreRecoveredMigrationState() call at any given time.
      */
     Status restoreRecoveredMigrationState(OperationContext* opCtx,
                                           ScopedReceiveChunk scopedReceiveChunk,
@@ -189,7 +193,8 @@ public:
 
     /**
      * Gets the collection indexes from fromShardId. If given a chunk manager, will fetch the
-     * indexes using the shard version protocol.
+     * indexes using the shard version protocol. if expandSimpleCollation is true, this will add
+     * simple collation to a secondary index spec if the index spec has no collation.
      */
     struct IndexesAndIdIndex {
         std::vector<BSONObj> indexSpecs;
@@ -199,7 +204,8 @@ public:
                                                   const NamespaceString& nss,
                                                   const ShardId& fromShardId,
                                                   const boost::optional<CollectionRoutingInfo>& cri,
-                                                  boost::optional<Timestamp> afterClusterTime);
+                                                  boost::optional<Timestamp> afterClusterTime,
+                                                  bool expandSimpleCollation = false);
 
 
     bool isParallelFetchingSupported() {

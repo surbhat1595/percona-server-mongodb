@@ -159,7 +159,7 @@ CanonicalDistinct parseDistinctCmd(OperationContext* opCtx,
     // TODO: SERVER-73632 Remove feature flag for PM-635.
     // Query settings will only be looked up on mongos and therefore should be part of command body
     // on mongod if present.
-    expCtx->setQuerySettings(
+    expCtx->setQuerySettingsIfNotPresent(
         query_settings::lookupQuerySettingsForDistinct(expCtx, *parsedDistinct, nss));
     return CanonicalDistinct::parse(std::move(expCtx), std::move(parsedDistinct));
 }
@@ -507,7 +507,7 @@ public:
         if (collection) {
             CollectionQueryInfo::get(collection).notifyOfQuery(opCtx, collection, stats);
         }
-        curOp->debug().setPlanSummaryMetrics(stats);
+        curOp->debug().setPlanSummaryMetrics(std::move(stats));
 
         if (curOp->shouldDBProfile()) {
             auto&& [stats, _] =
@@ -561,9 +561,8 @@ public:
             ? SerializationContext::stateCommandRequest(vts->hasTenantId(), vts->isFromAtlasProxy())
             : SerializationContext::stateCommandRequest();
         auto viewAggRequest = aggregation_request_helper::parseFromBSON(
-            opCtx,
-            nss,
             viewAggCmd,
+            vts,
             verbosity,
             APIParameters::get(opCtx).getAPIStrict().value_or(false),
             serializationContext);

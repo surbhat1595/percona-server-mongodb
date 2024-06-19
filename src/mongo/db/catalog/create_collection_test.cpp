@@ -71,6 +71,7 @@
 #include "mongo/db/service_context_d_test_fixture.h"
 #include "mongo/db/storage/write_unit_of_work.h"
 #include "mongo/db/timeseries/timeseries_gen.h"
+#include "mongo/idl/server_parameter_test_util.h"
 #include "mongo/stdx/utility.h"
 #include "mongo/unittest/assert.h"
 #include "mongo/unittest/framework.h"
@@ -308,9 +309,9 @@ TEST_F(CreateCollectionTest, CreateCollectionForApplyOpsRespectsTimeseriesBucket
     Lock::GlobalLock lk(opCtx.get(), MODE_X);  // Satisfy low-level locking invariants.
 
     // Create a time series collection
-    auto tsOptions = TimeseriesOptions("t");
+    const auto tsOptions = TimeseriesOptions("t");
     CreateCommand cmd = CreateCommand(curNss);
-    cmd.getCreateCollectionRequest().setTimeseries(std::move(tsOptions));
+    cmd.getCreateCollectionRequest().setTimeseries(tsOptions);
     uassertStatusOK(createCollection(opCtx.get(), cmd));
     ASSERT_TRUE(collectionExists(opCtx.get(), bucketsColl));
 
@@ -320,10 +321,12 @@ TEST_F(CreateCollectionTest, CreateCollectionForApplyOpsRespectsTimeseriesBucket
     auto uuid2 = UUID::gen();
     ASSERT_NOT_EQUALS(uuid1, uuid2);
     // This should rename the old collection to a randomly generated collection name.
+    cmd = CreateCommand(bucketsColl);
+    cmd.getCreateCollectionRequest().setTimeseries(tsOptions);
     ASSERT_OK(createCollectionForApplyOps(opCtx.get(),
                                           bucketsColl.dbName(),
                                           uuid2,
-                                          BSON("create" << bucketsColl.coll()),
+                                          cmd.toBSON({}),
                                           /*allowRenameOutOfTheWay*/ true));
     ASSERT_TRUE(collectionExists(opCtx.get(), bucketsColl));
     ASSERT_EQUALS(uuid2, getCollectionUuid(opCtx.get(), bucketsColl));
@@ -346,10 +349,12 @@ TEST_F(CreateCollectionTest, CreateCollectionForApplyOpsRespectsTimeseriesBucket
     ASSERT_FALSE(collectionExists(opCtx.get(), bucketsColl));
 
     // Now call createCollectionForApplyOps with uuid1.
+    cmd = CreateCommand(bucketsColl);
+    cmd.getCreateCollectionRequest().setTimeseries(tsOptions);
     ASSERT_OK(createCollectionForApplyOps(opCtx.get(),
                                           bucketsColl.dbName(),
                                           uuid1,
-                                          BSON("create" << bucketsColl.coll()),
+                                          cmd.toBSON({}),
                                           /*allowRenameOutOfTheWay*/ false));
     // This should rename the old collection back to its original name.
     ASSERT_FALSE(collectionExists(opCtx.get(), *renamedCollectionNss));
@@ -390,7 +395,44 @@ TEST_F(CreateCollectionTest,
     ASSERT_FALSE(collectionExists(opCtx.get(), newNss));
 }
 
+// TODO SERVER-91195 consider removing TimeseriesBucketingParametersChangedFlagAlwaysTrue
+TEST_F(CreateCollectionTest, TimeseriesBucketingParametersChangedFlagAlwaysTrue) {
+    RAIIServerParameterControllerForTest featureFlagController(
+        "featureFlagTSBucketingParametersUnchanged", false);
+    NamespaceString curNss = NamespaceString::createNamespaceString_forTest("test.curColl");
+    auto bucketsColl =
+        NamespaceString::createNamespaceString_forTest("test.system.buckets.curColl");
+
+    auto opCtx = makeOpCtx();
+    auto tsOptions = TimeseriesOptions("t");
+    CreateCommand cmd = CreateCommand(curNss);
+    cmd.getCreateCollectionRequest().setTimeseries(std::move(tsOptions));
+    uassertStatusOK(createCollection(opCtx.get(), cmd));
+
+    ASSERT_TRUE(collectionExists(opCtx.get(), bucketsColl));
+    AutoGetCollectionForRead collForRead(opCtx.get(), bucketsColl);
+    ASSERT_TRUE(collForRead->timeseriesBucketingParametersHaveChanged());
+    ASSERT_TRUE(*collForRead->timeseriesBucketingParametersHaveChanged());
+}
+
+TEST_F(CreateCollectionTest,
+       TimeseriesBucketingParametersChangedFlagNotSetIfCollectionNotTimeseries) {
+    RAIIServerParameterControllerForTest featureFlagController(
+        "featureFlagTSBucketingParametersUnchanged", false);
+    NamespaceString curNss = NamespaceString::createNamespaceString_forTest("test.curColl");
+
+    auto opCtx = makeOpCtx();
+    uassertStatusOK(createCollection(opCtx.get(), CreateCommand(curNss)));
+
+    ASSERT_TRUE(collectionExists(opCtx.get(), curNss));
+    AutoGetCollectionForRead collForRead(opCtx.get(), curNss);
+    ASSERT_FALSE(collForRead->timeseriesBucketingParametersHaveChanged());
+}
+
 TEST_F(CreateCollectionTest, TimeseriesBucketingParametersChangedFlagTrue) {
+    RAIIServerParameterControllerForTest featureFlagController(
+        "featureFlagTSBucketingParametersUnchanged", true);
+
     NamespaceString curNss = NamespaceString::createNamespaceString_forTest("test.curColl");
     auto bucketsColl =
         NamespaceString::createNamespaceString_forTest("test.system.buckets.curColl");
@@ -408,6 +450,9 @@ TEST_F(CreateCollectionTest, TimeseriesBucketingParametersChangedFlagTrue) {
 }
 
 TEST_F(CreateCollectionTest, TimeseriesBucketingParametersChangedFlagFalse) {
+    RAIIServerParameterControllerForTest featureFlagController(
+        "featureFlagTSBucketingParametersUnchanged", true);
+
     NamespaceString curNss = NamespaceString::createNamespaceString_forTest("test.curColl");
 
     auto opCtx = makeOpCtx();
@@ -417,6 +462,7 @@ TEST_F(CreateCollectionTest, TimeseriesBucketingParametersChangedFlagFalse) {
     AutoGetCollectionForRead collForRead(opCtx.get(), curNss);
     ASSERT_FALSE(collForRead->timeseriesBucketingParametersHaveChanged());
 }
+
 
 TEST_F(CreateCollectionTest, ValidationOptions) {
     // Try a valid validator before trying invalid validators.

@@ -68,6 +68,7 @@
 #include "mongo/db/query/plan_cache_indexability.h"
 #include "mongo/db/query/plan_cache_key_factory.h"
 #include "mongo/db/query/plan_cache_key_info.h"
+#include "mongo/db/query/plan_cache_test_util.h"
 #include "mongo/db/query/query_knobs_gen.h"
 #include "mongo/db/query/query_planner.h"
 #include "mongo/db/query/query_planner_params.h"
@@ -174,26 +175,6 @@ std::pair<IndexEntry, std::unique_ptr<WildcardProjection>> makeWildcardEntry(BSO
 //
 // Tests for CachedSolution.
 //
-
-/**
- * Utility function to create a PlanRankingDecision.
- */
-std::unique_ptr<plan_ranker::PlanRankingDecision> createDecision(size_t numPlans,
-                                                                 size_t works = 0) {
-    auto why = std::make_unique<plan_ranker::PlanRankingDecision>();
-    std::vector<std::unique_ptr<PlanStageStats>> stats;
-    for (size_t i = 0; i < numPlans; ++i) {
-        CommonStats common("COLLSCAN");
-        auto stat = std::make_unique<PlanStageStats>(common, STAGE_COLLSCAN);
-        stat->specific.reset(new CollectionScanStats());
-        stat->common.works = works;
-        stats.push_back(std::move(stat));
-        why->scores.push_back(0U);
-        why->candidateOrder.push_back(i);
-    }
-    why->getStats<PlanStageStats>().candidatePlanStats = std::move(stats);
-    return why;
-}
 
 std::unique_ptr<QuerySolution> getQuerySolutionForCaching() {
     std::unique_ptr<QuerySolution> qs = std::make_unique<QuerySolution>();
@@ -349,23 +330,16 @@ TEST_F(PlanCacheTest, ShouldNotCacheQueryTriviallyFalse) {
     assertShouldNotCacheQuery(*cq);
 }
 
-PlanCacheCallbacksImpl<PlanCacheKey, SolutionCacheData, plan_cache_debug_info::DebugInfo>
-createCallback(const CanonicalQuery& cq, const plan_ranker::PlanRankingDecision& decision) {
-    auto buildDebugInfoFn = [&]() -> plan_cache_debug_info::DebugInfo {
-        return plan_cache_util::buildDebugInfo(cq, decision.clone());
-    };
-    return {cq, std::move(buildDebugInfoFn)};
-}
-
 void addCacheEntryForShape(const CanonicalQuery& cq, PlanCache* planCache) {
     invariant(planCache);
     auto qs = getQuerySolutionForCaching();
 
-    auto decision = createDecision(1U);
+    const size_t nWorks = 123;
+    auto decision = createDecision(1U, nWorks);
     auto callbacks = createCallback(cq, *decision);
     ASSERT_OK(planCache->set(makeKey(cq),
                              qs->cacheData->clone(),
-                             *decision,
+                             NumWorks{nWorks},  // Doesn't matter.
                              Date_t{},
                              &callbacks,
                              PlanSecurityLevel::kNotSensitive));
@@ -386,7 +360,7 @@ TEST_F(PlanCacheTest, InactiveEntriesDisabled) {
     ASSERT_EQ(planCache.get(key).state, PlanCache::CacheEntryState::kNotPresent);
     ASSERT_OK(planCache.set(makeKey(*cq),
                             qs->cacheData->clone(),
-                            *decision,
+                            NumWorks{123},
                             Date_t{},
                             &callbacks,
                             PlanSecurityLevel::kNotSensitive));
@@ -452,7 +426,7 @@ TEST_F(PlanCacheTest, PlanCacheRemoveDeletesInactiveEntries) {
     ASSERT_EQ(planCache.get(key).state, PlanCache::CacheEntryState::kNotPresent);
     ASSERT_OK(planCache.set(makeKey(*cq),
                             qs->cacheData->clone(),
-                            *decision,
+                            NumWorks{123},  // Doesn't matter.
                             Date_t{},
                             &callbacks,
                             PlanSecurityLevel::kNotSensitive));
@@ -477,7 +451,7 @@ TEST_F(PlanCacheTest, PlanCacheFlushDeletesInactiveEntries) {
     ASSERT_EQ(planCache.get(key).state, PlanCache::CacheEntryState::kNotPresent);
     ASSERT_OK(planCache.set(makeKey(*cq),
                             qs->cacheData->clone(),
-                            *decision,
+                            NumWorks{123},  // Doesn't matter.
                             Date_t{},
                             &callbacks,
                             PlanSecurityLevel::kNotSensitive));
@@ -497,13 +471,13 @@ TEST_F(PlanCacheTest, AddActiveCacheEntry) {
     auto qs = getQuerySolutionForCaching();
     auto key = makeKey(*cq);
 
-    auto decision = createDecision(1U, 20);
+    auto decision = createDecision(1U);
     auto callbacks = createCallback(*cq, *decision);
     // Check if key is in cache before and after set().
     ASSERT_EQ(planCache.get(key).state, PlanCache::CacheEntryState::kNotPresent);
     ASSERT_OK(planCache.set(makeKey(*cq),
                             qs->cacheData->clone(),
-                            *decision,
+                            NumWorks{123},
                             Date_t{},
                             &callbacks,
                             PlanSecurityLevel::kNotSensitive));
@@ -517,7 +491,7 @@ TEST_F(PlanCacheTest, AddActiveCacheEntry) {
     // entry.
     ASSERT_OK(planCache.set(makeKey(*cq),
                             qs->cacheData->clone(),
-                            *decision,
+                            NumWorks{15},
                             Date_t{},
                             &callbacks1,
                             PlanSecurityLevel::kNotSensitive));
@@ -535,83 +509,96 @@ TEST_F(PlanCacheTest, WorksValueIncreases) {
     std::unique_ptr<CanonicalQuery> cq(canonicalize("{a: 1}"));
     auto qs = getQuerySolutionForCaching();
     auto key = makeKey(*cq);
-    auto decision = createDecision(1U, 10);
-    auto callbacks = createCallback(*cq, *decision);
 
-    ASSERT_EQ(planCache.get(key).state, PlanCache::CacheEntryState::kNotPresent);
-    ASSERT_OK(planCache.set(key,
-                            qs->cacheData->clone(),
-                            *decision,
-                            Date_t{},
-                            &callbacks,
-                            PlanSecurityLevel::kNotSensitive));
+    {
+        const size_t nWorks = 10;
+        auto decision = createDecision(1U, nWorks);
+        auto callbacks = createCallback(*cq, *decision);
 
-    // After add, the planCache should have an inactive entry.
-    ASSERT_EQ(planCache.get(key).state, PlanCache::CacheEntryState::kPresentInactive);
-    auto entry = assertGet(planCache.getEntry(key));
-    ASSERT_TRUE(entry->works);
-    ASSERT_EQ(entry->works.value(), 10U);
-    ASSERT_FALSE(entry->isActive);
+        ASSERT_EQ(planCache.get(key).state, PlanCache::CacheEntryState::kNotPresent);
+        ASSERT_OK(planCache.set(key,
+                                qs->cacheData->clone(),
+                                NumWorks{nWorks},
+                                Date_t{},
+                                &callbacks,
+                                PlanSecurityLevel::kNotSensitive));
 
-    decision = createDecision(1U, 50);
-    auto callbacks1 = createCallback(*cq, *decision);
-    // Calling set() again, with a solution that had a higher works value. This should cause the
-    // works on the original entry to be increased.
-    ASSERT_OK(planCache.set(makeKey(*cq),
-                            qs->cacheData->clone(),
-                            *decision,
-                            Date_t{},
-                            &callbacks1,
-                            PlanSecurityLevel::kNotSensitive));
+        // After add, the planCache should have an inactive entry.
+        ASSERT_EQ(planCache.get(key).state, PlanCache::CacheEntryState::kPresentInactive);
+        auto entry = assertGet(planCache.getEntry(key));
+        ASSERT_TRUE(entry->readsOrWorks);
+        ASSERT_EQ(entry->readsOrWorks->rawValue(), nWorks);
+        ASSERT_FALSE(entry->isActive);
+    }
 
-    // The entry should still be inactive. Its works should double though.
-    ASSERT_EQ(planCache.get(key).state, PlanCache::CacheEntryState::kPresentInactive);
-    entry = assertGet(planCache.getEntry(key));
-    ASSERT_FALSE(entry->isActive);
-    ASSERT_TRUE(entry->works);
-    ASSERT_EQ(entry->works.value(), 20U);
+    {
+        const auto newNWorks = 50;
+        auto decision = createDecision(1U, newNWorks);
+        auto callbacks1 = createCallback(*cq, *decision);
+        // Calling set() again, with a solution that had a higher works value. This should cause the
+        // works on the original entry to be increased.
+        ASSERT_OK(planCache.set(makeKey(*cq),
+                                qs->cacheData->clone(),
+                                NumWorks{newNWorks},
+                                Date_t{},
+                                &callbacks1,
+                                PlanSecurityLevel::kNotSensitive));
 
-    decision = createDecision(1U, 30);
-    auto callbacks2 = createCallback(*cq, *decision);
-    // Calling set() again, with a solution that had a higher works value. This should cause the
-    // works on the original entry to be increased.
-    ASSERT_OK(planCache.set(makeKey(*cq),
-                            qs->cacheData->clone(),
-                            *decision,
-                            Date_t{},
-                            &callbacks2,
-                            PlanSecurityLevel::kNotSensitive));
+        // The entry should still be inactive. Its works should double though.
+        ASSERT_EQ(planCache.get(key).state, PlanCache::CacheEntryState::kPresentInactive);
+        auto entry = assertGet(planCache.getEntry(key));
+        ASSERT_FALSE(entry->isActive);
+        ASSERT_TRUE(entry->readsOrWorks);
+        ASSERT_EQ(entry->readsOrWorks->rawValue(), 20U);
+    }
 
-    // The entry should still be inactive. Its works should have doubled again.
-    ASSERT_EQ(planCache.get(key).state, PlanCache::CacheEntryState::kPresentInactive);
-    entry = assertGet(planCache.getEntry(key));
-    ASSERT_FALSE(entry->isActive);
-    ASSERT_TRUE(entry->works);
-    ASSERT_EQ(entry->works.value(), 40U);
+    {
+        const auto newNWorks = 30;
+        auto decision = createDecision(1U, newNWorks);
+        auto callbacks2 = createCallback(*cq, *decision);
+        // Calling set() again, with a solution that had a higher works value. This should cause the
+        // works on the original entry to be increased.
+        ASSERT_OK(planCache.set(makeKey(*cq),
+                                qs->cacheData->clone(),
+                                NumWorks{newNWorks},
+                                Date_t{},
+                                &callbacks2,
+                                PlanSecurityLevel::kNotSensitive));
 
-    decision = createDecision(1U, 25);
-    auto callbacks3 = createCallback(*cq, *decision);
-    // Calling set() again, with a solution that has a lower works value than what's currently in
-    // the cache.
-    ASSERT_OK(planCache.set(key,
-                            qs->cacheData->clone(),
-                            *decision,
-                            Date_t{},
-                            &callbacks3,
-                            PlanSecurityLevel::kNotSensitive));
+        // The entry should still be inactive. Its works should have doubled again.
+        ASSERT_EQ(planCache.get(key).state, PlanCache::CacheEntryState::kPresentInactive);
+        auto entry = assertGet(planCache.getEntry(key));
+        ASSERT_FALSE(entry->isActive);
+        ASSERT_TRUE(entry->readsOrWorks);
+        ASSERT_EQ(entry->readsOrWorks->rawValue(), 40U);
+    }
 
-    // The solution just run should now be in an active cache entry, with a works
-    // equal to the number of works the solution took.
-    ASSERT_EQ(planCache.get(key).state, PlanCache::CacheEntryState::kPresentActive);
-    entry = assertGet(planCache.getEntry(key));
-    ASSERT_TRUE(entry->isActive);
+    {
+        const size_t newNWorks = 25;
+        auto decision = createDecision(1U, newNWorks);
+        auto callbacks3 = createCallback(*cq, *decision);
+        // Calling set() again, with a solution that has a lower works value than what's currently
+        // in the cache.
+        ASSERT_OK(planCache.set(key,
+                                qs->cacheData->clone(),
+                                NumWorks{newNWorks},
+                                Date_t{},
+                                &callbacks3,
+                                PlanSecurityLevel::kNotSensitive));
 
-    ASSERT(entry->debugInfo);
-    ASSERT(entry->debugInfo->decision);
-    auto&& decision1 = entry->debugInfo->decision;
-    ASSERT_EQ(decision1->getStats<PlanStageStats>().candidatePlanStats[0]->common.works, 25U);
-    ASSERT_TRUE(entry->works);
-    ASSERT_EQ(entry->works.value(), 25U);
+        // The solution just run should now be in an active cache entry, with a works
+        // equal to the number of works the solution took.
+        ASSERT_EQ(planCache.get(key).state, PlanCache::CacheEntryState::kPresentActive);
+        auto entry = assertGet(planCache.getEntry(key));
+        ASSERT_TRUE(entry->isActive);
+
+        ASSERT(entry->debugInfo);
+        ASSERT(entry->debugInfo->decision);
+        auto&& decision1 = entry->debugInfo->decision;
+        ASSERT_EQ(decision1->getStats<PlanStageStats>().candidatePlanStats[0]->common.works, 25U);
+        ASSERT_TRUE(entry->readsOrWorks);
+        ASSERT_EQ(entry->readsOrWorks->rawValue(), newNWorks);
+    }
 
     ASSERT_EQUALS(planCache.size(), 1U);
 
@@ -629,44 +616,53 @@ TEST_F(PlanCacheTest, WorksValueIncreasesByAtLeastOne) {
     std::unique_ptr<CanonicalQuery> cq(canonicalize("{a: 1}"));
     auto qs = getQuerySolutionForCaching();
     auto key = makeKey(*cq);
-    auto decision = createDecision(1U, 3);
-    auto callbacks = createCallback(*cq, *decision);
 
-    ASSERT_EQ(planCache.get(key).state, PlanCache::CacheEntryState::kNotPresent);
-    ASSERT_OK(planCache.set(makeKey(*cq),
-                            qs->cacheData->clone(),
-                            *decision,
-                            Date_t{},
-                            &callbacks,
-                            PlanSecurityLevel::kNotSensitive));
+    {
+        const size_t nWorks = 3;
+        auto decision = createDecision(1U, nWorks);
+        auto callbacks = createCallback(*cq, *decision);
 
-    // After add, the planCache should have an inactive entry.
-    ASSERT_EQ(planCache.get(key).state, PlanCache::CacheEntryState::kPresentInactive);
-    auto entry = assertGet(planCache.getEntry(key));
-    ASSERT_TRUE(entry->works);
-    ASSERT_EQ(entry->works.value(), 3U);
-    ASSERT_FALSE(entry->isActive);
+        ASSERT_EQ(planCache.get(key).state, PlanCache::CacheEntryState::kNotPresent);
+        ASSERT_OK(planCache.set(makeKey(*cq),
+                                qs->cacheData->clone(),
+                                NumWorks{nWorks},
+                                Date_t{},
+                                &callbacks,
+                                PlanSecurityLevel::kNotSensitive));
 
-    decision = createDecision(1U, 50);
-    auto callbacks1 = createCallback(*cq, *decision);
-    // Calling set() again, with a solution that had a higher works value. This should cause the
-    // works on the original entry to be increased. In this case, since nWorks is 3,
-    // multiplying by the value 1.10 will give a value of 3 (static_cast<size_t>(1.1 * 3) == 3).
-    // We check that the works value is increased 1 instead.
-    ASSERT_OK(planCache.set(makeKey(*cq),
-                            qs->cacheData->clone(),
-                            *decision,
-                            Date_t{},
-                            &callbacks1,
-                            PlanSecurityLevel::kNotSensitive,
-                            kWorksCoeff));
+        // After add, the planCache should have an inactive entry.
+        ASSERT_EQ(planCache.get(key).state, PlanCache::CacheEntryState::kPresentInactive);
+        auto entry = assertGet(planCache.getEntry(key));
+        ASSERT_TRUE(entry->readsOrWorks);
+        ASSERT_EQ(entry->readsOrWorks->rawValue(), nWorks);
+        ASSERT_FALSE(entry->isActive);
+    }
 
-    // The entry should still be inactive. Its works should increase by 1.
-    ASSERT_EQ(planCache.get(key).state, PlanCache::CacheEntryState::kPresentInactive);
-    entry = assertGet(planCache.getEntry(key));
-    ASSERT_FALSE(entry->isActive);
-    ASSERT_TRUE(entry->works);
-    ASSERT_EQ(entry->works.value(), 4U);
+    {
+        const size_t higherWorks = 50;
+        auto decision = createDecision(1U, higherWorks);
+        auto callbacks1 = createCallback(*cq, *decision);
+        // Calling set() again, with a solution that had a higher works value. This should cause the
+        // works on the original entry to be increased. In this case, since nWorks is 3,
+        // multiplying by the value 1.10 will give a value of 3 (static_cast<size_t>(1.1 * 3) == 3).
+        // We check that the works value is increased 1 instead.
+        ASSERT_OK(planCache.set(makeKey(*cq),
+                                qs->cacheData->clone(),
+                                NumWorks{higherWorks},
+                                Date_t{},
+                                &callbacks1,
+                                PlanSecurityLevel::kNotSensitive,
+                                kWorksCoeff));
+    }
+
+    {
+        // The entry should still be inactive. Its works should increase by 1.
+        ASSERT_EQ(planCache.get(key).state, PlanCache::CacheEntryState::kPresentInactive);
+        auto entry = assertGet(planCache.getEntry(key));
+        ASSERT_FALSE(entry->isActive);
+        ASSERT_TRUE(entry->readsOrWorks);
+        ASSERT_EQ(entry->readsOrWorks->rawValue(), 4);
+    }
 
     // Clear the plan cache. The inactive entry should now be removed.
     planCache.clear();
@@ -679,55 +675,65 @@ TEST_F(PlanCacheTest, SetIsNoopWhenNewEntryIsWorse) {
     std::unique_ptr<CanonicalQuery> cq(canonicalize("{a: 1}"));
     auto qs = getQuerySolutionForCaching();
     auto key = makeKey(*cq);
-    auto decision = createDecision(1U, 50);
-    auto callbacks = createCallback(*cq, *decision);
 
-    ASSERT_EQ(planCache.get(key).state, PlanCache::CacheEntryState::kNotPresent);
-    ASSERT_OK(planCache.set(makeKey(*cq),
-                            qs->cacheData->clone(),
-                            *decision,
-                            Date_t{},
-                            &callbacks,
-                            PlanSecurityLevel::kNotSensitive));
+    {
+        const size_t nWorks = 50;
+        auto decision = createDecision(1U, nWorks);
+        auto callbacks = createCallback(*cq, *decision);
 
-    // After add, the planCache should have an inactive entry.
-    ASSERT_EQ(planCache.get(key).state, PlanCache::CacheEntryState::kPresentInactive);
-    auto entry = assertGet(planCache.getEntry(key));
-    ASSERT_TRUE(entry->works);
-    ASSERT_EQ(entry->works.value(), 50U);
-    ASSERT_FALSE(entry->isActive);
+        ASSERT_EQ(planCache.get(key).state, PlanCache::CacheEntryState::kNotPresent);
+        ASSERT_OK(planCache.set(makeKey(*cq),
+                                qs->cacheData->clone(),
+                                NumWorks{nWorks},
+                                Date_t{},
+                                &callbacks,
+                                PlanSecurityLevel::kNotSensitive));
 
-    decision = createDecision(1U, 20);
-    auto callbacks1 = createCallback(*cq, *decision);
-    // Call set() again, with a solution that has a lower works value. This will result in an
-    // active entry being created.
-    ASSERT_OK(planCache.set(makeKey(*cq),
-                            qs->cacheData->clone(),
-                            *decision,
-                            Date_t{},
-                            &callbacks1,
-                            PlanSecurityLevel::kNotSensitive));
-    ASSERT_EQ(planCache.get(key).state, PlanCache::CacheEntryState::kPresentActive);
-    entry = assertGet(planCache.getEntry(key));
-    ASSERT_TRUE(entry->isActive);
-    ASSERT_TRUE(entry->works);
-    ASSERT_EQ(entry->works.value(), 20U);
+        // After add, the planCache should have an inactive entry.
+        ASSERT_EQ(planCache.get(key).state, PlanCache::CacheEntryState::kPresentInactive);
+        auto entry = assertGet(planCache.getEntry(key));
+        ASSERT_TRUE(entry->readsOrWorks);
+        ASSERT_EQ(entry->readsOrWorks->rawValue(), nWorks);
+        ASSERT_FALSE(entry->isActive);
+    }
 
-    decision = createDecision(1U, 100);
-    auto callbacks2 = createCallback(*cq, *decision);
-    // Now call set() again, but with a solution that has a higher works value. This should be
-    // a noop.
-    ASSERT_OK(planCache.set(makeKey(*cq),
-                            qs->cacheData->clone(),
-                            *decision,
-                            Date_t{},
-                            &callbacks2,
-                            PlanSecurityLevel::kNotSensitive));
-    ASSERT_EQ(planCache.get(key).state, PlanCache::CacheEntryState::kPresentActive);
-    entry = assertGet(planCache.getEntry(key));
-    ASSERT_TRUE(entry->isActive);
-    ASSERT_TRUE(entry->works);
-    ASSERT_EQ(entry->works.value(), 20U);
+    {
+        const size_t nWorks = 20;
+        auto decision = createDecision(1U, nWorks);
+        auto callbacks1 = createCallback(*cq, *decision);
+        // Call set() again, with a solution that has a lower works value. This will result in an
+        // active entry being created.
+        ASSERT_OK(planCache.set(makeKey(*cq),
+                                qs->cacheData->clone(),
+                                NumWorks{nWorks},
+                                Date_t{},
+                                &callbacks1,
+                                PlanSecurityLevel::kNotSensitive));
+        ASSERT_EQ(planCache.get(key).state, PlanCache::CacheEntryState::kPresentActive);
+        auto entry = assertGet(planCache.getEntry(key));
+        ASSERT_TRUE(entry->isActive);
+        ASSERT_TRUE(entry->readsOrWorks);
+        ASSERT_EQ(entry->readsOrWorks->rawValue(), nWorks);
+    }
+
+    {
+        const size_t higherWorks = 100;
+        auto decision = createDecision(1U, higherWorks);
+        auto callbacks2 = createCallback(*cq, *decision);
+        // Now call set() again, but with a solution that has a higher works value. This should be
+        // a noop.
+        ASSERT_OK(planCache.set(makeKey(*cq),
+                                qs->cacheData->clone(),
+                                NumWorks{higherWorks},
+                                Date_t{},
+                                &callbacks2,
+                                PlanSecurityLevel::kNotSensitive));
+        ASSERT_EQ(planCache.get(key).state, PlanCache::CacheEntryState::kPresentActive);
+        auto entry = assertGet(planCache.getEntry(key));
+        ASSERT_TRUE(entry->isActive);
+        ASSERT_TRUE(entry->readsOrWorks);
+        ASSERT_EQ(entry->readsOrWorks->rawValue(), 20U);
+    }
 }
 
 TEST_F(PlanCacheTest, SetOverwritesWhenNewEntryIsBetter) {
@@ -736,53 +742,64 @@ TEST_F(PlanCacheTest, SetOverwritesWhenNewEntryIsBetter) {
     auto qs = getQuerySolutionForCaching();
     auto key = makeKey(*cq);
 
-    auto decision = createDecision(1U, 50);
-    auto callbacks = createCallback(*cq, *decision);
-    ASSERT_EQ(planCache.get(key).state, PlanCache::CacheEntryState::kNotPresent);
-    ASSERT_OK(planCache.set(makeKey(*cq),
-                            qs->cacheData->clone(),
-                            *decision,
-                            Date_t{},
-                            &callbacks,
-                            PlanSecurityLevel::kNotSensitive));
+    {
+        const size_t nWorks = 50;
+        auto decision = createDecision(1U, nWorks);
+        auto callbacks = createCallback(*cq, *decision);
+        ASSERT_EQ(planCache.get(key).state, PlanCache::CacheEntryState::kNotPresent);
+        ASSERT_OK(planCache.set(makeKey(*cq),
+                                qs->cacheData->clone(),
+                                NumWorks{nWorks},
+                                Date_t{},
+                                &callbacks,
+                                PlanSecurityLevel::kNotSensitive));
+    }
 
-    // After add, the planCache should have an inactive entry.
-    auto entry = assertGet(planCache.getEntry(key));
-    ASSERT_TRUE(entry->works);
-    ASSERT_EQ(entry->works.value(), 50U);
-    ASSERT_FALSE(entry->isActive);
+    {
+        // After add, the planCache should have an inactive entry.
+        auto entry = assertGet(planCache.getEntry(key));
+        ASSERT_TRUE(entry->readsOrWorks);
+        ASSERT_EQ(entry->readsOrWorks->rawValue(), 50U);
+        ASSERT_FALSE(entry->isActive);
+    }
 
-    decision = createDecision(1U, 20);
-    auto callbacks1 = createCallback(*cq, *decision);
-    // Call set() again, with a solution that has a lower works value. This will result in an
-    // active entry being created.
-    ASSERT_OK(planCache.set(makeKey(*cq),
-                            qs->cacheData->clone(),
-                            *decision,
-                            Date_t{},
-                            &callbacks1,
-                            PlanSecurityLevel::kNotSensitive));
-    ASSERT_EQ(planCache.get(key).state, PlanCache::CacheEntryState::kPresentActive);
-    entry = assertGet(planCache.getEntry(key));
-    ASSERT_TRUE(entry->isActive);
-    ASSERT_TRUE(entry->works);
-    ASSERT_EQ(entry->works.value(), 20U);
+    {
+        const size_t nWorks = 20;
+        auto decision = createDecision(1U, nWorks);
+        auto callbacks1 = createCallback(*cq, *decision);
+        // Call set() again, with a solution that has a lower works value. This will result in an
+        // active entry being created.
+        ASSERT_OK(planCache.set(makeKey(*cq),
+                                qs->cacheData->clone(),
+                                NumWorks{nWorks},
+                                Date_t{},
+                                &callbacks1,
+                                PlanSecurityLevel::kNotSensitive));
+        ASSERT_EQ(planCache.get(key).state, PlanCache::CacheEntryState::kPresentActive);
+        auto entry = assertGet(planCache.getEntry(key));
+        ASSERT_TRUE(entry->isActive);
+        ASSERT_TRUE(entry->readsOrWorks);
+        ASSERT_EQ(entry->readsOrWorks->rawValue(), nWorks);
+    }
 
-    decision = createDecision(1U, 10);
-    auto callbacks2 = createCallback(*cq, *decision);
-    // Now call set() again, with a solution that has a lower works value. The current active entry
-    // should be overwritten.
-    ASSERT_OK(planCache.set(makeKey(*cq),
-                            qs->cacheData->clone(),
-                            *decision,
-                            Date_t{},
-                            &callbacks2,
-                            PlanSecurityLevel::kNotSensitive));
-    ASSERT_EQ(planCache.get(key).state, PlanCache::CacheEntryState::kPresentActive);
-    entry = assertGet(planCache.getEntry(key));
-    ASSERT_TRUE(entry->isActive);
-    ASSERT_TRUE(entry->works);
-    ASSERT_EQ(entry->works.value(), 10U);
+    {
+        const size_t nWorks = 10;
+        auto decision = createDecision(1U, nWorks);
+        auto callbacks2 = createCallback(*cq, *decision);
+        // Now call set() again, with a solution that has a lower works value. The current active
+        // entry should be overwritten.
+        ASSERT_OK(planCache.set(makeKey(*cq),
+                                qs->cacheData->clone(),
+                                NumWorks{nWorks},
+                                Date_t{},
+                                &callbacks2,
+                                PlanSecurityLevel::kNotSensitive));
+        ASSERT_EQ(planCache.get(key).state, PlanCache::CacheEntryState::kPresentActive);
+        auto entry = assertGet(planCache.getEntry(key));
+        ASSERT_TRUE(entry->isActive);
+        ASSERT_TRUE(entry->readsOrWorks);
+        ASSERT_EQ(entry->readsOrWorks->rawValue(), nWorks);
+    }
 }
 
 TEST_F(PlanCacheTest, DeactivateCacheEntry) {
@@ -790,47 +807,54 @@ TEST_F(PlanCacheTest, DeactivateCacheEntry) {
     std::unique_ptr<CanonicalQuery> cq(canonicalize("{a: 1}"));
     auto qs = getQuerySolutionForCaching();
     auto key = makeKey(*cq);
-    auto decision = createDecision(1U, 50);
-    auto callbacks = createCallback(*cq, *decision);
 
-    ASSERT_EQ(planCache.get(key).state, PlanCache::CacheEntryState::kNotPresent);
-    ASSERT_OK(planCache.set(makeKey(*cq),
-                            qs->cacheData->clone(),
-                            *decision,
-                            Date_t{},
-                            &callbacks,
-                            PlanSecurityLevel::kNotSensitive));
+    {
+        const size_t nWorks = 50;
+        auto decision = createDecision(1U, nWorks);
+        auto callbacks = createCallback(*cq, *decision);
 
-    // After add, the planCache should have an inactive entry.
-    auto entry = assertGet(planCache.getEntry(key));
-    ASSERT_TRUE(entry->works);
-    ASSERT_EQ(entry->works.value(), 50U);
-    ASSERT_FALSE(entry->isActive);
+        ASSERT_EQ(planCache.get(key).state, PlanCache::CacheEntryState::kNotPresent);
+        ASSERT_OK(planCache.set(makeKey(*cq),
+                                qs->cacheData->clone(),
+                                NumWorks{nWorks},
+                                Date_t{},
+                                &callbacks,
+                                PlanSecurityLevel::kNotSensitive));
 
-    decision = createDecision(1U, 20);
-    auto callbacks1 = createCallback(*cq, *decision);
-    // Call set() again, with a solution that has a lower works value. This will result in an
-    // active entry being created.
-    ASSERT_OK(planCache.set(makeKey(*cq),
-                            qs->cacheData->clone(),
-                            *decision,
-                            Date_t{},
-                            &callbacks1,
-                            PlanSecurityLevel::kNotSensitive));
-    ASSERT_EQ(planCache.get(key).state, PlanCache::CacheEntryState::kPresentActive);
-    entry = assertGet(planCache.getEntry(key));
-    ASSERT_TRUE(entry->isActive);
-    ASSERT_TRUE(entry->works);
-    ASSERT_EQ(entry->works.value(), 20U);
+        // After add, the planCache should have an inactive entry.
+        auto entry = assertGet(planCache.getEntry(key));
+        ASSERT_TRUE(entry->readsOrWorks);
+        ASSERT_EQ(entry->readsOrWorks->rawValue(), nWorks);
+        ASSERT_FALSE(entry->isActive);
+    }
+
+    {
+        const size_t nWorks = 20;
+        auto decision = createDecision(1U, nWorks);
+        auto callbacks1 = createCallback(*cq, *decision);
+        // Call set() again, with a solution that has a lower works value. This will result in an
+        // active entry being created.
+        ASSERT_OK(planCache.set(makeKey(*cq),
+                                qs->cacheData->clone(),
+                                NumWorks{nWorks},
+                                Date_t{},
+                                &callbacks1,
+                                PlanSecurityLevel::kNotSensitive));
+        ASSERT_EQ(planCache.get(key).state, PlanCache::CacheEntryState::kPresentActive);
+        auto entry = assertGet(planCache.getEntry(key));
+        ASSERT_TRUE(entry->isActive);
+        ASSERT_TRUE(entry->readsOrWorks);
+        ASSERT_EQ(entry->readsOrWorks->rawValue(), nWorks);
+    }
 
     planCache.deactivate(key);
     ASSERT_EQ(planCache.get(key).state, PlanCache::CacheEntryState::kPresentInactive);
 
     // Be sure the entry has the same works value.
-    entry = assertGet(planCache.getEntry(key));
+    auto entry = assertGet(planCache.getEntry(key));
     ASSERT_FALSE(entry->isActive);
-    ASSERT_TRUE(entry->works);
-    ASSERT_EQ(entry->works.value(), 20U);
+    ASSERT_TRUE(entry->readsOrWorks);
+    ASSERT_EQ(entry->readsOrWorks->rawValue(), 20U);
 }
 
 TEST_F(PlanCacheTest, GetMatchingStatsMatchesAndSerializesCorrectly) {
@@ -839,12 +863,13 @@ TEST_F(PlanCacheTest, GetMatchingStatsMatchesAndSerializesCorrectly) {
     // Create a cache entry with 5 works.
     {
         std::unique_ptr<CanonicalQuery> cq(canonicalize("{a: 1}"));
+        const size_t nWorks = 5;
         auto qs = getQuerySolutionForCaching();
-        auto decision = createDecision(1U, 5);
+        auto decision = createDecision(1U, nWorks);
         auto callbacks = createCallback(*cq, *decision);
         ASSERT_OK(planCache.set(makeKey(*cq),
                                 qs->cacheData->clone(),
-                                *decision,
+                                NumWorks{nWorks},
                                 Date_t{},
                                 &callbacks,
                                 PlanSecurityLevel::kNotSensitive));
@@ -854,11 +879,12 @@ TEST_F(PlanCacheTest, GetMatchingStatsMatchesAndSerializesCorrectly) {
     {
         std::unique_ptr<CanonicalQuery> cq(canonicalize("{b: 1}"));
         auto qs = getQuerySolutionForCaching();
-        auto decision = createDecision(1U, 3);
+        const size_t nWorks = 3;
+        auto decision = createDecision(1U, nWorks);
         auto callbacks = createCallback(*cq, *decision);
         ASSERT_OK(planCache.set(makeKey(*cq),
                                 qs->cacheData->clone(),
-                                *decision,
+                                NumWorks{nWorks},
                                 Date_t{},
                                 &callbacks,
                                 PlanSecurityLevel::kNotSensitive));
@@ -869,8 +895,8 @@ TEST_F(PlanCacheTest, GetMatchingStatsMatchesAndSerializesCorrectly) {
 
     // Define a serialization function which just serializes the number of works.
     const auto serializer = [](const auto key, const PlanCacheEntry& entry) {
-        ASSERT_TRUE(entry.works);
-        return BSON("works" << static_cast<int>(entry.works.value()));
+        ASSERT_TRUE(entry.readsOrWorks);
+        return BSON("works" << static_cast<int>(entry.readsOrWorks->rawValue()));
     };
 
     // Define a matcher which matches if the number of works exceeds 4.
@@ -1162,7 +1188,7 @@ protected:
                                    Date_t(),
                                    false /* isActive  */,
                                    PlanSecurityLevel::kNotSensitive,
-                                   0 /* works */,
+                                   ReadsOrWorks{NumWorks{0}},
                                    plan_cache_util::buildDebugInfo(*scopedCq, std::move(decision)));
         CachedSolution cachedSoln(*entry);
 
@@ -1557,8 +1583,9 @@ TEST_F(CachePlanSelectionTest, ReverseScanForSort) {
 TEST_F(CachePlanSelectionTest, CollscanNoUsefulIndices) {
     addIndex(BSON("a" << 1 << "b" << 1), "a_1_b_1");
     addIndex(BSON("c" << 1), "c_1");
-    runQuery(BSON("b" << 4));
-    assertPlanCacheRecoversSolution(BSON("b" << 4), "{cscan: {filter: {b: 4}, dir: 1}}");
+    BSONObj query = fromjson("{b: 4}");
+    runQuery(query);
+    assertPlanCacheRecoversSolution(query, "{cscan: {filter: {b: 4}, dir: 1}}");
 }
 
 TEST_F(CachePlanSelectionTest, CollscanOrWithoutEnoughIndices) {
@@ -1722,7 +1749,8 @@ TEST_F(CachePlanSelectionTest, MaxNotCached) {
 TEST_F(CachePlanSelectionTest, NaturalHintNotCached) {
     addIndex(BSON("a" << 1), "a_1");
     addIndex(BSON("b" << 1), "b_1");
-    runQuerySortHint(BSON("a" << 1), BSON("b" << 1), BSON("$natural" << 1));
+    BSONObj query = fromjson("{a: 1}");
+    runQuerySortHint(query, BSON("b" << 1), BSON("$natural" << 1));
     assertNotCached(
         "{sort: {pattern: {b: 1}, limit: 0, type: 'simple', node: "
         "{cscan: {filter: {a: 1}, dir: 1}}}}");
@@ -1856,7 +1884,7 @@ TEST_F(PlanCacheTest, PlanCacheSizeWithCRUDOperations) {
     previousSize = planCacheTotalSizeEstimateBytes.get();
     ASSERT_OK(planCache.set(key,
                             qs->cacheData->clone(),
-                            *decision,
+                            NumWorks{123},  // Doesn't matter.
                             Date_t{},
                             &callbacks,
                             PlanSecurityLevel::kNotSensitive));
@@ -1868,7 +1896,7 @@ TEST_F(PlanCacheTest, PlanCacheSizeWithCRUDOperations) {
     previousSize = planCacheTotalSizeEstimateBytes.get();
     ASSERT_OK(planCache.set(key,
                             qs->cacheData->clone(),
-                            *decision,
+                            NumWorks{123},  // Doesn't matter.
                             Date_t{},
                             &callbacks1,
                             PlanSecurityLevel::kNotSensitive));
@@ -1879,7 +1907,7 @@ TEST_F(PlanCacheTest, PlanCacheSizeWithCRUDOperations) {
     // Verify that the plan cache size increases after updating the same entry with more solutions.
     ASSERT_OK(planCache.set(key,
                             qs->cacheData->clone(),
-                            *decision,
+                            NumWorks{123},  // Doesn't matter.
                             Date_t{},
                             &callbacks2,
                             PlanSecurityLevel::kNotSensitive));
@@ -1891,7 +1919,7 @@ TEST_F(PlanCacheTest, PlanCacheSizeWithCRUDOperations) {
     previousSize = planCacheTotalSizeEstimateBytes.get();
     ASSERT_OK(planCache.set(key,
                             qs->cacheData->clone(),
-                            *decision,
+                            NumWorks{123},  // Doesn't matter.
                             Date_t{},
                             &callbacks3,
                             PlanSecurityLevel::kNotSensitive));
@@ -1910,7 +1938,7 @@ TEST_F(PlanCacheTest, PlanCacheSizeWithCRUDOperations) {
         previousSize = planCacheTotalSizeEstimateBytes.get();
         ASSERT_OK(planCache.set(makeKey(*query),
                                 qs->cacheData->clone(),
-                                *decision,
+                                NumWorks{123},  // Doesn't matter.
                                 Date_t{},
                                 &callbacks4,
                                 PlanSecurityLevel::kNotSensitive));
@@ -1961,7 +1989,7 @@ TEST_F(PlanCacheTest, PlanCacheSizeWithEviction) {
         auto callbacks = createCallback(*query, *decision);
         ASSERT_OK(planCache.set(makeKey(*query),
                                 qs->cacheData->clone(),
-                                *decision,
+                                NumWorks{123},  // Doesn't matter.
                                 Date_t{},
                                 &callbacks,
                                 PlanSecurityLevel::kNotSensitive));
@@ -1978,7 +2006,7 @@ TEST_F(PlanCacheTest, PlanCacheSizeWithEviction) {
         ASSERT_EQ(planCache.size(), kCacheSize);
         ASSERT_OK(planCache.set(key,
                                 qs->cacheData->clone(),
-                                *decision,
+                                NumWorks{123},  // Doesn't matter.
                                 Date_t{},
                                 &callbacks,
                                 PlanSecurityLevel::kNotSensitive));
@@ -1996,7 +2024,7 @@ TEST_F(PlanCacheTest, PlanCacheSizeWithEviction) {
         previousSize = planCacheTotalSizeEstimateBytes.get();
         ASSERT_OK(planCache.set(makeKey(*queryBiggerKey),
                                 qs->cacheData->clone(),
-                                *decision,
+                                NumWorks{123},  // Doesn't matter.
                                 Date_t{},
                                 &callbacks,
                                 PlanSecurityLevel::kNotSensitive));
@@ -2013,7 +2041,7 @@ TEST_F(PlanCacheTest, PlanCacheSizeWithEviction) {
         previousSize = planCacheTotalSizeEstimateBytes.get();
         ASSERT_OK(planCache.set(key,
                                 qs->cacheData->clone(),
-                                *decision,
+                                NumWorks{123},  // Doesn't matter.
                                 Date_t{},
                                 &callbacks,
                                 PlanSecurityLevel::kNotSensitive));
@@ -2030,7 +2058,7 @@ TEST_F(PlanCacheTest, PlanCacheSizeWithEviction) {
         previousSize = planCacheTotalSizeEstimateBytes.get();
         ASSERT_OK(planCache.set(key,
                                 qs->cacheData->clone(),
-                                *decision,
+                                NumWorks{123},  // Doesn't matter.
                                 Date_t{},
                                 &callbacks,
                                 PlanSecurityLevel::kNotSensitive));
@@ -2060,7 +2088,7 @@ TEST_F(PlanCacheTest, PlanCacheSizeWithMultiplePlanCaches) {
         previousSize = planCacheTotalSizeEstimateBytes.get();
         ASSERT_OK(planCache1.set(makeKey(*query),
                                  qs->cacheData->clone(),
-                                 *decision,
+                                 NumWorks{123},  // Doesn't matter.
                                  Date_t{},
                                  &callbacks,
                                  PlanSecurityLevel::kNotSensitive));
@@ -2071,7 +2099,7 @@ TEST_F(PlanCacheTest, PlanCacheSizeWithMultiplePlanCaches) {
         previousSize = planCacheTotalSizeEstimateBytes.get();
         ASSERT_OK(planCache2.set(makeKey(*query),
                                  qs->cacheData->clone(),
-                                 *decision,
+                                 NumWorks{123},  // Doesn't matter.
                                  Date_t{},
                                  &callbacks1,
                                  PlanSecurityLevel::kNotSensitive));
@@ -2097,7 +2125,7 @@ TEST_F(PlanCacheTest, PlanCacheSizeWithMultiplePlanCaches) {
         previousSize = planCacheTotalSizeEstimateBytes.get();
         ASSERT_OK(planCache.set(makeKey(*cq),
                                 qs->cacheData->clone(),
-                                *decision,
+                                NumWorks{123},  // Doesn't matter.
                                 Date_t{},
                                 &callbacks,
                                 PlanSecurityLevel::kNotSensitive));
@@ -2126,7 +2154,7 @@ TEST_F(PlanCacheTest, PlanCacheMaxSizeParameterCanBeZero) {
 
     ASSERT_OK(planCache.set(makeKey(*query),
                             qs->cacheData->clone(),
-                            *decision,
+                            NumWorks{123},  // Doesn't matter.
                             Date_t{},
                             &callbacks,
                             PlanSecurityLevel::kNotSensitive));

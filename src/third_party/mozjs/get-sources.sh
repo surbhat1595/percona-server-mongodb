@@ -8,8 +8,8 @@ set -vx
 
 NAME=spidermonkey
 
-LIB_GIT_BRANCH=spidermonkey-esr91.3-cpp-only
-LIB_GIT_REVISION=d0e3896e6377911761a3fae038bac8419a708123
+LIB_GIT_BRANCH=spidermonkey-esr115.7-cpp-only
+LIB_GIT_REVISION=bb6edb4fcd43607c87de81df8c58db11a663634a
 LIB_GIT_REPO=git@github.com:mongodb-forks/spidermonkey.git
 
 DEST_DIR=$(git rev-parse --show-toplevel)/src/third_party/mozjs

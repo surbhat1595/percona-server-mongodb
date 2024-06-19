@@ -29,6 +29,7 @@
 
 #pragma once
 
+#include <absl/container/flat_hash_map.h>
 #include <list>
 #include <map>
 #include <memory>
@@ -95,6 +96,9 @@ public:
      * someBaton.cancelSession(S1); someBaton.cancelSession(S2);
      * The continuation for `S1` may run before or after that of `S2`. Continuations for
      * timers behave similarly with respect to cancellation.
+     *
+     * Sessions and timers that are still active when the baton detaches will be cancelled in the
+     * context of the detachment and their continuations will run inline with detachment.
      */
     bool cancelSession(Session& session) noexcept override;
 
@@ -116,8 +120,8 @@ private:
     struct TransportSession {
         int fd;
         short events;  // Events to consider while polling for this session (e.g., `POLLIN`).
-        Promise<void> promise;
         bool canceled = false;
+        Promise<void> promise;
     };
 
     bool _cancelTimer(size_t timerId) noexcept;
@@ -140,12 +144,14 @@ private:
      *
      * Otherwise, take exclusive access and run the job on the current thread.
      *
-     * Note that `_safeExecute()` will throw if the baton has been detached.
+     * Note that `_safeExecute()` will throw (and `_safeExecuteNoThrow` will invariant) if the baton
+     * has been detached.
      *
      * Also note that the job may not run inline, and may get scheduled to run by the baton, so it
      * should never throw.
      */
     void _safeExecute(stdx::unique_lock<Mutex> lk, Job job);
+    void _safeExecuteNoThrow(stdx::unique_lock<Mutex> lk, Job job) noexcept;
 
     /**
      * Blocks polling on the registered sessions until one of the following happens:
@@ -235,8 +241,8 @@ private:
      * been added to `_sessions` yet. The baton only starts polling on a session once it gets
      * added to `_sessions`.
      */
-    stdx::unordered_map<SessionId, TransportSession> _sessions;
-    stdx::unordered_map<SessionId, TransportSession> _pendingSessions;
+    absl::flat_hash_map<SessionId, TransportSession> _sessions;
+    absl::flat_hash_map<SessionId, TransportSession> _pendingSessions;
 
     /**
      * We use three structures to maintain timers:

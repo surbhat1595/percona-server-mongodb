@@ -113,6 +113,7 @@ void ensureOplogCollectionsDropped(OperationContext* opCtx,
 void ensureTemporaryReshardingCollectionRenamed(OperationContext* opCtx,
                                                 const CommonReshardingMetadata& metadata);
 
+bool isCollectionCapped(OperationContext* opCtx, const NamespaceString& nss);
 /**
  * Removes all entries matching the given reshardingUUID from the recipient resume data table.
  */
@@ -204,7 +205,8 @@ void updateSessionRecord(OperationContext* opCtx,
                          BSONObj o2Field,
                          std::vector<StmtId> stmtIds,
                          boost::optional<repl::OpTime> preImageOpTime,
-                         boost::optional<repl::OpTime> postImageOpTime);
+                         boost::optional<repl::OpTime> postImageOpTime,
+                         NamespaceString sourceNss);
 
 /**
  * Retrieves the resume data natural order scans for all donor shards.

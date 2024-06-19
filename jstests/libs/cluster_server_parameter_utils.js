@@ -40,6 +40,14 @@ export const kNonTestOnlyClusterParameters = {
         serverless: true,
         standaloneIncompatible: false,
     },
+    defaultMaxTimeMS: {
+        default: {readOperations: 0},
+        testValues: [{readOperations: 42}, {readOperations: 60000}],
+        featureFlag: 'DefaultReadMaxTimeMS',
+        setParameters: {'multitenancySupport': true},
+        serverless: true,
+        standaloneIncompatible: false,
+    }
 };
 
 export const kTestOnlyClusterParameters = {
@@ -284,6 +292,7 @@ export function runGetClusterParameterReplicaSet(rst,
         numMatches++;
     }
 
+    rst.awaitReplication();
     rst.getSecondaries().forEach(function(secondary) {
         if (runGetClusterParameterNode(secondary,
                                        getClusterParameterArgs,
@@ -306,6 +315,8 @@ export function runGetClusterParameterSharded(st,
                                               tenantId = undefined,
                                               omitInFTDC = false,
                                               omittedInFTDCClusterParameters = []) {
+    const shards = [st.rs0, st.rs1, st.rs2];
+    shards.forEach((shard) => shard.awaitReplication());
     assert(runGetClusterParameterNode(st.s0,
                                       getClusterParameterArgs,
                                       expectedClusterParameters,
@@ -319,7 +330,6 @@ export function runGetClusterParameterSharded(st,
                                      tenantId,
                                      omitInFTDC,
                                      omittedInFTDCClusterParameters);
-    const shards = [st.rs0, st.rs1, st.rs2];
     shards.forEach(function(shard) {
         runGetClusterParameterReplicaSet(shard,
                                          getClusterParameterArgs,
@@ -751,5 +761,55 @@ export function testInvalidClusterParameterCommands(conn, tenantId) {
             foo: 'bar',
             clusterParameterTime: {"$timestamp": {t: 0, i: 0}}
         }));
+    }
+}
+
+// name => name of cluster parameter to get
+// expectedValue => document that should be equal to document describing CP's value, excluding the
+// _id
+function checkGetClusterParameterMatch(db, tenantToken, name, expectedValue) {
+    const cps = assert
+                    .commandWorked(
+                        runCommandWithSecurityToken(tenantToken, db, {getClusterParameter: name}))
+                    .clusterParameters;
+    // confirm we got the document we were looking for.
+    assert.eq(cps.length, 1);
+    let actualCp = cps[0];
+    assert.eq(actualCp._id, name);
+    // confirm the value is expected.
+    // remove the id and clusterParameterTime fields
+    delete actualCp._id;
+    delete actualCp.clusterParameterTime;
+    assert(bsonWoCompare(actualCp, expectedValue) !== 0,
+           'Server parameter mismatch for parameter ' +
+               '\n' +
+               'Expected: ' + tojson(expectedValue) + '\n' +
+               'Actual: ' + tojson(actualCp));
+}
+
+// Tests that getClusterParameter: "*" all have an _id element, and that all the parameters
+// it returns match the result of directly querying with getClusterParameter: <paramName>.
+export function testGetClusterParameterStar(conn, tenantId) {
+    let adminDB, getClusterParameterFn;
+    if (conn instanceof ReplSetTest) {
+        adminDB = conn.getPrimary().getDB('admin');
+    } else if (conn instanceof ShardingTest) {
+        adminDB = conn.s0.getDB('admin');
+    } else {
+        adminDB = conn.getDB('admin');
+    }
+
+    const tenantToken =
+        tenantId ? makeUnsignedSecurityToken(tenantId, {expectPrefix: false}) : undefined;
+
+    const allParameters = assert
+                              .commandWorked(runCommandWithSecurityToken(
+                                  tenantToken, adminDB, {getClusterParameter: '*'}))
+                              .clusterParameters;
+    for (const param of allParameters) {
+        assert(param.hasOwnProperty("_id"),
+               'Entry in {getClusterParameter: "*"} result is missing _id key:\n' + tojson(param));
+        const name = param["_id"];
+        checkGetClusterParameterMatch(adminDB, tenantToken, name, param);
     }
 }

@@ -31,7 +31,6 @@
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
 #include <memory>
-#include <string>
 #include <utility>
 #include <vector>
 
@@ -42,7 +41,6 @@
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/tenant_id.h"
-#include "mongo/platform/mutex.h"
 #include "mongo/util/str.h"
 
 namespace mongo {
@@ -51,18 +49,26 @@ namespace {
 const int kMaxPerfThreads = 16;  // max number of threads to use for lock perf
 
 class DConcurrencyTest : public benchmark::Fixture {
-public:
+protected:
     void SetUp(benchmark::State& state) override {
+        stdx::unique_lock ul(_mutex);
         if (state.thread_index == 0) {
-            setGlobalServiceContext(ServiceContext::make());
+            _serviceContextHolder = ServiceContext::make();
             makeKClientsWithLockers(state.threads);
+            _cv.notify_all();
+        } else {
+            _cv.wait(ul, [&] { return clients.size() == (size_t)state.threads; });
         }
     }
 
     void TearDown(benchmark::State& state) override {
+        stdx::unique_lock ul(_mutex);
         if (state.thread_index == 0) {
             clients.clear();
-            setGlobalServiceContext({});
+            _serviceContextHolder = nullptr;
+            _cv.notify_all();
+        } else {
+            _cv.wait(ul, [&] { return !_serviceContextHolder; });
         }
     }
 
@@ -70,41 +76,25 @@ public:
         clients.reserve(k);
 
         for (int i = 0; i < k; ++i) {
-            auto client = getGlobalServiceContext()->getService()->makeClient(
+            auto client = getServiceContext()->getService()->makeClient(
                 str::stream() << "test client for thread " << i);
             auto opCtx = client->makeOperationContext();
             clients.emplace_back(std::move(client), std::move(opCtx));
         }
     }
 
-protected:
+    ServiceContext* getServiceContext() const {
+        return _serviceContextHolder.get();
+    }
+
+    Mutex _mutex = MONGO_MAKE_LATCH("DConcurrencyTest BM Mutex");
+    stdx::condition_variable _cv;
+
+    ServiceContext::UniqueServiceContext _serviceContextHolder;
+
     std::vector<std::pair<ServiceContext::UniqueClient, ServiceContext::UniqueOperationContext>>
         clients;
 };
-
-BENCHMARK_DEFINE_F(DConcurrencyTest, BM_StdMutex)(benchmark::State& state) {
-    static auto mtx = MONGO_MAKE_LATCH();
-
-    for (auto keepRunning : state) {
-        stdx::unique_lock<Latch> lk(mtx);
-    }
-}
-
-BENCHMARK_DEFINE_F(DConcurrencyTest, BM_ResourceMutexShared)(benchmark::State& state) {
-    static Lock::ResourceMutex mtx("testMutex");
-
-    for (auto keepRunning : state) {
-        Lock::SharedLock lk(clients[state.thread_index].second.get(), mtx);
-    }
-}
-
-BENCHMARK_DEFINE_F(DConcurrencyTest, BM_ResourceMutexExclusive)(benchmark::State& state) {
-    static Lock::ResourceMutex mtx("testMutex");
-
-    for (auto keepRunning : state) {
-        Lock::ExclusiveLock lk(clients[state.thread_index].second.get(), mtx);
-    }
-}
 
 BENCHMARK_DEFINE_F(DConcurrencyTest, BM_CollectionIntentSharedLock)(benchmark::State& state) {
     DatabaseName dbName = DatabaseName::createDatabaseName_forTest(boost::none, "test");
@@ -145,11 +135,6 @@ BENCHMARK_DEFINE_F(DConcurrencyTest, BM_CollectionExclusiveLock)(benchmark::Stat
                                  MODE_X);
     }
 }
-
-BENCHMARK_REGISTER_F(DConcurrencyTest, BM_StdMutex)->ThreadRange(1, kMaxPerfThreads);
-
-BENCHMARK_REGISTER_F(DConcurrencyTest, BM_ResourceMutexShared)->ThreadRange(1, kMaxPerfThreads);
-BENCHMARK_REGISTER_F(DConcurrencyTest, BM_ResourceMutexExclusive)->ThreadRange(1, kMaxPerfThreads);
 
 BENCHMARK_REGISTER_F(DConcurrencyTest, BM_CollectionIntentSharedLock)
     ->ThreadRange(1, kMaxPerfThreads);

@@ -36,6 +36,28 @@ selector:
   # we expect a second drop to return status OK.
   - jstests/core/**/explain_upsert.js
 
+  # Uses a view with projected out _id which causes data consistency diffs due to natural order differences between primary and secondary nodes from parallel oplog application.
+  - jstests/core/views/views_find.js
+  - jstests/core/views/views_aggregation.js
+
+  # Int types within an array type in BSON get their type changed when passed into a C++ function from Javascript.
+  - jstests/core/query/type/type_array.js
+  - jstests/core/timeseries/timeseries_internal_bounded_sort_compound_mixed_types.js
+
+  # Uses documents that are too close to max BSON size for us to support passing to C++ as a BSON array.
+  - jstests/core/max_doc_size.js
+  - jstests/core/query/find/find_getmore_bsonsize.js
+
+  # This test does a very large amount of inserts on a single shard which will trigger the balancer.
+  # If we disable the balancer on the source cluster then it will remain enabled on the restore
+  # nodes and still cause a diff. This is because the config shard needs to connect to its replica
+  # set to apply the stashed balancer mode and we are unable to do that since we are running the
+  # config server node on a different port than the configuration we pass in. We will have a
+  # targeted test that handles this case for correctness.
+  - jstests/core/query/query_settings/query_settings_size_limits.js
+  # BF-33295. Magic restore fails in burn_in tasks with NamespaceNotFound error
+  - jstests/core/query/sort/sortj.js
+
   exclude_with_any_tags:
   - assumes_standalone_mongod
   - assumes_against_mongod_not_mongos
@@ -47,6 +69,7 @@ executor:
   hooks:
   - class: MagicRestoreEveryN
     n: 20
+    randomize_pit: True
   fixture:
     class: ShardedClusterFixture
     mongos_options:

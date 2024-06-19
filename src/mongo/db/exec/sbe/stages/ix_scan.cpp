@@ -123,6 +123,11 @@ void IndexScanStageBase::prepareImpl(CompileCtx& ctx) {
         _indexIdentViewAccessor.reset();
     }
 
+    if (_indexKeySlot) {
+        _recordAccessor.reset(
+            false, value::TypeTags::keyString, value::bitcastFrom<value::KeyStringEntry*>(&_key));
+    }
+
     if (_snapshotIdSlot) {
         _latestSnapshotId = shard_role_details::getRecoveryUnit(_opCtx)->getSnapshotId().toNumber();
     }
@@ -154,8 +159,8 @@ value::SlotAccessor* IndexScanStageBase::getAccessor(CompileCtx& ctx, value::Slo
 
 void IndexScanStageBase::doSaveState(bool relinquishCursor) {
     if (relinquishCursor) {
-        if (_indexKeySlot) {
-            prepareForYielding(_recordAccessor, slotsAccessible());
+        if (_indexKeySlot && !_key.owned() && slotsAccessible()) {
+            _key = std::move(*_key.makeCopy());
         }
         if (_recordIdSlot) {
             prepareForYielding(_recordIdAccessor, slotsAccessible());
@@ -293,27 +298,26 @@ PlanState IndexScanStageBase::getNext() {
                 ++_specificStats.seeks;
                 trackIndexRead();
                 // Seek for key and establish the cursor position.
-                _nextRecord = seek();
+                _nextKeyString = seek();
                 break;
             case ScanState::kScanning:
                 trackIndexRead();
-                _nextRecord = _cursor->nextKeyString();
+                _nextKeyString = _cursor->nextKeyValueView();
                 break;
             case ScanState::kFinished:
                 _priority.reset();
                 return trackPlanState(PlanState::IS_EOF);
         }
-    } while (!validateKey(_nextRecord));
+    } while (!validateKey(_nextKeyString));
 
     if (_indexKeySlot) {
-        _recordAccessor.reset(false,
-                              value::TypeTags::ksValue,
-                              value::bitcastFrom<key_string::Value*>(&_nextRecord->keyString));
+        _key = value::KeyStringEntry{_nextKeyString};
     }
 
     if (_recordIdSlot) {
+        auto nextRid = _nextKeyString.getRecordId();
         _recordIdAccessor.reset(
-            false, value::TypeTags::RecordId, value::bitcastFrom<RecordId*>(&_nextRecord->loc));
+            false, value::TypeTags::RecordId, value::bitcastFrom<const RecordId*>(nextRid));
     }
 
     if (_snapshotIdSlot) {
@@ -325,7 +329,7 @@ PlanState IndexScanStageBase::getNext() {
     if (_accessors.size()) {
         _valuesBuffer.reset();
         readKeyStringValueIntoAccessors(
-            _nextRecord->keyString, *_ordering, &_valuesBuffer, &_accessors, _indexKeysToInclude);
+            _nextKeyString, *_ordering, &_valuesBuffer, &_accessors, _indexKeysToInclude);
     }
 
     return trackPlanState(PlanState::ADVANCED);
@@ -543,19 +547,19 @@ void SimpleIndexScanStage::open(bool reOpen) {
         const auto msgTagLow = tagLow;
         uassert(4822851,
                 str::stream() << "seek key is wrong type: " << msgTagLow,
-                tagLow == value::TypeTags::ksValue);
+                tagLow == value::TypeTags::keyString);
         _seekKeyLowHolder.reset(ownedLow, tagLow, valLow);
 
         auto [ownedHi, tagHi, valHi] = _bytecode.run(_seekKeyHighCode.get());
         const auto msgTagHi = tagHi;
         uassert(4822852,
                 str::stream() << "seek key is wrong type: " << msgTagHi,
-                tagHi == value::TypeTags::ksValue);
+                tagHi == value::TypeTags::keyString);
 
         _seekKeyHighHolder.reset(ownedHi, tagHi, valHi);
 
         // It is a point bound if the lowKey and highKey are same except discriminator.
-        auto& highKey = *getSeekKeyHigh();
+        auto& highKey = getSeekKeyHigh();
         _pointBound = getSeekKeyLow().compareWithoutDiscriminator(highKey) == 0 &&
             highKey.computeElementCount(*_ordering) == _entry->descriptor()->getNumFields();
 
@@ -565,7 +569,7 @@ void SimpleIndexScanStage::open(bool reOpen) {
         const auto msgTagLow = tagLow;
         uassert(4822853,
                 str::stream() << "seek key is wrong type: " << msgTagLow,
-                tagLow == value::TypeTags::ksValue);
+                tagLow == value::TypeTags::keyString);
         _seekKeyLowHolder.reset(ownedLow, tagLow, valLow);
     } else {
         auto sdi = _entry->accessMethod()->asSortedData()->getSortedDataInterface();
@@ -574,22 +578,20 @@ void SimpleIndexScanStage::open(bool reOpen) {
                                key_string::Discriminator::kExclusiveBefore);
         kb.appendDiscriminator(key_string::Discriminator::kExclusiveBefore);
 
-        auto [copyTag, copyVal] = value::makeCopyKeyString(kb.getValueCopy());
+        auto [copyTag, copyVal] = value::makeKeyString(kb.getValueCopy());
         _seekKeyLowHolder.reset(true, copyTag, copyVal);
     }
 }
 
 const key_string::Value& SimpleIndexScanStage::getSeekKeyLow() const {
     auto [tag, value] = _seekKeyLowHolder.getViewOfValue();
-    return *value::getKeyStringView(value);
+    return value::getKeyString(value)->getValue();
 }
 
-const key_string::Value* SimpleIndexScanStage::getSeekKeyHigh() const {
-    if (!_seekKeyHigh) {
-        return nullptr;
-    }
+const key_string::Value& SimpleIndexScanStage::getSeekKeyHigh() const {
+    tassert(8843702, "HighKey must exist", _seekKeyHigh);
     auto [tag, value] = _seekKeyHighHolder.getViewOfValue();
-    return value::getKeyStringView(value);
+    return value::getKeyString(value)->getValue();
 }
 
 std::unique_ptr<PlanStageStats> SimpleIndexScanStage::getStats(bool includeDebugInfo) const {
@@ -636,12 +638,13 @@ size_t SimpleIndexScanStage::estimateCompileTimeSize() const {
     return size;
 }
 
-boost::optional<KeyStringEntry> SimpleIndexScanStage::seek() {
-    return _cursor->seekForKeyString(getSeekKeyLow());
+SortedDataKeyValueView SimpleIndexScanStage::seek() {
+    auto& query = getSeekKeyLow();
+    return _cursor->seekForKeyValueView(StringData(query.getBuffer(), query.getSize()));
 }
 
-bool SimpleIndexScanStage::validateKey(const boost::optional<KeyStringEntry>& key) {
-    if (!key) {
+bool SimpleIndexScanStage::validateKey(const SortedDataKeyValueView& key) {
+    if (key.isEmpty()) {
         _scanState = ScanState::kFinished;
         return false;
     }
@@ -749,34 +752,40 @@ size_t GenericIndexScanStage::estimateCompileTimeSize() const {
     return size;
 }
 
-boost::optional<KeyStringEntry> GenericIndexScanStage::seek() {
-    return _cursor->seekForKeyString(IndexEntryComparison::makeKeyStringFromSeekPointForSeek(
-        _seekPoint, _params.version, _params.ord, _forward));
+SortedDataKeyValueView GenericIndexScanStage::seek() {
+    key_string::Builder builder(_params.version, _params.ord);
+    return _cursor->seekForKeyValueView(
+        IndexEntryComparison::makeKeyStringFromSeekPointForSeek(_seekPoint, _forward, builder));
 }
 
-bool GenericIndexScanStage::validateKey(const boost::optional<KeyStringEntry>& key) {
-    if (!key) {
+bool GenericIndexScanStage::validateKey(const SortedDataKeyValueView& key) {
+    if (key.isEmpty()) {
         _scanState = ScanState::kFinished;
         return false;
     }
     ++_specificStats.keysExamined;
+    auto keyStringData = key.getKeyStringWithoutRecordIdView();
 
-    if (!_endKey.isEmpty() &&
-        ((_forward && key->keyString.compare(_endKey) <= 0) ||
-         (!_forward && key->keyString.compare(_endKey) >= 0))) {
-        ++_specificStats.keyCheckSkipped;
-        _scanState = ScanState::kScanning;
-        return true;
+    if (!_endKey.isEmpty()) {
+        auto result = key_string::compare(
+            keyStringData.data(), _endKey.getBuffer(), keyStringData.size(), _endKey.getSize());
+        if ((_forward && result <= 0) || (!_forward && result >= 0)) {
+            ++_specificStats.keyCheckSkipped;
+            _scanState = ScanState::kScanning;
+            return true;
+        }
     }
 
     if (_checker) {
         _keyBuffer.reset();
         BSONObjBuilder keyBuilder(_keyBuffer);
-        key_string::toBsonSafe(key->keyString.getBuffer(),
-                               key->keyString.getSize(),
-                               _params.ord,
-                               key->keyString.getTypeBits(),
-                               keyBuilder);
+
+        auto typeBits = key.getTypeBitsView();
+        BufReader typeBitsBr(typeBits.data(), typeBits.size());
+        auto reader = key_string::TypeBits::getReaderFromBuffer(key.getVersion(), &typeBitsBr);
+
+        key_string::toBsonSafe(
+            keyStringData.data(), keyStringData.size(), _params.ord, reader, keyBuilder);
         auto bsonKey = keyBuilder.done();
 
         switch (_checker->checkKeyWithEndPosition(

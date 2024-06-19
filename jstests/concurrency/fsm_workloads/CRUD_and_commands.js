@@ -1,13 +1,9 @@
 /**
  * Perform CRUD operations, some of which may implicitly create collections, in parallel with
  * collection-dropping operations.
- *
- * @tags: [
- *   # TODO (SERVER-88130) Remove this dependency once cluster::createWithRouterLoop uses a
- *   # collection router
- *   featureFlagTrackUnshardedCollectionsUponCreation
- * ]
  */
+import {includesErrorCode} from "jstests/libs/error_code_utils.js";
+
 export const $config = (function() {
     const data = {numIds: 10, docValue: "mydoc"};
 
@@ -92,6 +88,16 @@ export const $config = (function() {
                             e["errorLabels"] = ["TransientTransactionError"];
                             throw e;
                         }
+                    } else if (TestData.runInsideTransaction &&
+                               includesErrorCode(e, ErrorCodes.MovePrimaryInProgress)) {
+                        // Rethrow so the auto transaction retry logic will retry.
+                        //
+                        // With background config shard transitions, movePrimary may be called while
+                        // untracked collections exist on the draining shard, which can cause
+                        // operations to fail with MovePrimaryInProgress. The movePrimary uses a
+                        // fail point to prevent actually moving the collections, but they may still
+                        // throw this error.
+                        throw e;
                     } else {
                         assert.contains(
                             e.code,
@@ -154,6 +160,15 @@ export const $config = (function() {
                         e["errorLabels"] = ["TransientTransactionError"];
                         throw e;
                     }
+                } else if (TestData.runInsideTransaction &&
+                           includesErrorCode(e, ErrorCodes.MovePrimaryInProgress)) {
+                    // Rethrow so the auto transaction retry logic will retry.
+                    //
+                    // With background config shard transitions, movePrimary may be called while
+                    // untracked collections exist on the draining shard, which can cause operations
+                    // to fail with MovePrimaryInProgress. The movePrimary uses a fail point to
+                    // prevent actually moving the collections, but they may still throw this error.
+                    throw e;
                 } else {
                     // dropIndex can cause queries to throw if these queries yield.
                     assert.contains(e.code,

@@ -96,8 +96,6 @@ buildvariants:
   modules: *perf_modules
   expansions:
     <<: *linux_arm64_generic_expansions
-    idle_timeout_factor: 1.5
-    exec_timeout_factor: 1.5
     mongodb_setup_release: 2022-11
     mongodb_setup: single-replica
     infrastructure_provisioning_release: 2023-09
@@ -155,8 +153,6 @@ buildvariants:
   modules: *perf_modules
   expansions:
     <<: *amazon2_x86_expansions
-    idle_timeout_factor: 1.5
-    exec_timeout_factor: 1.5
     mongodb_setup_release: 2022-11
     mongodb_setup: standalone-classic-query-engine
     infrastructure_provisioning_release: 2023-09
@@ -209,7 +205,7 @@ buildvariants:
     storageEngine: wiredTiger
     compile_variant: amazon2-x86-compile
   run_on:
-    - "rhel70-perf-single"
+    - "rhel94-perf-single"
   tasks: *classic_engine_tasks
 
 - <<: *amazon2_x86_compile_variant_dependency
@@ -229,7 +225,7 @@ buildvariants:
     storageEngine: wiredTiger
     compile_variant: amazon2-x86-compile
   run_on:
-    - "rhel70-perf-single"
+    - "rhel94-perf-single"
   tasks: &classic_engine_1nodereplset_tasks
     - *schedule_patch_auto_tasks_task
     - *schedule_variant_auto_tasks_task
@@ -255,7 +251,7 @@ buildvariants:
     storageEngine: wiredTiger
     compile_variant: amazon2-x86-compile
   run_on:
-    - "rhel70-perf-single"
+    - "rhel94-perf-single"
   tasks: *classic_engine_1nodereplset_tasks
 
 - <<: *amazon_linux2_arm64_compile_variant_dependency
@@ -275,7 +271,7 @@ buildvariants:
     storageEngine: wiredTiger
     compile_variant: amazon2-arm64-compile
   run_on:
-    - "rhel70-perf-single"
+    - "rhel94-perf-single"
   tasks:
     - *schedule_patch_auto_tasks_task
     - *schedule_variant_auto_tasks_task
@@ -306,7 +302,7 @@ buildvariants:
     compile_variant: al2023-arm64-compile
     client_compile_variant: amazon2-arm64-compile
   run_on:
-    - "rhel70-perf-M60-like"
+    - "rhel94-perf-M60-like"
   tasks:
     - *schedule_patch_auto_tasks_task
     - *schedule_variant_auto_tasks_task
@@ -341,7 +337,7 @@ buildvariants:
     storageEngine: wiredTiger
     compile_variant: amazon2-x86-openssl111-compile
   run_on:
-    - "rhel70-perf-M60-like"
+    - "rhel94-perf-M60-like"
   tasks:
     - *schedule_patch_auto_tasks_task
     - *schedule_variant_auto_tasks_task
@@ -359,6 +355,7 @@ buildvariants:
   cron: &cron_sunday_thursday "0 0 * * 0,4"
   modules: *perf_modules
   expansions:
+    mongodb_setup_release: 2022-11
     mongodb_setup: atlas
     canaries: none
     atlas_setup: M30-repl
@@ -371,7 +368,7 @@ buildvariants:
     storageEngine: wiredTiger
     compile_variant: amazon2-arm64-compile
   run_on:
-    - "rhel70-perf-atlas-large"
+    - "rhel94-perf-atlas-large"
   tasks:
     - *schedule_patch_auto_tasks_task
     - *schedule_variant_auto_tasks_task
@@ -386,6 +383,7 @@ buildvariants:
   cron: *cron_sunday_thursday
   modules: *perf_modules
   expansions:
+    mongodb_setup_release: 2022-11
     mongodb_setup: atlas-shard
     canaries: none
     atlas_setup: M60-shard
@@ -398,7 +396,7 @@ buildvariants:
     storageEngine: wiredTiger
     compile_variant: amazon2-arm64-compile
   run_on:
-    - "rhel70-perf-atlas-large"
+    - "rhel94-perf-atlas-large"
   tasks:
     - name: locust_bulk_insert
 
@@ -419,7 +417,7 @@ buildvariants:
     storageEngine: wiredTiger
     compile_variant: amazon2-arm64-compile
   run_on:
-    - "rhel70-perf-single"
+    - "rhel94-perf-single"
   tasks:
     - *schedule_patch_auto_tasks_task
     - *schedule_variant_auto_tasks_task
@@ -466,7 +464,7 @@ buildvariants:
     authentication: enabled
     storageEngine: wiredTiger
   run_on:
-    - "rhel70-perf-single"
+    - "rhel94-perf-single"
   tasks:
     - *schedule_patch_auto_tasks_task
     - *schedule_variant_auto_tasks_task
@@ -489,7 +487,7 @@ buildvariants:
     storageEngine: wiredTiger
     compile_variant: amazon2-arm64-compile
   run_on:
-    - "rhel70-perf-single"
+    - "rhel94-perf-single"
   tasks: *classic_engine_tasks
 
 - <<: *amazon_linux2_arm64_compile_variant_dependency
@@ -509,7 +507,7 @@ buildvariants:
     storageEngine: wiredTiger
     compile_variant: amazon2-arm64-compile
   run_on:
-    - "rhel70-perf-single"
+    - "rhel94-perf-single"
   tasks: *classic_engine_tasks
 
 - <<: *amazon_linux2_arm64_compile_variant_dependency
@@ -529,7 +527,7 @@ buildvariants:
     storageEngine: wiredTiger
     compile_variant: amazon2-arm64-compile
   run_on:
-    - "rhel70-perf-single"
+    - "rhel94-perf-single"
   tasks: &bonsai_standalone_tasks
     - *schedule_patch_auto_tasks_task
     - *schedule_variant_auto_tasks_task
@@ -551,7 +549,7 @@ buildvariants:
     storageEngine: wiredTiger
     compile_variant: amazon2-x86-compile
   run_on:
-    - "rhel70-perf-single"
+    - "rhel94-perf-single"
   tasks: *bonsai_standalone_tasks
 
 - <<: *amazon_linux2_arm64_compile_variant_dependency
@@ -571,7 +569,7 @@ buildvariants:
     storageEngine: wiredTiger
     compile_variant: amazon2-arm64-compile
   run_on:
-    - "rhel70-perf-single"
+    - "rhel94-perf-single"
   tasks: *bonsai_standalone_tasks
 
 - <<: *amazon2_x86_compile_variant_dependency
@@ -591,7 +589,7 @@ buildvariants:
     storageEngine: wiredTiger
     compile_variant: amazon2-x86-compile
   run_on:
-    - "rhel70-perf-single"
+    - "rhel94-perf-single"
   tasks: *bonsai_standalone_tasks
 
 - <<: *amazon2_x86_compile_variant_dependency
@@ -611,7 +609,7 @@ buildvariants:
     storageEngine: wiredTiger
     compile_variant: amazon2-x86-compile
   run_on:
-    - "rhel70-perf-single"
+    - "rhel94-perf-single"
   tasks: &bonsai_1nodereplset_tasks
     - *schedule_patch_auto_tasks_task
     - *schedule_variant_auto_tasks_task
@@ -635,7 +633,7 @@ buildvariants:
     storageEngine: wiredTiger
     compile_variant: amazon2-arm64-compile
   run_on:
-    - "rhel70-perf-single"
+    - "rhel94-perf-single"
   tasks: *bonsai_1nodereplset_tasks
 
 - <<: *amazon2_x86_compile_variant_dependency
@@ -655,7 +653,7 @@ buildvariants:
     storageEngine: wiredTiger
     compile_variant: amazon2-x86-compile
   run_on:
-    - "rhel70-perf-single"
+    - "rhel94-perf-single"
   tasks: *bonsai_1nodereplset_tasks
 
 - <<: *amazon_linux2_arm64_compile_variant_dependency
@@ -675,7 +673,7 @@ buildvariants:
     storageEngine: wiredTiger
     compile_variant: amazon2-arm64-compile
   run_on:
-    - "rhel70-perf-single"
+    - "rhel94-perf-single"
   tasks: *bonsai_1nodereplset_tasks
 
 - <<: *amazon_linux2_arm64_compile_variant_dependency
@@ -695,7 +693,7 @@ buildvariants:
     storageEngine: wiredTiger
     compile_variant: amazon2-arm64-compile
   run_on:
-    - "rhel70-perf-single"
+    - "rhel94-perf-single"
   tasks: *classic_engine_1nodereplset_tasks
 
 - <<: *amazon_linux2_arm64_compile_variant_dependency
@@ -715,7 +713,7 @@ buildvariants:
     storageEngine: wiredTiger
     compile_variant: amazon2-arm64-compile
   run_on:
-    - "rhel70-perf-single"
+    - "rhel94-perf-single"
   tasks: *classic_engine_1nodereplset_tasks
 
 - <<: *amazon_linux2_arm64_compile_variant_dependency
@@ -735,7 +733,7 @@ buildvariants:
     storageEngine: wiredTiger
     compile_variant: amazon2-arm64-compile
   run_on:
-    - "rhel70-perf-single"
+    - "rhel94-perf-single"
   tasks:
     - *schedule_patch_auto_tasks_task
     - *schedule_variant_auto_tasks_task
@@ -761,7 +759,7 @@ buildvariants:
     # Needed to allow enabling failpoints.
     config_params_json: &config_params_enableTestCommmands '{"v":0, "enableTestCommands": true}'
   run_on:
-    - "rhel70-perf-single"
+    - "rhel94-perf-single"
   tasks: &1node-test-commands-tasks
     - name: startup
 
@@ -782,7 +780,7 @@ buildvariants:
     storageEngine: wiredTiger
     compile_variant: amazon2-arm64-compile
   run_on:
-    - "rhel70-perf-single"
+    - "rhel94-perf-single"
   tasks: &audit-tasks
     - *schedule_patch_auto_tasks_task
     - *schedule_variant_auto_tasks_task
@@ -807,7 +805,7 @@ buildvariants:
     storageEngine: wiredTiger
     compile_variant: amazon2-arm64-compile
   run_on:
-    - "rhel70-perf-single"
+    - "rhel94-perf-single"
   tasks: *audit-tasks
 
 - <<: *amazon_linux2_arm64_compile_variant_dependency
@@ -827,7 +825,7 @@ buildvariants:
     storageEngine: wiredTiger
     compile_variant: amazon2-arm64-compile
   run_on:
-    - "rhel70-perf-single"
+    - "rhel94-perf-single"
   tasks: *audit-tasks
 
 - <<: *amazon_linux2_arm64_compile_variant_dependency
@@ -847,7 +845,7 @@ buildvariants:
     storageEngine: wiredTiger
     compile_variant: amazon2-arm64-compile
   run_on:
-    - "rhel70-perf-single"
+    - "rhel94-perf-single"
   tasks: *audit-tasks
 
 - <<: *amazon_linux2_arm64_mongocrypt_compile_variant_dependency
@@ -869,7 +867,7 @@ buildvariants:
     compile_variant: amazon2-arm64-compile
     requires_mongocrypt_shlib: true
   run_on:
-    - "rhel70-perf-single"
+    - "rhel94-perf-single"
   tasks:
     - *schedule_patch_auto_tasks_task
     - *schedule_variant_auto_tasks_task
@@ -893,7 +891,7 @@ buildvariants:
     storageEngine: wiredTiger
     compile_variant: amazon2-arm64-compile
   run_on:
-    - "rhel70-perf-single"
+    - "rhel94-perf-single"
   tasks:
     - *schedule_patch_auto_tasks_task
     - *schedule_variant_auto_tasks_task
@@ -919,7 +917,7 @@ buildvariants:
     storageEngine: wiredTiger
     compile_variant: amazon2-arm64-compile
   run_on:
-    - "rhel70-perf-single"
+    - "rhel94-perf-single"
   tasks:
     - *schedule_patch_auto_tasks_task
     - *schedule_variant_auto_tasks_task
@@ -945,7 +943,7 @@ buildvariants:
     storageEngine: wiredTiger
     compile_variant: amazon2-arm64-compile
   run_on:
-    - "rhel70-perf-single"
+    - "rhel94-perf-single"
   tasks:
     - *schedule_patch_auto_tasks_task
     - *schedule_variant_auto_tasks_task
@@ -971,7 +969,7 @@ buildvariants:
     storageEngine: wiredTiger
     compile_variant: amazon2-arm64-compile
   run_on:
-    - "rhel70-perf-replset"
+    - "rhel94-perf-replset"
   tasks:
     - *schedule_patch_auto_tasks_task
     - *schedule_variant_auto_tasks_task
@@ -998,7 +996,7 @@ buildvariants:
     storageEngine: wiredTiger
     compile_variant: amazon2-arm64-compile
   run_on:
-    - "rhel70-perf-shard"
+    - "rhel94-perf-shard"
   tasks:
     - *schedule_patch_auto_tasks_task
     - *schedule_variant_auto_tasks_task
@@ -1022,7 +1020,7 @@ buildvariants:
     storageEngine: wiredTiger
     compile_variant: amazon2-arm64-compile
   run_on:
-    - "rhel70-perf-shard-lite"
+    - "rhel94-perf-shard-lite"
   tasks:
     - name: ycsb.2023-09
 
@@ -1044,7 +1042,7 @@ buildvariants:
     storageEngine: wiredTiger
     compile_variant: amazon2-arm64-compile
   run_on:
-    - "rhel70-perf-shard-lite"
+    - "rhel94-perf-shard-lite"
   tasks:
     - *schedule_patch_auto_tasks_task
     - *schedule_variant_auto_tasks_task
@@ -1088,7 +1086,7 @@ buildvariants:
     storageEngine: wiredTiger
     compile_variant: amazon2-x86-compile
   run_on:
-    - "rhel70-perf-shard-lite"
+    - "rhel94-perf-shard-lite"
   tasks:
     - *schedule_patch_auto_tasks_task
     - *schedule_variant_auto_tasks_task
@@ -1115,7 +1113,7 @@ buildvariants:
     storageEngine: wiredTiger
     compile_variant: amazon2-arm64-compile
   run_on:
-    - "rhel70-perf-shard-lite"
+    - "rhel94-perf-shard-lite"
   tasks:
     - *schedule_patch_auto_tasks_task
     - *schedule_variant_auto_tasks_task
@@ -1139,7 +1137,7 @@ buildvariants:
     storageEngine: wiredTiger
     compile_variant: amazon2-arm64-compile
   run_on:
-    - "rhel70-perf-shard-lite"
+    - "rhel94-perf-shard-lite"
   tasks:
     - *schedule_patch_auto_tasks_task
     - *schedule_variant_auto_tasks_task
@@ -1167,7 +1165,7 @@ buildvariants:
     storageEngine: wiredTiger
     compile_variant: amazon2-arm64-compile
   run_on:
-    - "rhel70-perf-shard-lite"
+    - "rhel94-perf-shard-lite"
   tasks:
     - *schedule_patch_auto_tasks_task
     - *schedule_variant_auto_tasks_task
@@ -1189,7 +1187,7 @@ buildvariants:
     storageEngine: wiredTiger
     compile_variant: amazon2-arm64-compile
   run_on:
-    - "rhel70-perf-replset"
+    - "rhel94-perf-replset"
   tasks:
     - *schedule_patch_auto_tasks_task
     - *schedule_variant_auto_tasks_task
@@ -1249,7 +1247,7 @@ buildvariants:
     storageEngine: wiredTiger
     compile_variant: amazon2-arm64-compile
   run_on:
-    - "rhel70-perf-replset"
+    - "rhel94-perf-replset"
   tasks:
     - *schedule_patch_auto_tasks_task
     - *schedule_variant_auto_tasks_task
@@ -1309,7 +1307,7 @@ buildvariants:
     storageEngine: wiredTiger
     compile_variant: amazon2-arm64-compile
   run_on:
-    - "rhel70-perf-replset"
+    - "rhel94-perf-replset"
   tasks:
     - *schedule_patch_auto_tasks_task
     - *schedule_variant_auto_tasks_task
@@ -1379,7 +1377,7 @@ buildvariants:
     storageEngine: wiredTiger
     compile_variant: amazon2-arm64-compile
   run_on:
-    - "rhel70-perf-replset"
+    - "rhel94-perf-replset"
   tasks:
     - *schedule_patch_auto_tasks_task
     - *schedule_variant_auto_tasks_task
@@ -1403,7 +1401,7 @@ buildvariants:
     storageEngine: wiredTiger
     compile_variant: amazon2-arm64-compile
   run_on:
-    - "rhel70-perf-replset"
+    - "rhel94-perf-replset"
   tasks:
     - *schedule_patch_auto_tasks_task
     - *schedule_variant_auto_tasks_task
@@ -1437,36 +1435,12 @@ buildvariants:
     compile_variant: amazon2-arm64-compile
     project_dir: *perf_project_dir
   run_on:
-    - "rhel70-perf-initialsync-logkeeper"
+    - "rhel94-perf-initialsync-logkeeper"
   tasks:
     - *schedule_patch_auto_tasks_task
     - *schedule_variant_auto_tasks_task
     - name: initialsync-logkeeper
     - name: initialsync-logkeeper-fcbis
-
-# Uncomment this to run logkeeper FCV updates automatically. This is only intended to be run in
-# patch builds.
-# - <<: *amazon_linux2_arm64_compile_variant_dependency
-#   name: linux-replSet-initialsync-logkeeper-snapshot-update
-#   display_name: Linux ReplSet Initial Sync LogKeeper Snapshot Update
-#   cron: "0 0 * * 4"  # 00:00 on Thursday
-#   modules: *perf_modules
-#   expansions:
-#     mongodb_setup_release: 2022-11
-#     mongodb_setup: initialsync-logkeeper-snapshot-update
-#     infrastructure_provisioning_release: 2022-11
-#     infrastructure_provisioning: initialsync-logkeeper-snapshot-update
-#     # Update this to latest snapshot after each LTS release.
-#     snapshotId: snap-0679c2f4a929231e7
-#     platform: linux
-#     authentication: disabled
-#     storageEngine: wiredTiger
-#     project_dir: *perf_project_dir
-#     compile_variant: "amazon2-arm64-compile"
-#   run_on:
-#     - "rhel70-perf-initialsync-logkeeper"
-#   tasks:
-#     - name: initialsync-logkeeper-snapshot-update
 
 - <<: *amazon_linux2_arm64_compile_variant_dependency
   name: perf-replSet-audit.arm.aws.2023-11
@@ -1485,7 +1459,7 @@ buildvariants:
     storageEngine: wiredTiger
     compile_variant: amazon2-arm64-compile
   run_on:
-    - "rhel70-perf-replset"
+    - "rhel94-perf-replset"
   tasks:
     - *schedule_patch_auto_tasks_task
     - *schedule_variant_auto_tasks_task
@@ -1508,7 +1482,7 @@ buildvariants:
     storageEngine: wiredTiger
     compile_variant: amazon2-arm64-compile
   run_on:
-    - "rhel70-perf-replset"
+    - "rhel94-perf-replset"
   tasks:
     - *schedule_patch_auto_tasks_task
     - *schedule_variant_auto_tasks_task
@@ -1530,7 +1504,7 @@ buildvariants:
     storageEngine: wiredTiger
     compile_variant: amazon2-arm64-compile
   run_on:
-    - "rhel70-perf-replset"
+    - "rhel94-perf-replset"
   tasks:
     - *schedule_patch_auto_tasks_task
     - *schedule_variant_auto_tasks_task
@@ -1554,7 +1528,7 @@ buildvariants:
     project_dir: *perf_project_dir
     compile_variant: amazon2-arm64-compile
   run_on:
-  - "rhel70-perf-microbenchmarks"
+  - "rhel94-perf-microbenchmarks"
   tasks:
   - name: genny_scale_InsertRemove
   - name: update_read_commands
@@ -1584,7 +1558,7 @@ buildvariants:
     project_dir: *perf_project_dir
     compile_variant: amazon2-arm64-compile
   run_on:
-  - "rhel70-perf-microbenchmarks"
+  - "rhel94-perf-microbenchmarks"
   # Same as standalone tasks, but with tasks required all feature flags added
   tasks: &mirobenchmarks-all-feature-flags-tasks
     - name: big_collection
@@ -1636,7 +1610,7 @@ buildvariants:
     project_dir: *perf_project_dir
     compile_variant: amazon2-arm64-compile
   run_on:
-  - "rhel70-perf-microbenchmarks"
+  - "rhel94-perf-microbenchmarks"
   tasks:
     - name: big_collection
     - name: genny_scale_InsertRemove
@@ -1690,7 +1664,7 @@ buildvariants:
     project_dir: *perf_project_dir
     compile_variant: amazon2-arm64-compile
   run_on:
-  - "rhel70-perf-microbenchmarks"
+  - "rhel94-perf-microbenchmarks"
   tasks:
     - name: big_collection
     - name: genny_scale_InsertRemove
@@ -1745,7 +1719,7 @@ buildvariants:
     project_dir: *perf_project_dir
     compile_variant: amazon2-arm64-compile
   run_on:
-  - "rhel70-perf-microbenchmarks"
+  - "rhel94-perf-microbenchmarks"
   tasks: &mongo-perf-bonsai-tasks
     - name: agg-query-comparison_read_commands
     - name: aggregation_read_commands
@@ -1772,7 +1746,7 @@ buildvariants:
     project_dir: *perf_project_dir
     compile_variant: amazon2-arm64-compile
   run_on:
-  - "rhel70-perf-microbenchmarks"
+  - "rhel94-perf-microbenchmarks"
   tasks: *mongo-perf-bonsai-tasks
 
 - <<: *linux-mongo-perf-repl-arm
@@ -1797,7 +1771,7 @@ buildvariants:
     infrastructure_provisioning: workload_client_mongod_combined_intel.2023-11
     compile_variant: amazon2-x86-compile
   run_on:
-  - "rhel70-perf-microbenchmarks"
+  - "rhel94-perf-microbenchmarks"
   tasks:
   - name: genny_scale_InsertRemove
   - name: update_read_commands
@@ -1825,7 +1799,7 @@ buildvariants:
     project_dir: *perf_project_dir
     compile_variant: amazon2-x86-compile
   run_on:
-  - "rhel70-perf-microbenchmarks"
+  - "rhel94-perf-microbenchmarks"
   tasks: *mirobenchmarks-all-feature-flags-tasks
   # yaml does not nicely merge arrays, so DO NOT ADD INDIVIDUAL TASKS HERE.
   # Add tasks to the anchor that this variant references
@@ -1840,7 +1814,7 @@ buildvariants:
     <<: *standalone-intel-expansions
     mongodb_setup: mongo-perf-standalone-classic-query-engine.2023-02
   run_on:
-  - "rhel70-perf-microbenchmarks"
+  - "rhel94-perf-microbenchmarks"
   tasks:
     - name: big_collection
     - name: genny_scale_InsertRemove
@@ -1885,7 +1859,7 @@ buildvariants:
     <<: *standalone-intel-expansions
     mongodb_setup: mongo-perf-standalone-sbe.2023-02
   run_on:
-  - "rhel70-perf-microbenchmarks"
+  - "rhel94-perf-microbenchmarks"
   tasks:
     - name: big_collection
     - name: genny_scale_InsertRemove
@@ -1931,7 +1905,7 @@ buildvariants:
     mongodb_setup: mongo-perf-standalone-sampling-bonsai.2023-02
     # Try to use the Bonsai optimizer with sampling CE mode, or fall back to the classic planner.
   run_on:
-  - "rhel70-perf-microbenchmarks"
+  - "rhel94-perf-microbenchmarks"
   tasks: *mongo-perf-bonsai-tasks
 
 - <<: *amazon2_x86_compile_variant_dependency
@@ -1944,7 +1918,7 @@ buildvariants:
     mongodb_setup: mongo-perf-standalone-heuristic-bonsai.2023-02
     # Try to use the Bonsai optimizer with heuristic CE mode, or fall back to the classic planner.
   run_on:
-    - "rhel70-perf-microbenchmarks"
+    - "rhel94-perf-microbenchmarks"
   tasks: *mongo-perf-bonsai-tasks
 
 - <<: *linux-mongo-perf-repl-intel
@@ -1976,7 +1950,7 @@ buildvariants:
     storageEngine: wiredTiger
     compile_variant: amazon2-arm64-compile
   run_on:
-    - "rhel70-perf-single"
+    - "rhel94-perf-single"
   tasks:
     - name: tsbs_query_high_cardinality
     - name: tsbs_query_medium_cardinality
@@ -1998,7 +1972,7 @@ buildvariants:
     storageEngine: wiredTiger
     compile_variant: amazon2-arm64-compile
   run_on:
-    - "rhel70-perf-single"
+    - "rhel94-perf-single"
   tasks:
     - name: tsbs_query_high_cardinality
     - name: tsbs_query_medium_cardinality
@@ -2021,37 +1995,11 @@ buildvariants:
     compile_variant: amazon2-arm64-compile
     project_dir: *perf_project_dir
   run_on:
-    - "rhel70-perf-shard"
+    - "rhel94-perf-shard"
   tasks:
     - *schedule_patch_auto_tasks_task
     - *schedule_variant_auto_tasks_task
     - name: genny_resharding_withIndexes
-
-# Uncomment this to run resharding snapshot FCV updates automatically.
-# This is only intended to be run in patch builds.
-# - <<: *amazon_linux2_arm64_compile_variant_dependency
-#   name: resharding-3shard-snapshot-update
-#   display_name: Resharding 3-Shard Snapshot Update
-#   cron: "0 0 * * 4"  # 00:00 on Thursday
-#   modules: *perf_modules
-#   expansions:
-#     mongodb_setup_release: 2022-11
-#     mongodb_setup: resharding-3shard-snapshot-update.2023-10
-#     infrastructure_provisioning_release: 2022-11
-#     infrastructure_provisioning: resharding-3shard-snapshot-update.2023-10
-#     # Update this to latest snapshot after each LTS release.
-#     snapshotId: snap-0e7434150d05e0e47 # FCV 7.3
-#     platform: linux
-#     authentication: disabled
-#     storageEngine: wiredTiger
-#     project_dir: *perf_project_dir
-#     compile_variant: amazon2-arm64-compile
-#   run_on:
-#     - "rhel70-perf-shard"
-#   tasks:
-#     - *schedule_patch_auto_tasks_task
-#     - *schedule_variant_auto_tasks_task
-#     - name: resharding-3shard-snapshot-update
 
 - <<: *amazon_linux2_arm64_compile_variant_dependency
   name: perf-3-node-replSet-query-settings.arm.aws.2023-11
@@ -2070,7 +2018,7 @@ buildvariants:
     storageEngine: wiredTiger
     compile_variant: amazon2-arm64-compile
   run_on:
-    - "rhel70-perf-replset"
+    - "rhel94-perf-replset"
   tasks:
     - *schedule_patch_auto_tasks_task
     - name: schedule_variant_auto_tasks
@@ -2106,7 +2054,7 @@ buildvariants:
     storageEngine: wiredTiger
     compile_variant: amazon2-arm64-compile
   run_on:
-    - "rhel70-perf-shard"
+    - "rhel94-perf-shard"
   tasks:
     - *schedule_patch_auto_tasks_task
     - name: schedule_variant_auto_tasks
@@ -2141,7 +2089,7 @@ buildvariants:
     compile_variant: amazon2-arm64-compile
     config_params_json: '{"v": 0, "internalQueryStatsRateLimit": 1}'
   run_on:
-    - "rhel70-perf-replset"
+    - "rhel94-perf-replset"
   tasks:
     - *schedule_patch_auto_tasks_task
     - name: schedule_variant_auto_tasks
@@ -2194,8 +2142,6 @@ buildvariants:
   modules: *perf_modules
   expansions:
     <<: *linux_arm64_generic_expansions
-    idle_timeout_factor: 1.5
-    exec_timeout_factor: 1.5
     mongodb_setup_release: 2022-11
     mongodb_setup: shard-one-node-default-sharding
     infrastructure_provisioning_release: 2023-09
@@ -2235,7 +2181,7 @@ buildvariants:
     storageEngine: wiredTiger
     compile_variant: amazon2-arm64-compile
   run_on:
-    - "rhel70-perf-replset"
+    - "rhel94-perf-replset"
   tasks:
     - *schedule_patch_auto_tasks_task
     - *schedule_variant_auto_tasks_task
@@ -2327,7 +2273,7 @@ buildvariants:
     storageEngine: wiredTiger
     compile_variant: amazon2-arm64-compile
   run_on:
-    - "rhel70-perf-replset"
+    - "rhel94-perf-replset"
   tasks:
     - *schedule_patch_auto_tasks_task
     - *schedule_variant_auto_tasks_task

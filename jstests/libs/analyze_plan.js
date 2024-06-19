@@ -2,16 +2,15 @@
 // plan. For instance, there are helpers for checking whether a plan is a collection
 // scan or whether the plan is covered (index only).
 
-import {FixtureHelpers} from "jstests/libs/fixture_helpers.js";
 import {usedBonsaiOptimizer} from "jstests/libs/optimizer_utils.js";
 
 /**
  * Returns query planner part of explain for every node in the explain report.
  */
 export function getQueryPlanners(explain) {
-    return getAllNodeExplains(explain).map(explain => {
-        const queryPlanner = getNestedProperty(explain, "queryPlanner");
-        return queryPlanner ? queryPlanner : explain;
+    return getAllNodeExplains(explain).flatMap(nodeExplain => {
+        const queryPlanners = getNestedProperties(nodeExplain, "queryPlanner");
+        return queryPlanners.length == 0 ? [nodeExplain] : queryPlanners;
     });
 }
 
@@ -44,10 +43,36 @@ export function getQueryPlanner(explain) {
  * the original explain output in case of a single replica set.
  */
 export function getAllNodeExplains(explain) {
-    const shards = getNestedProperty(explain, "shards");
+    let shardsExplain = [];
+
+    // If 'splitPipeline' is defined, there could be explains for each shard in the 'mergerPart' of
+    // the 'splitPipeline', e.g. $unionWith.
+    if (explain.splitPipeline) {
+        const splitPipelineShards = getNestedProperties(explain.splitPipeline, "shards");
+        shardsExplain.push(...splitPipelineShards.flatMap(Object.values));
+    }
+
+    if (explain.shards) {
+        shardsExplain.push(...Object.values(explain.shards));
+    }
+
+    // NOTE: When shards explain is present in the 'queryPlanner.winningPlan' the shard explains are
+    // placed in the array and therefore there is no need to call Object.values() on each element.
+    const shards = (function() {
+        if (explain.hasOwnProperty("queryPlanner") &&
+            explain.queryPlanner.hasOwnProperty("winningPlan")) {
+            return explain.queryPlanner.winningPlan.shards;
+        }
+
+        return null;
+    }());
     if (shards) {
-        const shardNames = Object.keys(shards);
-        return shardNames.map(shardName => shards[shardName]);
+        assert(Array.isArray(shards), shards);
+        shardsExplain.push(...shards);
+    }
+
+    if (shardsExplain.length > 0) {
+        return shardsExplain;
     }
     return [explain];
 }
@@ -403,21 +428,13 @@ export function getExecutionStages(root) {
  * This helper function can be used for any optimizer.
  */
 export function getExecutionStats(root) {
-    const allExecutionStats = [];
     if (root.hasOwnProperty("shards")) {
-        // This test assumes that there is only one shard in the cluster.
-        for (let shardExplain of getAllNodeExplains(root)) {
-            allExecutionStats.push(shardExplain.executionStats);
-        }
-        return allExecutionStats;
+        return Object.values(root.shards).map(shardExplain => shardExplain.executionStats);
     }
     assert(root.hasOwnProperty("executionStats"), root);
     if (root.executionStats.hasOwnProperty("executionStages") &&
         root.executionStats.executionStages.hasOwnProperty("shards")) {
-        for (let shardExecutionStats of root.executionStats.executionStages.shards) {
-            allExecutionStats.push(shardExecutionStats);
-        }
-        return allExecutionStats;
+        return root.executionStats.executionStages.shards;
     }
     return [root.executionStats];
 }
@@ -648,23 +665,10 @@ export function aggPlanHasStage(root, stage) {
 /**
  * Given the root stage of explain's BSON representation of a query plan ('root'),
  * returns true if the plan has a stage called 'stage'.
- *
- * Expects that the stage appears once or zero times per node. If the stage appears more than once
- * on one node's query plan, an error will be thrown.
  */
 export function planHasStage(db, root, stage) {
     assert(stage, "Stage was not defined in planHasStage.")
-    const matchingStages = getPlanStages(root, stage);
-
-    // If we are executing against a mongos, we may get more than one occurrence of the stage.
-    if (FixtureHelpers.isMongos(db) || TestData.testingReplicaSetEndpoint) {
-        return matchingStages.length >= 1;
-    } else {
-        assert.lt(matchingStages.length,
-                  2,
-                  `Expected to find 0 or 1 matching stages: ${tojson(matchingStages)}`);
-        return matchingStages.length === 1;
-    }
+    return getPlanStages(root, stage).length > 0;
 }
 
 /**
@@ -703,6 +707,16 @@ export function isEofPlan(db, root) {
 }
 
 /**
+ * Returns true if the plan contains fetch stages containing '$alwaysFalse' filters, or false
+ * otherwise.
+ */
+export function isAlwaysFalsePlan(root) {
+    const hasAlwaysFalseFilter = (stage) =>
+        stage && stage.filter && stage.filter["$alwaysFalse"] === 1;
+    return getPlanStages(root, "FETCH").every(hasAlwaysFalseFilter);
+}
+
+/**
  * Returns true if the BSON representation of a plan rooted at 'root' is using
  * the idhack fast path, and false otherwise. These can be represented either as
  * explicit 'IDHACK' or 'EXPRESS' stages, or as 'CLUSTERED_IXSCAN' stages with equal min & max
@@ -736,7 +750,8 @@ export function isIdhackOrExpress(db, root) {
  */
 export function isExpress(db, root) {
     return planHasStage(db, root, "EXPRESS_IXSCAN") ||
-        planHasStage(db, root, "EXPRESS_CLUSTERED_IXSCAN");
+        planHasStage(db, root, "EXPRESS_CLUSTERED_IXSCAN") ||
+        planHasStage(db, root, "EXPRESS_UPDATE") || planHasStage(db, root, "EXPRESS_DELETE");
 }
 
 /**
@@ -801,6 +816,14 @@ export function isQueryPlan(root) {
                    0) > 0;
     }
     return root.hasOwnProperty("queryPlanner");
+}
+
+/**
+ *  Returns true if every winning plan present in the explain satisfies the predicate. Returns
+ *  false otherwise.
+ */
+export function everyWinningPlan(explain, predicate) {
+    return getQueryPlanners(explain).map(getWinningPlan).every(predicate);
 }
 
 /**
@@ -1062,27 +1085,29 @@ export function assertFetchFilter({coll, predicate, expectedFilter, nReturned}) 
 }
 
 /**
- * Recursively checks if a javascript object contains a nested property key and returns the value.
- * Note, this only recurses into other objects, array elements are ignored.
- *
- * This helper function can be used for any optimizer.
+ * Recursively checks if a javascript object contains a nested property key and returns the values.
+ * NOTE: only recurses into other objects, array elements are ignored.
  */
-function getNestedProperty(object, key) {
-    if (typeof object !== "object") {
-        return null;
-    }
+function getNestedProperties(object, key) {
+    let accumulator = [];
 
-    for (const k in object) {
-        if (k == key) {
-            return object[k];
+    function traverse(object) {
+        if (typeof object !== "object") {
+            return;
         }
 
-        const result = getNestedProperty(object[k], key);
-        if (result) {
-            return result;
+        for (const k in object) {
+            if (k == key) {
+                accumulator.push(object[k]);
+            }
+
+            traverse(object[k]);
         }
+        return;
     }
-    return null;
+
+    traverse(object);
+    return accumulator;
 }
 
 /**
@@ -1091,18 +1116,9 @@ function getNestedProperty(object, key) {
  * This helper function can be used for any optimizer.
  */
 export function getEngine(explain) {
-    const sbePlans = getQueryPlanners(explain).map(
-        queryPlanner => getNestedProperty(queryPlanner, "slotBasedPlan"));
-
-    if (sbePlans.every(plan => plan)) {
-        return "sbe";
-    }
-
-    if (sbePlans.every(plan => !plan)) {
-        return "classic"
-    }
-
-    assert(false, "Some shards are using SBE, while others are using Classic");
+    const sbePlans = getQueryPlanners(explain).flatMap(
+        queryPlanner => getNestedProperties(queryPlanner, "slotBasedPlan"));
+    return sbePlans.length == 0 ? "classic" : "sbe";
 }
 
 /**

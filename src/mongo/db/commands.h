@@ -367,9 +367,8 @@ struct CommandHelpers {
      * Verifies that command is allowed to run under a transaction in the given database or
      * namespaces, and throws if that verification doesn't pass.
      */
-    static void canUseTransactions(Service* service,
-                                   const std::vector<NamespaceString>& namespaces,
-                                   StringData cmdName,
+    static void canUseTransactions(const std::vector<NamespaceString>& namespaces,
+                                   Command* command,
                                    bool allowTransactionsOnConfigDatabase);
 
     static constexpr StringData kHelpFieldName = "help"_sd;
@@ -407,6 +406,27 @@ struct CommandHelpers {
      */
     static void checkForInternalError(rpc::ReplyBuilderInterface* replyBuilder,
                                       bool isInternalClient);
+};
+
+/**
+ * Fast by-name comparision for Command.
+ *
+ * Outside of a Command instance, should generally be declared static,
+ * as the constructor does a string lookup, which is slower than the
+ * string compare we're trying to avoid.
+ *
+ * The integer indicies will be small, so we could expand the interface
+ * to use this as an array index in the future.
+ */
+class CommandNameAtom {
+public:
+    explicit CommandNameAtom(StringData s);
+
+    auto operator<=>(const CommandNameAtom&) const = default;
+    bool operator==(const CommandNameAtom&) const = default;
+
+private:
+    size_t _atom;
 };
 
 /**
@@ -453,6 +473,10 @@ public:
      */
     const std::string& getName() const {
         return _name;
+    }
+
+    CommandNameAtom getNameAtom() const {
+        return _atom;
     }
 
     /** Returns the command's aliases if any. Constant. */
@@ -624,8 +648,10 @@ public:
      *
      * Commands which implement database read or write logic should override this to return kRead
      * or kWrite as appropriate.
+     *
+     * `kLast` is only a marker to specify the number of entries in the list.
      */
-    enum class ReadWriteType { kCommand, kRead, kWrite, kTransaction };
+    enum class ReadWriteType { kCommand, kRead, kWrite, kTransaction, kLast };
     virtual ReadWriteType getReadWriteType() const {
         return ReadWriteType::kCommand;
     }
@@ -743,6 +769,7 @@ protected:
 
 private:
     const std::string _name;
+    const CommandNameAtom _atom{_name};
     const std::vector<StringData> _aliases;
 
     // Counters for how many times this command has been executed and failed
@@ -932,6 +959,10 @@ public:
      */
     virtual bool isSubjectToIngressAdmissionControl() const {
         return false;
+    }
+
+    virtual bool isReadOperation() const {
+        return _definition->getReadWriteType() == Command::ReadWriteType::kRead;
     }
 
     /**

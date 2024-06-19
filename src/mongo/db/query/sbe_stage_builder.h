@@ -190,6 +190,7 @@ public:
     static constexpr UnownedSlotName kIndexIdent = {kMeta, "indexIdent"_sd};
     static constexpr UnownedSlotName kIndexKey = {kMeta, "indexKey"_sd};
     static constexpr UnownedSlotName kIndexKeyPattern = {kMeta, "indexKeyPattern"_sd};
+    static constexpr UnownedSlotName kPrefetchedResult = {kMeta, "prefetchedResult"_sd};
     static constexpr UnownedSlotName kMetadataSearchScore = {kMeta, "metadataSearchScore"_sd};
     static constexpr UnownedSlotName kMetadataSearchHighlights = {kMeta,
                                                                   "metadataSearchHighlights"_sd};
@@ -909,6 +910,7 @@ public:
     static constexpr auto kIndexIdent = PlanStageSlots::kIndexIdent;
     static constexpr auto kIndexKey = PlanStageSlots::kIndexKey;
     static constexpr auto kIndexKeyPattern = PlanStageSlots::kIndexKeyPattern;
+    static constexpr auto kPrefetchedResult = PlanStageSlots::kPrefetchedResult;
     static constexpr auto kMetadataSearchScore = PlanStageSlots::kMetadataSearchScore;
     static constexpr auto kMetadataSearchHighlights = PlanStageSlots::kMetadataSearchHighlights;
     static constexpr auto kMetadataSearchDetails = PlanStageSlots::kMetadataSearchDetails;
@@ -1135,8 +1137,8 @@ private:
     sbe::value::FrameIdGenerator _frameIdGenerator;
     sbe::value::SpoolIdGenerator _spoolIdGenerator;
 
-    // Hash set tracking the InListDatas used by the SBE plan being built.
-    absl::flat_hash_set<InListData*> _inListsSet;
+    // Hash map tracking the InLists used by the SBE plan being built.
+    absl::flat_hash_map<const InMatchExpression*, sbe::InList*> _inListsMap;
 
     // Hash set tracking the Collators used by the SBE plan being built.
     absl::flat_hash_map<const CollatorInterface*, const CollatorInterface*> _collatorsMap;

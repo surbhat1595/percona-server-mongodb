@@ -161,8 +161,8 @@ DbResponse ClusterCommandTestFixture::runCommand(BSONObj cmd) {
     }
 
     AlternativeClientRegion acr(client);
-    auto rec = std::make_shared<RequestExecutionContext>(opCtx.get(), opMsgRequest.serialize());
-    return Strategy::clientCommand(std::move(rec)).get();
+    auto rec = RequestExecutionContext(opCtx.get(), opMsgRequest.serialize());
+    return Strategy::clientCommand(&rec);
 }
 
 DbResponse ClusterCommandTestFixture::runCommandSuccessful(BSONObj cmd, bool isTargeted) {
@@ -262,15 +262,32 @@ void ClusterCommandTestFixture::runTxnCommandMaxErrors(BSONObj cmd,
     future.default_timed_get();
 }
 
-void ClusterCommandTestFixture::testNoErrors(BSONObj targetedCmd, BSONObj scatterGatherCmd) {
+std::vector<DbResponse> ClusterCommandTestFixture::testNoErrors(BSONObj targetedCmd,
+                                                                BSONObj scatterGatherCmd) {
 
+    std::vector<DbResponse> commandResponses;
     // Target one shard.
-    runCommandSuccessful(_makeCmd(targetedCmd), true);
+    commandResponses.emplace_back(runCommandSuccessful(_makeCmd(targetedCmd), true));
 
     // Target all shards.
     if (!scatterGatherCmd.isEmpty()) {
-        runCommandSuccessful(_makeCmd(scatterGatherCmd), false);
+        commandResponses.emplace_back(runCommandSuccessful(_makeCmd(scatterGatherCmd), false));
     }
+    return commandResponses;
+}
+
+std::vector<DbResponse> ClusterCommandTestFixture::testNoErrorsOutsideTransaction(
+    BSONObj targetedCmd, BSONObj scatterGatherCmd) {
+
+    std::vector<DbResponse> commandResponses;
+    // Target one shard.
+    commandResponses.emplace_back(runCommandSuccessful(targetedCmd, true));
+
+    // Target all shards.
+    if (!scatterGatherCmd.isEmpty()) {
+        commandResponses.emplace_back(runCommandSuccessful(scatterGatherCmd, false));
+    }
+    return commandResponses;
 }
 
 void ClusterCommandTestFixture::testRetryOnSnapshotError(BSONObj targetedCmd,

@@ -268,7 +268,7 @@ FLEEdgeCountInfo convertTokensToEdgeCount(const QECountInfoReplyTokens& token) {
     auto esc =
         FLETokenFromCDR<FLETokenType::ESCTwiceDerivedTagToken>(token.getESCTwiceDerivedTagToken());
 
-    return FLEEdgeCountInfo(token.getCount(), esc, spos, npos, token.getStats(), edc);
+    return FLEEdgeCountInfo(token.getCount(), esc.data, spos, npos, token.getStats(), edc);
 }
 
 std::vector<std::vector<FLEEdgeCountInfo>> toEdgeCounts(
@@ -408,13 +408,17 @@ insertSingleDocument(OperationContext* opCtx,
     auto reply = std::make_shared<write_ops::InsertCommandReply>();
     auto service = opCtx->getService();
 
+    auto baseStmtId = *stmtId;
     auto swResult = trun->runNoThrow(
         opCtx,
-        [service, sharedInsertBlock, reply, ownedDocument, bypassDocumentValidation](
+        [service, sharedInsertBlock, reply, ownedDocument, bypassDocumentValidation, baseStmtId](
             const txn_api::TransactionClient& txnClient, ExecutorPtr txnExec) {
             FLEQueryInterfaceImpl queryImpl(txnClient, service);
 
             auto [edcNss2, efc2, serverPayload2, stmtId2] = *sharedInsertBlock.get();
+
+            // Reset the statement ID in case of transient transaction retries
+            *stmtId2 = baseStmtId;
 
             if (MONGO_unlikely(fleCrudHangPreInsert.shouldFail())) {
                 LOGV2(6516701, "Hanging due to fleCrudHangPreInsert fail point");
@@ -795,8 +799,8 @@ void processFieldsForInsertV2(FLEQueryInterface* queryImpl,
         for (auto const& countInfo : countInfos) {
             serverPayload[i].counts.push_back(countInfo.count);
 
-            escDocuments.push_back(
-                ESCCollection::generateNonAnchorDocument(countInfo.tagToken, countInfo.count));
+            escDocuments.push_back(ESCCollection::generateNonAnchorDocument(
+                ESCTwiceDerivedTagToken(countInfo.tagTokenData), countInfo.count));
         }
     }
 
@@ -1631,6 +1635,8 @@ QECountInfoQueryTypeEnum queryTypeTranslation(FLEQueryInterface::TagQueryType ty
             return QECountInfoQueryTypeEnum::Compact;
         case FLEQueryInterface::TagQueryType::kCleanup:
             return QECountInfoQueryTypeEnum::Cleanup;
+        case FLEQueryInterface::TagQueryType::kPadding:
+            return QECountInfoQueryTypeEnum::Padding;
         default:
             uasserted(7517101, "Invalid TagQueryType value.");
     }

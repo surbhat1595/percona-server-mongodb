@@ -225,30 +225,6 @@ env.Library(
     ],
 )
 
-env.Library(
-    target='namespace_string_database_name_util',
-    source=[
-        'database_name_util.cpp',
-        'namespace_string_util.cpp',
-    ],
-    LIBDEPS=[
-        '$BUILD_DIR/mongo/db/auth/security_token',
-        '$BUILD_DIR/mongo/db/server_base',
-        '$BUILD_DIR/mongo/db/server_feature_flags',
-    ],
-)
-
-env.CppUnitTest(
-    target='namespace_string_database_name_util_test',
-    source=[
-        'database_name_util_test.cpp',
-        'namespace_string_util_test.cpp',
-    ],
-    LIBDEPS=[
-        'namespace_string_database_name_util',
-    ],
-)
-
 env.CppUnitTest(
     target='concurrent_shared_values_map_test',
     source=[
@@ -439,10 +415,11 @@ if tcmallocAttrs:
             'heap_profiler.cpp',
         ],
         LIBDEPS_PRIVATE=[
-            '$BUILD_DIR/mongo/base',
-            '$BUILD_DIR/mongo/db/commands/server_status_core',
-            '$BUILD_DIR/mongo/db/server_base',
-            'tcmalloc_set_parameter',
+            "$BUILD_DIR/mongo/base",
+            "$BUILD_DIR/mongo/db/commands/server_status_core",
+            "$BUILD_DIR/mongo/db/server_base",
+            "processinfo",
+            "tcmalloc_set_parameter",
         ],
     )
 
@@ -599,6 +576,9 @@ env.Library(
         '$BUILD_DIR/mongo/base',
         '$BUILD_DIR/mongo/db/log_process_details',
         '$BUILD_DIR/mongo/db/service_context',
+    ],
+    LIBDEPS_PRIVATE=[
+        '$BUILD_DIR/mongo/db/server_base',
     ],
 )
 
@@ -888,6 +868,7 @@ icuEnv.CppUnitTest(
         'hierarchical_acquisition_test.cpp',
         'icu_test.cpp',
         "inlined_storage_test.cpp",
+        'inline_memory_test.cpp',
         'interruptible_test.cpp',
         'invalidating_lru_cache_test.cpp',
         'itoa_test.cpp',
@@ -1043,6 +1024,11 @@ env.Benchmark(
 env.Benchmark(
     target='cancellation_bm',
     source='cancellation_bm.cpp',
+)
+
+env.Benchmark(
+    target='inline_memory_bm',
+    source='inline_memory_bm.cpp',
 )
 
 env.Benchmark(

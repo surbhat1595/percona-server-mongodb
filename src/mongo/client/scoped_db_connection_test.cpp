@@ -41,6 +41,9 @@
 #include "mongo/dbtests/mock/mock_conn_registry.h"
 #include "mongo/dbtests/mock/mock_remote_db_server.h"
 #include "mongo/executor/connection_pool_stats.h"
+#include "mongo/logv2/log_component.h"
+#include "mongo/logv2/log_manager.h"
+#include "mongo/logv2/log_severity.h"
 #include "mongo/unittest/assert.h"
 #include "mongo/unittest/assert_that.h"
 #include "mongo/unittest/framework.h"
@@ -48,12 +51,18 @@
 #include "mongo/unittest/matcher_core.h"
 #include "mongo/util/fail_point.h"
 #include "mongo/util/net/hostandport.h"
+#include "mongo/util/time_support.h"
 
 namespace mongo {
 namespace {
 class ConnectionPoolTest : public unittest::Test {
 public:
     void setUp() override {
+        auto& settings = logv2::LogManager::global().getGlobalSettings();
+        _originalSeverity = settings.getMinimumLogSeverity(logv2::LogComponent::kNetwork).toInt();
+        settings.setMinimumLoggedSeverity(logv2::LogComponent::kNetwork,
+                                          logv2::LogSeverity::Debug(1));
+
         ConnectionString::setConnectionHook(MockConnRegistry::get()->getConnStrHook());
         _mockServer = std::make_unique<MockRemoteDBServer>(_hostName);
         MockConnRegistry::get()->addServer(_mockServer.get());
@@ -61,6 +70,10 @@ public:
 
     void tearDown() override {
         MockConnRegistry::get()->removeServer(_hostName);
+
+        auto& settings = logv2::LogManager::global().getGlobalSettings();
+        settings.setMinimumLoggedSeverity(logv2::LogComponent::kNetwork,
+                                          logv2::LogSeverity::cast(_originalSeverity));
     }
 
     auto getServerHostAndPort() const {
@@ -70,6 +83,7 @@ public:
 private:
     std::string _hostName = "$local";
     std::unique_ptr<MockRemoteDBServer> _mockServer;
+    int _originalSeverity;
 };
 
 TEST_F(ConnectionPoolTest, ConnectionPoolHistogramStats) {
@@ -81,6 +95,8 @@ TEST_F(ConnectionPoolTest, ConnectionPoolHistogramStats) {
     executor::ConnectionPoolStats stats{};
 
     ScopedDbConnection conn(host);
+    auto connTime = globalConnPool.getPoolHostConnTime_forTest(host, 0).count();
+
     ASSERT_TRUE(conn.ok());
     globalConnPool.appendConnectionStats(&stats);
 
@@ -94,7 +110,17 @@ TEST_F(ConnectionPoolTest, ConnectionPoolHistogramStats) {
 
         return expected;
     };
-    ASSERT_THAT(histogram, AnyOf(Eq(makeExpected(2)), Eq(makeExpected(3))));
+
+    const auto pos = [&]() -> size_t {
+        using namespace executor::details;
+        if (connTime >= kMaxPartitionSize) {
+            return histogram.size() - 1;
+        } else if (connTime < kStartSize) {
+            return 0;
+        }
+        return ((connTime - kStartSize) / kPartitionStepSize) + 1;
+    }();
+    ASSERT_EQ(histogram, makeExpected(pos));
 }
 }  // namespace
 }  // namespace mongo

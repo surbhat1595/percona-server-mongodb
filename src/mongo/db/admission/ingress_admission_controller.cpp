@@ -54,7 +54,8 @@ void IngressAdmissionController::init() {
     _ticketHolder =
         std::make_unique<SemaphoreTicketHolder>(&getIngressAdmissionController.owner(*this),
                                                 gIngressAdmissionControllerTicketPoolSize.load(),
-                                                false);
+                                                false,
+                                                SemaphoreTicketHolder::ResizePolicy::kImmediate);
 }
 
 IngressAdmissionController& IngressAdmissionController::get(OperationContext* opCtx) {
@@ -64,16 +65,28 @@ IngressAdmissionController& IngressAdmissionController::get(OperationContext* op
 Ticket IngressAdmissionController::admitOperation(OperationContext* opCtx) {
     auto& admCtx = IngressAdmissionContext::get(opCtx);
 
+    // The way ingress admission works, one ticket should cover _all_ the work for the operation.
+    // Therefore, if the operation has already been admitted by IngressAdmissionController, all of
+    // the subsequent admissions of the same operation (e.g. via DBDirectClient) should perform work
+    // under the same ticket.
+    // NOTE: This tassert is currently somewhat superfluous, since we already ensure we this
+    // condition holds inside ExecCommandDatabase::_initiateCommand(), but we're leaving it in to
+    // make sure future changes don't violate this condition.
+    tassert(9143000,
+            "Operation may not hold more than one ingress admission ticket at a time",
+            !admCtx.isHoldingTicket() ||
+                admCtx.getPriority() == AdmissionContext::Priority::kExempt);
+
     // Try to get the ticket without waiting
     if (auto ticket = _ticketHolder->tryAcquire(&admCtx)) {
         return std::move(*ticket);
     }
 
-    return _ticketHolder->waitForTicket(*opCtx, &admCtx);
+    return _ticketHolder->waitForTicket(opCtx, &admCtx);
 }
 
-void IngressAdmissionController::resizeTicketPool(int32_t newSize) {
-    uassert(8611200, "Failed to resize ticket pool", _ticketHolder->resize(newSize));
+void IngressAdmissionController::resizeTicketPool(OperationContext* opCtx, int32_t newSize) {
+    uassert(8611200, "Failed to resize ticket pool", _ticketHolder->resize(opCtx, newSize));
 }
 
 void IngressAdmissionController::appendStats(BSONObjBuilder& b) const {
@@ -81,10 +94,12 @@ void IngressAdmissionController::appendStats(BSONObjBuilder& b) const {
 }
 
 Status IngressAdmissionController::onUpdateTicketPoolSize(int32_t newValue) try {
-    auto* svcCtx = getCurrentServiceContext();
-    if (svcCtx != nullptr) {
-        getIngressAdmissionController(svcCtx).resizeTicketPool(newValue);
+    if (auto client = Client::getCurrent()) {
+        auto opCtx = client->getOperationContext();
+        getIngressAdmissionController(client->getServiceContext())
+            .resizeTicketPool(opCtx, newValue);
     }
+
     return Status::OK();
 } catch (const DBException& ex) {
     return ex.toStatus();

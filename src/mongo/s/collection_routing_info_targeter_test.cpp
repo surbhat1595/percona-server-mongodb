@@ -75,7 +75,6 @@
 namespace mongo {
 namespace {
 
-using unittest::assertGet;
 
 const NamespaceString kNss = NamespaceString::createNamespaceString_forTest("TestDB", "TestColl");
 
@@ -1281,7 +1280,7 @@ TEST_F(CollectionRoutingInfoTargeterTimeseriesTest, TargetWritesToUnsplittableTi
     };
 
     CollectionRoutingInfoTargeter cri(operationContext(), nss);
-    ASSERT_EQ(1, cri.getNShardsOwningChunks());
+    ASSERT_EQ(1, cri.getAproxNShardsOwningChunks());
 
     // Insert
     const auto endpointInsert = cri.targetInsert(operationContext(), BSON("x" << 1));
@@ -1324,7 +1323,7 @@ TEST_F(CollectionRoutingInfoTargeterTimeseriesTest, TargetWritesToShardedTimeser
     };
 
     CollectionRoutingInfoTargeter cri(operationContext(), nss);
-    ASSERT_EQ(2, cri.getNShardsOwningChunks());
+    ASSERT_EQ(2, cri.getAproxNShardsOwningChunks());
 
     // Insert
     {
@@ -1387,7 +1386,7 @@ TEST_F(CollectionRoutingInfoTargeterTimeseriesTest, UntrackedAreNotTranslatedToB
     ASSERT_EQ(nss, cri.getNS());
     ASSERT_EQ(false, cri.isTrackedTimeSeriesBucketsNamespace());
     ASSERT_FALSE(cri.timeseriesNamespaceNeedsRewrite(nss));
-    ASSERT_EQ(0, cri.getNShardsOwningChunks());
+    ASSERT_EQ(0, cri.getAproxNShardsOwningChunks());
 }
 
 TEST_F(CollectionRoutingInfoTargeterTimeseriesTest, TrackedAreTranslatedToBucketsNs) {

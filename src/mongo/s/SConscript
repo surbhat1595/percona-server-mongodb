@@ -42,6 +42,7 @@ env.Library(
         'write_ops/batch_write_op.cpp',
         'write_ops/bulk_write_exec.cpp',
         'write_ops/coordinate_multi_update_util.cpp',
+        'write_ops/pause_migrations_during_multi_updates_enablement.cpp',
         'write_ops/write_op.cpp',
         'write_ops/write_without_shard_key_util.cpp',
     ],
@@ -215,7 +216,6 @@ env.Library(
         '$BUILD_DIR/mongo/db/repl/repl_coordinator_interface',
         '$BUILD_DIR/mongo/db/repl/repl_settings',
         '$BUILD_DIR/mongo/db/server_base',
-        '$BUILD_DIR/mongo/util/namespace_string_database_name_util',
     ],
 )
 
@@ -235,21 +235,14 @@ env.Library(
         'catalog/type_index_catalog.idl',
         'catalog/type_mongos.cpp',
         'catalog/type_namespace_placement.idl',
+        "catalog/type_remove_shard_event.idl",
         'catalog/type_shard.cpp',
         'catalog/type_tags.cpp',
         'check_metadata_consistency.idl',
         'chunk.cpp',
         'chunk_manager.cpp',
-        'chunk_version.cpp',
-        'chunk_version.idl',
         'configure_query_analyzer_cmd.idl',
-        'database_version.cpp',
-        'database_version.idl',
-        'database_version_base.idl',
         'error_status.idl',
-        'gossiped_routing_cache.idl',
-        'index_version.cpp',
-        'index_version.idl',
         'migration_blocking_operation/migration_blocking_operation_cluster_parameters.idl',
         'migration_blocking_operation/migration_blocking_operation_feature_flags.idl',
         'mongod_and_mongos_server_parameters.idl',
@@ -285,6 +278,7 @@ env.Library(
         'request_types/set_allow_migrations.idl',
         'request_types/sharded_ddl_commands.idl',
         'request_types/shardsvr_join_migrations_request.idl',
+        'request_types/shardsvr_join_ddl_coordinators_request.idl',
         'request_types/transition_from_dedicated_config_server.idl',
         'request_types/transition_to_dedicated_config_server.idl',
         'request_types/update_zone_key_range_request_type.cpp',
@@ -296,17 +290,16 @@ env.Library(
         'resharding/type_collection_fields.idl',
         'shard_cannot_refresh_due_to_locks_held_exception.cpp',
         'shard_key_pattern.cpp',
-        'shard_version.cpp',
-        'shard_version.idl',
         'shard_version_factory.cpp',
         'sharding_feature_flags.cpp',
         'sharding_feature_flags.idl',
         'stale_exception.cpp',
         'type_collection_common_types.idl',
+        'transaction_participant_failed_unyield_exception.cpp',
         'would_change_owning_shard_exception.cpp',
     ],
     LIBDEPS=[
-        '$BUILD_DIR/mongo/util/namespace_string_database_name_util',
+        '$BUILD_DIR/mongo/db/server_base',
         'analyze_shard_key_common',
     ],
     LIBDEPS_PRIVATE=[
@@ -324,10 +317,10 @@ env.Library(
         '$BUILD_DIR/mongo/db/metadata_consistency_types_idl',
         '$BUILD_DIR/mongo/db/mongohasher',
         '$BUILD_DIR/mongo/db/query/query_shape/query_shape',
-        '$BUILD_DIR/mongo/db/server_base',
         '$BUILD_DIR/mongo/db/storage/key_string',
         '$BUILD_DIR/mongo/db/timeseries/timeseries_options',
         '$BUILD_DIR/mongo/executor/async_rpc_error_info',
+        '$BUILD_DIR/mongo/rpc/command_status',
         '$BUILD_DIR/mongo/rpc/message',
         '$BUILD_DIR/mongo/util/caching',
     ],
@@ -665,6 +658,20 @@ env.Library(
 )
 
 env.CppUnitTest(
+    target='multi_statement_transaction_requests_sender_test',
+    source=[
+        'multi_statement_transaction_requests_sender_test.cpp',
+    ],
+    LIBDEPS=[
+        '$BUILD_DIR/mongo/db/s/shard_server_test_fixture',
+        '$BUILD_DIR/mongo/db/session/session_catalog_mongod',
+        'commands/cluster_commands',
+        'sharding_api',
+        'sharding_mongos_test_fixture',
+    ],
+)
+
+env.CppUnitTest(
     target='s_test',
     source=[
         'append_raw_responses_test.cpp',
@@ -700,7 +707,6 @@ env.CppUnitTest(
         'mock_ns_targeter.cpp',
         'mongos_core_options_stub.cpp',
         'mongos_topology_coordinator_test.cpp',
-        'multi_statement_transaction_requests_sender_test.cpp',
         'query_analysis_sample_tracker_test.cpp',
         'query_analysis_sampler_test.cpp',
         'request_types/add_shard_request_test.cpp',

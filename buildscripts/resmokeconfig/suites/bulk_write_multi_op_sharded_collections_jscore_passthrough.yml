@@ -41,9 +41,6 @@ selector:
   - jstests/core/**/create_indexes.js
   - jstests/core/**/list_indexes_non_existent_ns.js
   - jstests/core/**/mr_preserve_indexes.js
-  # These tests fail because sharded clusters do not clean up correctly after failed index builds.
-  # See SERVER-33207 as an example.
-  - jstests/core/**/geo_borders.js
   # TODO: Remove after fixing SERVER-29449. executionStats.nReturned is incorrect for sharded
   # queries with a limit or for distinct commands.
   - jstests/core/**/distinct_index1.js
@@ -85,6 +82,11 @@ selector:
   - jstests/core/txns/timeseries/timeseries_reads_in_txns.js
   - jstests/core/txns/timeseries_insert_in_txn.js
   - jstests/core/txns/txn_ops_allowed_on_buckets_coll.js
+  - jstests/core/write/empty_ts.js
+  - jstests/core/write/empty_ts_bulk_write.js
+  - jstests/core/write/bypass_empty_ts_replacement.js
+  - jstests/core/write/bypass_empty_ts_replacement_bulk_write.js
+  - jstests/core/write/bypass_empty_ts_replacement_timeseries.js
 
   # Multiple cluster override does not support QE
   - jstests/core/queryable_encryption/*.js

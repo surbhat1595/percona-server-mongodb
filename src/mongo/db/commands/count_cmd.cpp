@@ -245,9 +245,8 @@ public:
                                                           viewAggregation.getValue())
                                   .body;
             auto viewAggRequest = aggregation_request_helper::parseFromBSON(
-                opCtx,
-                nss,
                 viewAggCmd,
+                opMsgRequest.validatedTenancyScope,
                 verbosity,
                 APIParameters::get(opCtx).getAPIStrict().value_or(false),
                 serializationCtx);
@@ -408,7 +407,7 @@ public:
         if (collection) {
             CollectionQueryInfo::get(collection).notifyOfQuery(opCtx, collection, summaryStats);
         }
-        curOp->debug().setPlanSummaryMetrics(summaryStats);
+        curOp->debug().setPlanSummaryMetrics(std::move(summaryStats));
 
         if (curOp->shouldDBProfile()) {
             auto&& explainer = exec->getPlanExplainer();

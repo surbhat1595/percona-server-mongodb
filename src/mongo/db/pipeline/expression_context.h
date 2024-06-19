@@ -427,10 +427,8 @@ public:
      * created yet. Initializes the Scope with the 'jsScope' variables from the runtimeConstants.
      * Loads the Scope with the functions stored in system.js if the expression isn't executed on
      * mongos and is called from a MapReduce command or `forceLoadOfStoredProcedures` is true.
-     *
-     * Returns a JsExec and a boolean indicating whether the Scope was created as part of this call.
      */
-    auto getJsExecWithScope(bool forceLoadOfStoredProcedures = false) const {
+    JsExecution* getJsExecWithScope(bool forceLoadOfStoredProcedures = false) const {
         uassert(31264,
                 "Cannot run server-side javascript without the javascript engine enabled",
                 getGlobalScriptEngine());
@@ -452,9 +450,17 @@ public:
                       "$where.");
         }
 
-        auto scopeObj = BSONObj();
+        // If there is a cached JsExecution object, return it. This is a performance optimization
+        // that avoids potentially copying the scope object, which is not needed if a cached exec
+        // object already exists.
+        JsExecution* jsExec = JsExecution::getCached(opCtx, loadStoredProcedures);
+        if (jsExec) {
+            return jsExec;
+        }
+
+        BSONObj scopeObj = BSONObj();
         if (variables.hasValue(Variables::kJsScopeId)) {
-            auto scopeVar = variables.getValue(Variables::kJsScopeId);
+            Value scopeVar = variables.getValue(Variables::kJsScopeId);
             invariant(scopeVar.isObject());
             scopeObj = scopeVar.getDocument().toBson();
         }
@@ -648,6 +654,18 @@ public:
     // expression counting.
     bool enabledCounters = true;
 
+    // Forces the plan cache to be used even if there's only one solution available. Queries that
+    // are ineligible will still not be cached.
+    bool forcePlanCache = false;
+
+    // Keep track of the server-side Javascript operators used in the query. These flags will be set
+    // at parse time if applicable.
+    struct {
+        bool accumulator = false;
+        bool function = false;
+        bool where = false;
+    } hasServerSideJs;
+
     // Returns true if we've received a TemporarilyUnavailableException.
     bool getTemporarilyUnavailableException() {
         return _gotTemporarilyUnavailableException;
@@ -668,23 +686,28 @@ public:
     }
 
     const query_settings::QuerySettings& getQuerySettings() const {
-        return _querySettings;
+        static const auto kEmptySettings = query_settings::QuerySettings();
+        return _querySettings.get_value_or(kEmptySettings);
     }
 
-    const QueryKnobConfiguration& getQueryKnobConfiguration() const {
-        return _queryKnobConfiguration.get(_querySettings);
-    }
+    /**
+     * Attaches 'querySettings' to context if they were not previously set.
+     */
+    void setQuerySettingsIfNotPresent(query_settings::QuerySettings querySettings) {
+        if (_querySettings.has_value()) {
+            return;
+        }
 
-    void setQuerySettings(query_settings::QuerySettings querySettings) {
-        _querySettings = std::move(querySettings);
         tassert(8827100,
                 "Query knobs shouldn't be initialized before query settings are set",
                 !_queryKnobConfiguration.isInitialized());
+
+        _querySettings = std::move(querySettings);
     }
 
-    // Forces the plan cache to be used even if there's only one solution available. Queries that
-    // are ineligible will still not be cached.
-    bool forcePlanCache = false;
+    const QueryKnobConfiguration& getQueryKnobConfiguration() const {
+        return _queryKnobConfiguration.get(getQuerySettings());
+    }
 
     // This is state that is to be shared between the DocumentInternalSearchMongotRemote and
     // DocumentInternalSearchIdLookup stages (these stages are the result of desugaring $search)
@@ -811,7 +834,9 @@ private:
     // is being executed (if the variable was referenced, it is an element of this set).
     stdx::unordered_set<Variables::Id> _systemVarsReferencedInQuery;
 
-    query_settings::QuerySettings _querySettings = query_settings::QuerySettings();
+    std::once_flag _querySettingsAttached;
+
+    boost::optional<query_settings::QuerySettings> _querySettings = boost::none;
 
     DeferredFn<QueryKnobConfiguration, const query_settings::QuerySettings&>
         _queryKnobConfiguration{[](const auto& querySettings) {

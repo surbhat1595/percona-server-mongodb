@@ -22,7 +22,11 @@ const st = new ShardingTest({
         rsOptions: {
             binVersion: "last-lts",
         },
-        rs: {nodes: 2},
+        rs: {
+            nodes: 2,
+            // Reserving enough of oplog space to accommodate 4 nearly 16MB-large changes.
+            oplogSize: 16 * 5
+        }
     }
 });
 
@@ -110,7 +114,7 @@ assert.commandWorked(st.s.adminCommand({reshardCollection: testColl.getFullName(
 expectedEvents.push({operationType: "reshardCollection"});
 
 assert.commandWorked(testColl.dropIndex({largeField: 1}));
-expectedEvents.push({operationType: "dropIndexes"});
+expectedEvents.push({operationType: "dropIndexes"}, {operationType: "dropIndexes"});
 
 const newTestCollectionName = "test_";
 assert.commandWorked(testColl.renameCollection(newTestCollectionName));
@@ -127,6 +131,32 @@ assert.commandWorked(testDB.dropDatabase());
 expectedEvents.push({operationType: "dropDatabase"},
                     {operationType: "invalidate"},
                     {operationType: "dropDatabase"});
+
+// Leave only one of two "dropIndexes" events when they have identical resume tokens, because the
+// second event will be skipped when resuming from the first event's token in such a case.
+// TODO SERVER-90023: Remove this workaround when no longer needed.
+{
+    // We cannot use {$match: {operationType: "dropIndexes"}} here, because "kNewShardDetected"
+    // cannot be filtered out this way. Therefore, we filter events in a while-loop below.
+    const csCursor = testDB.watch([], {
+        showExpandedEvents: true,
+        startAfter: testStartV1HWMToken,
+        $_generateV2ResumeTokens: false
+    });
+    const dropIndexesEvents = [];
+    while (csCursor.hasNext()) {
+        const event = csCursor.next();
+        if (event.operationType === "dropIndexes") {
+            dropIndexesEvents.push(event);
+        }
+    }
+    csCursor.close();
+    assert.eq(2, dropIndexesEvents.length, "unexpected number of 'dropIndexes' events");
+    if (bsonWoCompare(dropIndexesEvents[0]._id, dropIndexesEvents[1]._id) === 0) {
+        expectedEvents.splice(
+            expectedEvents.findIndex((event) => (event.operationType === "dropIndexes")), 1);
+    }
+}
 
 // Helper function to assert on the given event fields.
 function assertEventMatches(event, expectedEvent, errorMsg) {

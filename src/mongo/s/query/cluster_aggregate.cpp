@@ -110,6 +110,8 @@ constexpr unsigned ClusterAggregate::kMaxViewRetries;
 using sharded_agg_helpers::PipelineDataSource;
 
 namespace {
+// Ticks for server-side Javascript deprecation log messages.
+Rarely _samplerAccumulatorJs, _samplerFunctionJs;
 
 // "Resolve" involved namespaces into a map. We won't try to execute anything on a mongos, but we
 // still have to populate this map so that any $lookups, etc. will be able to have a resolved view
@@ -203,7 +205,9 @@ void updateHostsTargetedMetrics(OperationContext* opCtx,
 
         if (cm->isSharded()) {
             std::set<ShardId> shardIdsForNs;
-            cm->getAllShardIds(&shardIdsForNs);
+            // Note: It is fine to use 'getAllShardIds_UNSAFE_NotPointInTime' here because the
+            // result is only used to update stats.
+            cm->getAllShardIds_UNSAFE_NotPointInTime(&shardIdsForNs);
             for (const auto& shardId : shardIdsForNs) {
                 shardsIds.insert(shardId);
             }
@@ -217,7 +221,9 @@ void updateHostsTargetedMetrics(OperationContext* opCtx,
                 uassertStatusOK(getCollectionRoutingInfoForTxnCmd(opCtx, nss));
             if (resolvedNsCM.isSharded()) {
                 std::set<ShardId> shardIdsForNs;
-                resolvedNsCM.getAllShardIds(&shardIdsForNs);
+                // Note: It is fine to use 'getAllShardIds_UNSAFE_NotPointInTime' here because the
+                // result is only used to update stats.
+                resolvedNsCM.getAllShardIds_UNSAFE_NotPointInTime(&shardIdsForNs);
                 for (const auto& shardId : shardIdsForNs) {
                     shardsIds.insert(shardId);
                 }
@@ -339,14 +345,18 @@ std::unique_ptr<Pipeline, PipelineDeleter> parsePipelineAndRegisterQueryStats(
     auto pipeline = Pipeline::parse(request.getPipeline(), expCtx);
     // Skip query stats recording for queryable encryption queries.
     if (!shouldDoFLERewrite) {
-        query_stats::registerRequest(opCtx, executionNss, [&]() {
-            return std::make_unique<query_stats::AggKey>(
-                request, *pipeline, expCtx, involvedNamespaces, executionNss);
-        });
+        query_stats::registerRequest(
+            opCtx,
+            executionNss,
+            [&]() {
+                return std::make_unique<query_stats::AggKey>(
+                    request, *pipeline, expCtx, involvedNamespaces, executionNss);
+            },
+            hasChangeStream);
     }
 
     // Perform the query settings lookup and attach it to the ExpressionContext.
-    expCtx->setQuerySettings(query_settings::lookupQuerySettingsForAgg(
+    expCtx->setQuerySettingsIfNotPresent(query_settings::lookupQuerySettingsForAgg(
         expCtx, request, *pipeline, involvedNamespaces, executionNss));
 
     return pipeline;
@@ -568,16 +578,34 @@ Status ClusterAggregate::runAggregate(OperationContext* opCtx,
                                                    request.getLet());
         expCtx->addResolvedNamespaces(involvedNamespaces);
 
+
+        // We might need 'inMongos' temporarily set to true for query stats parsing, but we don't
+        // want to modify the value of 'expCtx' for future code execution so we will set it back to
+        // its original value.
+        ON_BLOCK_EXIT([&expCtx, originalInMongosVal = expCtx->inMongos]() {
+            expCtx->inMongos = originalInMongosVal;
+        });
+
+        // In order to parse a change stream request for query stats, 'inMongos' needs
+        // to be set to true.
+        if (hasChangeStream) {
+            expCtx->inMongos = true;
+        }
+
         // Skip query stats recording for queryable encryption queries.
         if (!shouldDoFLERewrite) {
             // We want to hold off parsing the pipeline until it's clear we must. Because of that,
             // we wait to parse the pipeline until this callback is invoked within
             // query_stats::registerRequest.
-            query_stats::registerRequest(opCtx, namespaces.executionNss, [&]() {
-                auto pipeline = Pipeline::parse(request.getPipeline(), expCtx);
-                return std::make_unique<query_stats::AggKey>(
-                    request, *pipeline, expCtx, involvedNamespaces, namespaces.executionNss);
-            });
+            query_stats::registerRequest(
+                opCtx,
+                namespaces.executionNss,
+                [&]() {
+                    auto pipeline = Pipeline::parse(request.getPipeline(), expCtx);
+                    return std::make_unique<query_stats::AggKey>(
+                        request, *pipeline, expCtx, involvedNamespaces, namespaces.executionNss);
+                },
+                hasChangeStream);
         }
     }
 
@@ -633,7 +661,7 @@ Status ClusterAggregate::runAggregate(OperationContext* opCtx,
                     return cluster_aggregation_planner::dispatchPipelineAndMerge(
                         opCtx,
                         std::move(targeter),
-                        aggregation_request_helper::serializeToCommandDoc(request),
+                        aggregation_request_helper::serializeToCommandDoc(expCtx, request),
                         request.getCursor().getBatchSize().value_or(
                             aggregation_request_helper::kDefaultBatchSize),
                         namespaces,
@@ -661,7 +689,7 @@ Status ClusterAggregate::runAggregate(OperationContext* opCtx,
                         expCtx,
                         namespaces,
                         request.getExplain(),
-                        aggregation_request_helper::serializeToCommandDoc(request),
+                        aggregation_request_helper::serializeToCommandDoc(expCtx, request),
                         privileges,
                         shardId,
                         eligibleForSampling,
@@ -676,26 +704,42 @@ Status ClusterAggregate::runAggregate(OperationContext* opCtx,
         }
     }();
 
+    if (status.code() != ErrorCodes::CommandOnShardedViewNotSupportedOnMongod) {
+        // Increment counters and set flags even in case of failed aggregate commands.
+        // But for views on a sharded cluster, aggregation runs twice. First execution fails
+        // because the namespace is a view, and then it is re-run with resolved view pipeline
+        // and namespace.
+        liteParsedPipeline.tickGlobalStageCounters();
+
+        if (expCtx->hasServerSideJs.accumulator && _samplerAccumulatorJs.tick()) {
+            LOGV2_WARNING(
+                8996506,
+                "$accumulator is deprecated. For more information, see "
+                "https://www.mongodb.com/docs/manual/reference/operator/aggregation/accumulator/");
+        }
+
+        if (expCtx->hasServerSideJs.function && _samplerFunctionJs.tick()) {
+            LOGV2_WARNING(
+                8996507,
+                "$function is deprecated. For more information, see "
+                "https://www.mongodb.com/docs/manual/reference/operator/aggregation/function/");
+        }
+    }
 
     if (status.isOK()) {
         updateHostsTargetedMetrics(opCtx,
                                    namespaces.executionNss,
                                    cri ? boost::make_optional(cri->cm) : boost::none,
                                    involvedNamespaces);
-        // Report usage statistics for each stage in the pipeline.
-        liteParsedPipeline.tickGlobalStageCounters();
         // Add 'command' object to explain output.
         if (expCtx->explain) {
             explain_common::appendIfRoom(
                 aggregation_request_helper::serializeToCommandObj(request), "command", result);
+            collectQueryStatsMongos(opCtx,
+                                    std::move(CurOp::get(opCtx)->debug().queryStatsInfo.key));
         }
-    } else if (status.code() != ErrorCodes::CommandOnShardedViewNotSupportedOnMongod) {
-        // Increment counters even in case of failed aggregate commands.
-        // But for views on a sharded cluster, aggregation runs twice. First execution fails
-        // because the namespace is a view, and then it is re-run with resolved view pipeline
-        // and namespace.
-        liteParsedPipeline.tickGlobalStageCounters();
     }
+
     return status;
 }
 

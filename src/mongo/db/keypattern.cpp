@@ -49,13 +49,17 @@ bool KeyPattern::isHashedKeyPattern(const BSONObj& pattern) {
 }
 
 StringBuilder& operator<<(StringBuilder& sb, const KeyPattern& keyPattern) {
+    return KeyPattern::addToStringBuilder(sb, keyPattern._pattern);
+}
+
+StringBuilder& KeyPattern::addToStringBuilder(StringBuilder& sb, const BSONObj& pattern) {
     // Rather than return BSONObj::toString() we construct a keyPattern string manually. This allows
     // us to avoid the cost of writing numeric direction to the str::stream which will then undergo
     // expensive number to string conversion.
     sb << "{ ";
 
     bool first = true;
-    for (auto&& elem : keyPattern._pattern) {
+    for (auto&& elem : pattern) {
         if (first) {
             first = false;
         } else {
@@ -98,7 +102,7 @@ BSONObj KeyPattern::extendRangeBound(const BSONObj& bound, bool makeUpperInclusi
     while (pat.more()) {
         BSONElement patElt = pat.next();
         // for non 1/-1 field values, like {a : "hashed"}, treat order as ascending
-        int order = patElt.isNumber() ? patElt.numberInt() : 1;
+        int order = patElt.isNumber() ? patElt.safeNumberInt() : 1;
         // flip the order semantics if this is an upper bound
         if (makeUpperInclusive)
             order *= -1;

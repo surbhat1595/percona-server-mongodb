@@ -122,7 +122,7 @@ public:
      * the transaction that created it.
      */
     struct Participant {
-        enum class ReadOnly { kUnset, kReadOnly, kNotReadOnly, kOutstandingAdditionalParticipant };
+        enum class ReadOnly { kUnset, kReadOnly, kNotReadOnly };
 
         Participant(bool isCoordinator,
                     StmtId stmtIdCreatedAt,
@@ -141,8 +141,8 @@ public:
         // True if the participant has been chosen as the coordinator for its transaction
         const bool isCoordinator{false};
 
-        // Is updated to kReadOnly, kNotReadOnly, or kOutstandingAdditionalParticipant based on the
-        // readOnly field in the participant's responses to statements.
+        // Is updated to kReadOnly or kNotReadOnly based on the readOnly field in the participant's
+        // responses to statements.
         const ReadOnly readOnly{ReadOnly::kUnset};
 
         // Returns the shared transaction options this participant was created with
@@ -440,7 +440,8 @@ public:
          */
         void processParticipantResponse(OperationContext* opCtx,
                                         const ShardId& shardId,
-                                        const BSONObj& responseObj);
+                                        const BSONObj& responseObj,
+                                        bool forAsyncGetMore = false);
 
         /**
          * Returns true if the current transaction can retry on a stale version error from a
@@ -531,12 +532,8 @@ public:
          * Returns boost::none if this router is not a sub-router, or if the txnNumber or
          * retryCounter on this router do not match that on the opCtx.
          */
-        // TODO SERVER-85353 Remove commandName and nss parameters, which are used only for the
-        // failpoint
         boost::optional<StringMap<boost::optional<bool>>> getAdditionalParticipantsForResponse(
-            OperationContext* opCtx,
-            boost::optional<const std::string&> commandName = boost::none,
-            boost::optional<const NamespaceString&> nss = boost::none);
+            OperationContext* opCtx);
 
         /**
          * Commits the transaction.
@@ -613,6 +610,10 @@ public:
             p().createdDatabases.insert(dbName);
         }
 
+        void disallowSingleWriteShardCommit() {
+            p().disallowSingleWriteShardCommit = true;
+        }
+
     private:
         /**
          * Resets the router's state. Used when the router sees a new transaction for the first
@@ -628,6 +629,13 @@ public:
          * concern must read from.
          */
         void _resetRouterStateForStartTransaction(
+            OperationContext* opCtx, const TxnNumberAndRetryCounter& txnNumberAndRetryCounter);
+
+        /**
+         * Calls _resetRouterStateForStartTransaction and then resets the cluster time using the
+         * readConcern on the opCtx and resets the subRouter flag.
+         */
+        void _resetRouterStateForStartOrContinueTransaction(
             OperationContext* opCtx, const TxnNumberAndRetryCounter& txnNumberAndRetryCounter);
 
         /**
@@ -926,6 +934,10 @@ private:
 
         // Tracks databases that this transaction has attempted to create.
         std::set<DatabaseName> createdDatabases;
+
+        // Set true to prevent using the single write shard commit optimization. Only for updates to
+        // a document's shard key value that use the legacy protocol.
+        bool disallowSingleWriteShardCommit{false};
     } _p;
 };
 

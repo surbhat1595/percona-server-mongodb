@@ -42,6 +42,7 @@
 #include "mongo/util/assert_util.h"
 #include "mongo/util/future_util.h"
 #include "mongo/util/net/socket_utils.h"
+#include "mongo/util/signal_handlers_synchronous.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kNetwork
 
@@ -54,6 +55,9 @@ MONGO_FAIL_POINT_DEFINE(asioTransportLayerBlockBeforeAddSession);
 MONGO_FAIL_POINT_DEFINE(clientIsFromLoadBalancer);
 
 namespace {
+
+using NoDelayOption = SocketOption<IPPROTO_TCP, TCP_NODELAY>;
+using KeepAliveOption = SocketOption<SOL_SOCKET, SO_KEEPALIVE>;
 
 template <int optionName>
 class ASIOSocketTimeoutOption {
@@ -93,6 +97,14 @@ public:
         return SOL_SOCKET;
     }
 
+    BSONObj toBSON() const {
+        return BSONObjBuilder{}
+            .append("level", SOL_SOCKET)
+            .append("name", optionName)
+            .append("data", hexdump(&_timeout, sizeof(_timeout)))
+            .obj();
+    }
+
 private:
     TimeoutType _timeout;
 };
@@ -115,33 +127,59 @@ CommonAsioSession::CommonAsioSession(
     Endpoint endpoint,
     std::shared_ptr<const SSLConnectionContext> transientSSLContext)
     : _socket(std::move(socket)), _tl(tl), _isIngressSession(isIngressSession) {
-    auto family = endpointToSockAddr(_socket.local_endpoint()).getType();
-    auto sev = logv2::LogSeverity::Debug(3);
-    if (family == AF_INET || family == AF_INET6) {
-        asioTransportLayerSessionPauseBeforeSetSocketOption.pauseWhileSet();
-        setSocketOption(_socket, asio::ip::tcp::no_delay(true), "session no delay", sev);
-        setSocketOption(_socket, asio::socket_base::keep_alive(true), "session keep alive", sev);
-        setSocketKeepAliveParams(_socket.native_handle(), sev);
-    }
+    auto sev = kDebugBuild ? logv2::LogSeverity::Info() : logv2::LogSeverity::Debug(3);
+    try {
+        auto localEndpoint = getLocalEndpoint(_socket, "AsioSession get local endpoint", sev);
+        auto family = endpointToSockAddr(localEndpoint).getType();
+        if (family == AF_INET || family == AF_INET6) {
+            asioTransportLayerSessionPauseBeforeSetSocketOption.pauseWhileSet();
+            setSocketOption(_socket, NoDelayOption(true), "session no delay", sev);
+            setSocketOption(_socket, KeepAliveOption(true), "session keep alive", sev);
+            setSocketKeepAliveParams(_socket.native_handle(), sev);
+        }
 
-    _localAddr = endpointToSockAddr(_socket.local_endpoint());
+        _localAddr = endpointToSockAddr(localEndpoint);
+    } catch (...) {
+        LOGV2_DEBUG(307471,
+                    1,
+                    "Exception in CommonAsioSession constructor",
+                    "error"_attr = describeActiveException());
+        throw;
+    }
 
     if (endpoint == Endpoint()) {
         // Inbound connection, query socket for remote.
-        _remoteAddr = endpointToSockAddr(_socket.remote_endpoint());
+        auto remoteEndpoint = getRemoteEndpoint(_socket, "AsioSession get remote endpoint", sev);
+        _remoteAddr = endpointToSockAddr(remoteEndpoint);
     } else {
         // Outbound connection, get remote from resolved endpoint.
         // Necessary for TCP_FASTOPEN where the remote isn't connected yet.
         _remoteAddr = endpointToSockAddr(endpoint);
     }
 
-    _local = HostAndPort(_localAddr.toString(true));
-    if (tl->loadBalancerPort()) {
-        _isFromLoadBalancer = _local.port() == *tl->loadBalancerPort();
+    try {
+        _local = HostAndPort(_localAddr.toString(true));
+        if (tl->loadBalancerPort()) {
+            _isFromLoadBalancer = _local.port() == *tl->loadBalancerPort();
+        }
+    } catch (...) {
+        LOGV2_DEBUG(307472,
+                    1,
+                    "Exception in CommonAsioSession constructor",
+                    "error"_attr = describeActiveException());
+        throw;
     }
 
-    _remote = HostAndPort(_remoteAddr.toString(true));
-    _restrictionEnvironment = RestrictionEnvironment(_remoteAddr, _localAddr);
+    try {
+        _remote = HostAndPort(_remoteAddr.toString(true));
+        _restrictionEnvironment = RestrictionEnvironment(_remoteAddr, _localAddr);
+    } catch (...) {
+        LOGV2_DEBUG(307473,
+                    1,
+                    "Exception in CommonAsioSession constructor",
+                    "error"_attr = describeActiveException());
+        throw;
+    }
 #ifdef MONGO_CONFIG_SSL
     _sslContext = transientSSLContext ? transientSSLContext : tl->sslContext();
     if (transientSSLContext) {

@@ -61,6 +61,7 @@
 #include "mongo/db/query/plan_explainer_impl.h"
 #include "mongo/db/query/plan_ranking_decision.h"
 #include "mongo/db/query/plan_summary_stats.h"
+#include "mongo/db/query/query_feature_flags_gen.h"
 #include "mongo/db/query/query_knob_configuration.h"
 #include "mongo/db/query/query_settings.h"
 #include "mongo/db/query/query_settings_decoration.h"
@@ -104,7 +105,8 @@ void generatePlannerInfo(PlanExecutor* exec,
     const auto& mainCollection = collections.getMainCollection();
     if (auto* cq = exec->getCanonicalQuery(); mainCollection && cq) {
         if (cq->isSbeCompatible() &&
-            !cq->getExpCtx()->getQueryKnobConfiguration().isForceClassicEngineEnabled()) {
+            feature_flags::gFeatureFlagSbeFull.isEnabled(
+                serverGlobalParams.featureCompatibility.acquireFCVSnapshot())) {
             const auto planCacheKeyInfo = plan_cache_key_factory::make(
                 *exec->getCanonicalQuery(),
                 collections,
@@ -371,10 +373,7 @@ void generateExecutionInfo(PlanExecutor* exec,
  * If 'exec' is configured for yielding, then a call to this helper could result in a yield.
  */
 void executePlan(PlanExecutor* exec) {
-    BSONObj obj;
-    while (exec->getNext(&obj, nullptr) == PlanExecutor::ADVANCED) {
-        // Discard the resulting documents.
-    }
+    exec->executeExhaustive();
 }
 
 /**
@@ -390,7 +389,11 @@ void appendBasicPlanCacheEntryInfoToBSON(const EntryType& entry, BSONObjBuilder*
     out->append("queryHash", zeroPaddedHex(entry.queryHash));
     out->append("planCacheKey", zeroPaddedHex(entry.planCacheKey));
     out->append("isActive", entry.isActive);
-    out->append("works", static_cast<long long>(entry.works.value_or(0)));
+    out->append("works",
+                static_cast<long long>(entry.readsOrWorks ? entry.readsOrWorks->rawValue() : 0));
+    if (entry.readsOrWorks) {
+        out->append("worksType", entry.readsOrWorks->type());
+    }
     out->append("timeOfCreation", entry.timeOfCreation);
 
     if (entry.securityLevel == PlanSecurityLevel::kSensitive) {

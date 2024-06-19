@@ -59,7 +59,7 @@ __curbackup_incr_blkmod(WT_SESSION_IMPL *session, WT_BTREE *btree, WT_CURSOR_BAC
         /*
          * First see if we have information for this source identifier.
          */
-        if (WT_STRING_MATCH(cb->incr_src->id_str, k.str, k.len) == 0)
+        if (WT_CONFIG_MATCH(cb->incr_src->id_str, k) == 0)
             continue;
 
         /*
@@ -125,7 +125,7 @@ __curbackup_incr_next(WT_CURSOR *cursor)
     WT_DECL_RET;
     WT_SESSION_IMPL *session;
     wt_off_t size;
-    uint64_t start_bitoff, total_len, raw;
+    uint64_t raw, start_bitoff, total_len;
     const char *file;
     bool found;
 
@@ -254,11 +254,11 @@ err:
 }
 
 /*
- * __wt_curbackup_free_incr --
+ * __wti_curbackup_free_incr --
  *     Free the duplicate backup cursor for a file-based incremental backup.
  */
 int
-__wt_curbackup_free_incr(WT_SESSION_IMPL *session, WT_CURSOR_BACKUP *cb)
+__wti_curbackup_free_incr(WT_SESSION_IMPL *session, WT_CURSOR_BACKUP *cb)
 {
     WT_DECL_RET;
 
@@ -271,11 +271,11 @@ __wt_curbackup_free_incr(WT_SESSION_IMPL *session, WT_CURSOR_BACKUP *cb)
 }
 
 /*
- * __wt_curbackup_open_incr --
+ * __wti_curbackup_open_incr --
  *     Initialize the duplicate backup cursor for a file-based incremental backup.
  */
 int
-__wt_curbackup_open_incr(WT_SESSION_IMPL *session, const char *uri, WT_CURSOR *other,
+__wti_curbackup_open_incr(WT_SESSION_IMPL *session, const char *uri, WT_CURSOR *other,
   WT_CURSOR *cursor, const char *cfg[], WT_CURSOR **cursorp)
 {
     WT_CURSOR_BACKUP *cb, *other_cb;
@@ -295,7 +295,7 @@ __wt_curbackup_open_incr(WT_SESSION_IMPL *session, const char *uri, WT_CURSOR *o
      */
     cursor->next = __curbackup_incr_next;
     cursor->get_key = __wt_cursor_get_key;
-    cursor->get_value = __wt_cursor_get_value_notsup;
+    cursor->get_value = __wti_cursor_get_value_notsup;
     cb->incr_src = other_cb->incr_src;
 
     /* All WiredTiger owned files are full file copies. */
@@ -330,7 +330,7 @@ __wt_curbackup_open_incr(WT_SESSION_IMPL *session, const char *uri, WT_CURSOR *o
 
 err:
     if (ret != 0)
-        WT_TRET(__wt_curbackup_free_incr(session, cb));
+        WT_TRET(__wti_curbackup_free_incr(session, cb));
     __wt_scr_free(session, &open_uri);
     return (ret);
 }

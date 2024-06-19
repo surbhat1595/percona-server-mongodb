@@ -858,7 +858,7 @@ TEST(Path, LowerPathField) {
 
     ASSERT_EXPLAIN_AUTO(
         "FunctionCall [makeBsonObj]\n"
-        "  Const [MakeObjSpec([fieldA = MakeObj([fieldB = LambdaArg(0, false)], Open)], Open, "
+        "  Const [MakeObjSpec([fieldA = MakeObj([fieldB = Lambda(0, false)], Open)], Open, "
         "NewObj, 0)]\n"
         "  Variable [rootObj]\n"
         "  Const [false]\n"
@@ -1714,7 +1714,7 @@ TEST(Path, PathCompareEqMemberUnknownTypeLower) {
         "|   |   |   Variable [a]\n"
         "|   |   Const [\"hello\"]\n"
         "|   BinaryOp [Or]\n"
-        "|   |   FunctionCall [isInListData] Variable [a]\n"
+        "|   |   FunctionCall [isInList] Variable [a]\n"
         "|   FunctionCall [isArray] Variable [a]\n"
         "Evaluation [{x}]\n"
         "|   EvalPath []\n"

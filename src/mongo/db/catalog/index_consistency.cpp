@@ -569,7 +569,8 @@ void KeyStringIndexConsistency::addIndexKey(OperationContext* opCtx,
 bool KeyStringIndexConsistency::limitMemoryUsageForSecondPhase(ValidateResults* result) {
     invariant(!_firstPhase);
 
-    const uint32_t maxMemoryUsageBytes = maxValidateMemoryUsageMB.load() * 1024 * 1024;
+    const uint64_t maxMemoryUsageBytes =
+        static_cast<uint64_t>(maxValidateMemoryUsageMB.load()) * 1024 * 1024;
     const uint64_t totalMemoryNeededBytes =
         std::accumulate(_indexKeyBuckets.begin(),
                         _indexKeyBuckets.end(),
@@ -762,7 +763,7 @@ int64_t KeyStringIndexConsistency::traverseIndex(OperationContext* opCtx,
 
     key_string::Builder firstKeyStringBuilder(
         version, BSONObj(), indexInfo.ord, key_string::Discriminator::kExclusiveBefore);
-    const key_string::Value firstKeyString = firstKeyStringBuilder.getValueCopy();
+    StringData firstKeyString = firstKeyStringBuilder.finishAndGetBuffer();
     boost::optional<KeyStringEntry> prevIndexKeyStringEntry;
 
     // Ensure that this index has an open index cursor.
@@ -776,6 +777,7 @@ int64_t KeyStringIndexConsistency::traverseIndex(OperationContext* opCtx,
         indexEntry = indexCursor->seekForKeyString(opCtx, firstKeyString);
     } catch (const DBException& ex) {
         if (TestingProctor::instance().isEnabled() && ex.code() != ErrorCodes::WriteConflict) {
+            const key_string::Value firstKeyString = firstKeyStringBuilder.getValueCopy();
             LOGV2_FATAL(5318400,
                         "Error seeking to first key",
                         "error"_attr = ex.toString(),

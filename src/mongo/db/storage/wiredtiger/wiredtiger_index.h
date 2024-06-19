@@ -157,8 +157,7 @@ public:
                  const key_string::Value& keyString,
                  bool dupsAllowed) override;
 
-    boost::optional<RecordId> findLoc(OperationContext* opCtx,
-                                      const key_string::Value& keyString) const override;
+    boost::optional<RecordId> findLoc(OperationContext* opCtx, StringData keyString) const override;
 
     IndexValidateResults validate(OperationContext* opCtx, bool full) const override;
 
@@ -212,6 +211,7 @@ public:
 
     virtual bool isDup(OperationContext* opCtx,
                        WT_CURSOR* c,
+                       WiredTigerSession* session,
                        const key_string::Value& keyString) = 0;
     virtual bool unique() const = 0;
     virtual bool isTimestampSafeUniqueIdx() const = 0;
@@ -225,6 +225,7 @@ protected:
     virtual Status _insert(
         OperationContext* opCtx,
         WT_CURSOR* c,
+        WiredTigerSession* session,
         const key_string::Value& keyString,
         bool dupsAllowed,
         IncludeDuplicateRecordId includeDuplicateRecordId = IncludeDuplicateRecordId::kOff) = 0;
@@ -249,6 +250,7 @@ protected:
      */
     boost::optional<RecordId> _keyExists(OperationContext* opCtx,
                                          WT_CURSOR* c,
+                                         WiredTigerSession* session,
                                          const key_string::Value& keyString,
                                          size_t sizeWithoutRecordId);
 
@@ -257,6 +259,7 @@ protected:
      * Used when checking if a specific key prefix exists.
      */
     void _setUpperBoundForKeyExists(WT_CURSOR* c,
+                                    WiredTigerSession* session,
                                     const key_string::Value& keyString,
                                     size_t sizeWithoutRecordId);
 
@@ -268,6 +271,7 @@ protected:
     StatusWith<bool> _checkDups(
         OperationContext* opCtx,
         WT_CURSOR* c,
+        WiredTigerSession* session,
         const key_string::Value& keyString,
         IncludeDuplicateRecordId includeDuplicateRecordId = IncludeDuplicateRecordId::kOff);
 
@@ -333,12 +337,16 @@ public:
 
     bool isTimestampSafeUniqueIdx() const override;
 
-    bool isDup(OperationContext* opCtx, WT_CURSOR* c, const key_string::Value& keyString) override;
+    bool isDup(OperationContext* opCtx,
+               WT_CURSOR* c,
+               WiredTigerSession* session,
+               const key_string::Value& keyString) override;
 
 
 protected:
     Status _insert(OperationContext* opCtx,
                    WT_CURSOR* c,
+                   WiredTigerSession* session,
                    const key_string::Value& keyString,
                    bool dupsAllowed,
                    IncludeDuplicateRecordId includeDuplicateRecordId =
@@ -392,7 +400,10 @@ public:
         return false;
     }
 
-    bool isDup(OperationContext* opCtx, WT_CURSOR* c, const key_string::Value& keyString) override {
+    bool isDup(OperationContext* opCtx,
+               WT_CURSOR* c,
+               WiredTigerSession* session,
+               const key_string::Value& keyString) override {
         // Unimplemented by _id indexes for lack of need
         MONGO_UNREACHABLE;
     }
@@ -400,6 +411,7 @@ public:
 protected:
     Status _insert(OperationContext* opCtx,
                    WT_CURSOR* c,
+                   WiredTigerSession* session,
                    const key_string::Value& keyString,
                    bool dupsAllowed,
                    IncludeDuplicateRecordId includeDuplicateRecordId =
@@ -443,7 +455,10 @@ public:
         return false;
     }
 
-    bool isDup(OperationContext* opCtx, WT_CURSOR* c, const key_string::Value& keyString) override {
+    bool isDup(OperationContext* opCtx,
+               WT_CURSOR* c,
+               WiredTigerSession* session,
+               const key_string::Value& keyString) override {
         // Unimplemented by non-unique indexes
         MONGO_UNREACHABLE;
     }
@@ -451,6 +466,7 @@ public:
 protected:
     Status _insert(OperationContext* opCtx,
                    WT_CURSOR* c,
+                   WiredTigerSession* session,
                    const key_string::Value& keyString,
                    bool dupsAllowed,
                    IncludeDuplicateRecordId includeDuplicateRecordId =

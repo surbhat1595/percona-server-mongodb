@@ -229,12 +229,8 @@ static std::pair<TypeTags, Value> deserializeValue(BufReader& buf,
             val = bitcastFrom<uint8_t*>(binData);
             break;
         }
-        case TypeTags::ksValue: {
-            auto version = static_cast<key_string::Version>(buf.read<uint8_t>());
-            auto ks = key_string::Value::deserialize(buf, version);
-            auto [ksTag, ksVal] = makeCopyKeyString(ks);
-            tag = ksTag;
-            val = ksVal;
+        case TypeTags::keyString: {
+            val = bitcastFrom<value::KeyStringEntry*>(value::KeyStringEntry::deserialize(buf));
             break;
         }
         case TypeTags::bsonRegex: {
@@ -403,9 +399,8 @@ static void serializeValue(BufBuilder& buf, TypeTags tag, Value val) {
             buf.appendBuf(binData + sizeof(uint32_t), size + 1);
             break;
         }
-        case TypeTags::ksValue: {
-            auto ks = getKeyStringView(val);
-            buf.appendUChar(static_cast<uint8_t>(ks->getVersion()));
+        case TypeTags::keyString: {
+            auto ks = getKeyString(val);
             ks->serialize(buf);
             break;
         }
@@ -567,9 +562,10 @@ static void serializeValueIntoKeyString(key_string::Builder& buf,
             }
             break;
         }
+        case TypeTags::bsonObjectId:
         case TypeTags::ObjectId: {
             buf.appendBool(true);
-            buf.appendBytes(getObjectIdView(val), sizeof(ObjectIdType));
+            buf.appendOID(OID::from(getRawPointerView(val)));
             break;
         }
         case TypeTags::bsonObject: {
@@ -590,11 +586,6 @@ static void serializeValueIntoKeyString(key_string::Builder& buf,
             } else {
                 buf.appendArray(BSONArray(BSONObj(bson)));
             }
-            break;
-        }
-        case TypeTags::bsonObjectId: {
-            buf.appendBool(true);
-            buf.appendOID(OID::from(getRawPointerView(val)));
             break;
         }
         case TypeTags::bsonBinData: {
@@ -630,8 +621,8 @@ static void serializeValueIntoKeyString(key_string::Builder& buf,
             buf.appendCodeWString(BSONCodeWScope(cws.code, BSONObj(cws.scope)));
             break;
         }
-        case TypeTags::ksValue: {
-            auto ks = getKeyStringView(val);
+        case TypeTags::keyString: {
+            auto ks = getKeyString(val);
             BufBuilder innerBinDataBuf;
             innerBinDataBuf.appendUChar(static_cast<uint8_t>(tag));
             ks->serialize(innerBinDataBuf);
@@ -814,9 +805,9 @@ int getApproximateSize(TypeTags tag, Value val) {
             result += sizeof(uint32_t) + sizeof(char) +
                 ConstDataView(getRawPointerView(val)).read<LittleEndian<uint32_t>>();
             break;
-        case TypeTags::ksValue: {
-            auto ks = getKeyStringView(val);
-            result += ks->getSize();
+        case TypeTags::keyString: {
+            auto ks = getKeyString(val);
+            result += ks->getSerializedSize();
             break;
         }
         case TypeTags::bsonRegex: {
@@ -847,7 +838,7 @@ int getApproximateSize(TypeTags tag, Value val) {
             result += sizeof(TimeZone);
             break;
         case TypeTags::collator:
-        case TypeTags::inListData:
+        case TypeTags::inList:
             // This type points to a block of memory that it doesn't own, so we don't acccount
             // for the size of this block of memory here.
             break;

@@ -63,6 +63,9 @@ Status validateReadPreferenceMode(const std::string& prefStr, const boost::optio
  * A simple object for representing the list of tags requested by a $readPreference.
  */
 class TagSet {
+private:
+    static const BSONArray kMatchAny;
+
 public:
     /**
      * Creates a TagSet that matches any nodes. This is the TagSet represented by the BSON
@@ -100,6 +103,21 @@ public:
     }
     bool operator!=(const TagSet& other) const {
         return !(*this == other);
+    }
+
+    /**
+     * Primary only is defined as a empty BSON Array. See comments on primaryOnly().
+     */
+    bool isPrimaryOnly() const {
+        return _tags.isEmpty();
+    }
+
+    /**
+     * Match any node is defined as array with one element which is an empty BSON document. See
+     * comments on default constructor.
+     */
+    bool isMatchAnyNode() const {
+        return _tags.binaryEqual(kMatchAny);
     }
 
 private:
@@ -166,6 +184,11 @@ struct ReadPreferenceSetting {
     }
 
     /**
+     * Returns the IDL-struct representation of this object's inner BSON serialized form.
+     */
+    ReadPreferenceIdl toReadPreferenceIdl() const;
+
+    /**
      * Serializes this ReadPreferenceSetting as a containing BSON document. (The document containing
      * a $readPreference element)
      *
@@ -196,6 +219,14 @@ struct ReadPreferenceSetting {
      */
     static StatusWith<ReadPreferenceSetting> fromInnerBSON(const BSONObj& readPrefSettingObj);
     static StatusWith<ReadPreferenceSetting> fromInnerBSON(const BSONElement& readPrefSettingObj);
+
+    /**
+     * Parse a ReadPreferenceSetting from an IDL-struct representation of a read preference's inner
+     * BSON document.
+     *
+     * This method validates the combination of fields specified on the provided IDL-struct.
+     */
+    static StatusWith<ReadPreferenceSetting> fromReadPreferenceIdl(const ReadPreferenceIdl& rp);
 
     /**
         Utilized by IDL types in order to get the unwrapped ReadPreferenceSetting object.

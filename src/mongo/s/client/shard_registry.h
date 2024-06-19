@@ -66,6 +66,12 @@
 
 namespace mongo {
 
+namespace shard_registry_stats {
+
+extern Counter64& blockedOpsGauge;
+
+}  // namespace shard_registry_stats
+
 class ShardRegistryData {
 public:
     using ShardMap = stdx::unordered_map<ShardId, std::shared_ptr<Shard>, ShardId::Hasher>;
@@ -349,6 +355,14 @@ public:
      * This method relies on the RSM to have pushed the correct CSRS membership information.
      */
     bool isConfigServer(const HostAndPort& host) const;
+
+    /**
+     * Returns true if the config server is in the shard registry as a shard, and false otherwise.
+     * This function should only be used for serverStatus metric reporting where a result that is
+     * stale by a few seconds is okay. This function will not refresh the shard registry or
+     * otherwise perform any network traffic.
+     */
+    bool cachedClusterHasConfigShard() const;
 
     // TODO SERVER-50206: Remove usage of these non-causally consistent accessors.
     //

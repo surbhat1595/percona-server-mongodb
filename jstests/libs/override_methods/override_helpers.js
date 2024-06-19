@@ -1,3 +1,8 @@
+import {getCommandName} from "jstests/libs/cmd_object_utils.js";
+
+// Store the original 'runCommand' function before applying any overrides.
+const preOverrideRunCommand = Mongo.prototype.runCommand;
+
 /**
  * The OverrideHelpers object defines convenience methods for overriding commands and functions in
  * the mongo shell.
@@ -78,14 +83,28 @@ export const OverrideHelpers = (function() {
         const mongoRunCommandOriginal = Mongo.prototype.runCommand;
 
         Mongo.prototype.runCommand = function(dbName, commandObj, options) {
-            const commandName = Object.keys(commandObj)[0];
             return overrideFunc(this,
                                 dbName,
-                                commandName,
+                                getCommandName(commandObj),
                                 commandObj,
                                 mongoRunCommandOriginal,
                                 (commandObj, db = dbName) => [db, commandObj, options]);
         };
+    }
+
+    /**
+     * Higher order function for executing `db.runCommand()` commands without overrides.
+     * Example usage:
+     *  const res = OverrideHelpers.withPreOverrideRunCommand(() => db.adminCommand(cmd));
+     */
+    function withPreOverrideRunCommand(fn) {
+        const overriddenRunCommand = Mongo.prototype.runCommand;
+        try {
+            Mongo.prototype.runCommand = preOverrideRunCommand;
+            return fn();
+        } finally {
+            Mongo.prototype.runCommand = overriddenRunCommand;
+        }
     }
 
     return {
@@ -97,5 +116,6 @@ export const OverrideHelpers = (function() {
         isMapReduceWithInlineOutput: isMapReduceWithInlineOutput,
         prependOverrideInParallelShell: prependOverrideInParallelShell,
         overrideRunCommand: overrideRunCommand,
+        withPreOverrideRunCommand: withPreOverrideRunCommand,
     };
 })();

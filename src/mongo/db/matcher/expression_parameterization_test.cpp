@@ -382,6 +382,39 @@ TEST(MatchExpressionParameterizationVisitor, ComparisonMatchExpressionsWithNaNSe
     ASSERT_EQ(0, context.inputParamIdToExpressionMap.size());
 }
 
+TEST(MatchExpressionParameterizationVisitor, ComparisonMatchExpressionsWithBooleanSetsNoParamIds) {
+    std::vector<std::unique_ptr<MatchExpression>> expressions;
+    expressions.emplace_back(std::make_unique<LTMatchExpression>("a"_sd, Value(false)));
+    expressions.emplace_back(std::make_unique<GTMatchExpression>("b"_sd, Value(true)));
+    expressions.emplace_back(std::make_unique<EqualityMatchExpression>("c"_sd, Value(false)));
+    expressions.emplace_back(std::make_unique<LTEMatchExpression>("d"_sd, Value(true)));
+    expressions.emplace_back(std::make_unique<GTEMatchExpression>("e"_sd, Value(false)));
+
+    OrMatchExpression expr{std::move(expressions)};
+
+    MatchExpressionParameterizationVisitorContext context{};
+    walkExpression(&context, &expr);
+
+    ASSERT_EQ(0, context.inputParamIdToExpressionMap.size());
+}
+
+TEST(MatchExpressionParameterizationVisitor,
+     ComparisonMatchExpressionsWithEmptyStringSetsNoParamIds) {
+    std::vector<std::unique_ptr<MatchExpression>> expressions;
+    expressions.emplace_back(std::make_unique<LTMatchExpression>("a"_sd, Value(""_sd)));
+    expressions.emplace_back(std::make_unique<GTMatchExpression>("b"_sd, Value(""_sd)));
+    expressions.emplace_back(std::make_unique<EqualityMatchExpression>("c"_sd, Value(""_sd)));
+    expressions.emplace_back(std::make_unique<LTEMatchExpression>("d"_sd, Value(""_sd)));
+    expressions.emplace_back(std::make_unique<GTEMatchExpression>("e"_sd, Value(""_sd)));
+
+    OrMatchExpression expr{std::move(expressions)};
+
+    MatchExpressionParameterizationVisitorContext context{};
+    walkExpression(&context, &expr);
+
+    ASSERT_EQ(0, context.inputParamIdToExpressionMap.size());
+}
+
 TEST(MatchExpressionParameterizationVisitor, InMatchExpressionWithScalarsSetsOneParamId) {
     BSONObj operand = BSON_ARRAY(1 << "r" << true << 1.1);
     InMatchExpression expr{"a"_sd};
@@ -527,6 +560,8 @@ TEST(MatchExpressionParameterizationVisitor, OrMatchExpressionSetsThreeParamWith
 TEST(MatchExpressionParameterizationVisitor,
      MapIsUsedForParamIdLookupsAfterContextSizeExceedsThreshold) {
     MatchExpressionParameterizationVisitorContext context{};
+    // Ensure lifetime of BSONObjs matches that of MatchExpressions.
+    std::vector<BSONObj> expressionBSONs;
     std::vector<std::unique_ptr<MatchExpression>> expressions;
 
     auto expectedSize = context.kUseMapThreshold;
@@ -534,6 +569,7 @@ TEST(MatchExpressionParameterizationVisitor,
     auto addExpressions = [&]() {
         for (size_t i = 0; i < expectedSize; i++) {
             BSONObj gt = BSON("$gt" << static_cast<int>(i));
+            expressionBSONs.push_back(gt);
             expressions.emplace_back(std::make_unique<GTMatchExpression>("a"_sd, gt["$gt"]));
         }
     };
@@ -557,6 +593,8 @@ TEST(MatchExpressionParameterizationVisitor,
 TEST(MatchExpressionParameterizationVisitor,
      MapIsNotUsedForParamIdLookupsUntilContextSizeExceedsThreshold) {
     MatchExpressionParameterizationVisitorContext context{};
+    // Ensure lifetime of BSONObjs matches that of MatchExpressions.
+    std::vector<BSONObj> expressionBSONs;
     std::vector<std::unique_ptr<MatchExpression>> expressions;
 
     auto expectedSize = context.kUseMapThreshold - 1;
@@ -564,6 +602,7 @@ TEST(MatchExpressionParameterizationVisitor,
     auto addExpressions = [&]() {
         for (size_t i = 0; i < expectedSize; i++) {
             BSONObj gt = BSON("$gt" << static_cast<int>(i));
+            expressionBSONs.push_back(gt);
             expressions.emplace_back(std::make_unique<GTMatchExpression>("a"_sd, gt["$gt"]));
         }
     };

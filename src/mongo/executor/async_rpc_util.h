@@ -41,7 +41,7 @@
 #include "mongo/executor/async_rpc_targeter.h"
 #include "mongo/executor/remote_command_response.h"
 #include "mongo/executor/task_executor.h"
-#include "mongo/idl/generic_args_with_types_gen.h"
+#include "mongo/idl/generic_argument_gen.h"
 #include "mongo/logv2/log.h"
 #include "mongo/rpc/get_status_from_command_result.h"
 #include "mongo/s/async_rpc_shard_targeter.h"
@@ -59,39 +59,50 @@ namespace mongo::async_rpc {
  * Mirrors command helper methods found in commands.h or cluster_command_helpers.h.
  */
 struct AsyncRPCCommandHelpers {
-    static void appendMajorityWriteConcern(GenericArgs& args,
+    static void appendMajorityWriteConcern(GenericArguments& args,
                                            WriteConcernOptions defaultWC = WriteConcernOptions()) {
-        if (auto parsedWC = args.stable.getWriteConcern()) {
+        if (auto parsedWC = args.getWriteConcern()) {
             // The command has a writeConcern field and it's majority, so we can return it as-is.
             if (parsedWC->isMajority()) {
                 return;
             }
 
             parsedWC->w = WriteConcernOptions::kMajority;
-            args.stable.setWriteConcern(parsedWC);
+            args.setWriteConcern(parsedWC);
         } else if (!defaultWC.usedDefaultConstructedWC) {
             defaultWC.w = WriteConcernOptions::kMajority;
             if (defaultWC.wTimeout < CommandHelpers::kMajorityWriteConcern.wTimeout) {
                 defaultWC.wTimeout = CommandHelpers::kMajorityWriteConcern.wTimeout;
             }
-            args.stable.setWriteConcern(defaultWC);
+            args.setWriteConcern(defaultWC);
         } else {
-            args.stable.setWriteConcern(CommandHelpers::kMajorityWriteConcern);
+            args.setWriteConcern(CommandHelpers::kMajorityWriteConcern);
         }
     }
 
-    static void appendDbVersionIfPresent(GenericArgs& args, DatabaseVersion dbVersion) {
+    static void appendDbVersionIfPresent(GenericArguments& args, DatabaseVersion dbVersion) {
         if (!dbVersion.isFixed()) {
-            args.unstable.setDatabaseVersion(dbVersion);
+            args.setDatabaseVersion(dbVersion);
         }
     }
 
-    static void appendOSI(GenericArgs& args, const OperationSessionInfo& osi) {
-        args.stable.setLsid(osi.getSessionId());
-        args.stable.setTxnNumber(osi.getTxnNumber());
-        args.unstable.setTxnRetryCounter(osi.getTxnRetryCounter());
-        args.stable.setAutocommit(osi.getAutocommit());
-        args.stable.setStartTransaction(osi.getStartTransaction());
+    static LogicalSessionFromClient toLogicalSessionFromClient(const LogicalSessionId& lsid) {
+        LogicalSessionFromClient lsidfc;
+        lsidfc.setId(lsid.getId());
+        lsidfc.setUid(lsid.getUid());
+        lsidfc.setTxnUUID(lsid.getTxnUUID());
+        lsidfc.setTxnNumber(lsid.getTxnNumber());
+        return lsidfc;
+    }
+
+    static void appendOSI(GenericArguments& args, const OperationSessionInfo& osi) {
+        if (auto& lsid = osi.getSessionId()) {
+            args.setLsid(toLogicalSessionFromClient(*lsid));
+        }
+        args.setTxnNumber(osi.getTxnNumber());
+        args.setTxnRetryCounter(osi.getTxnRetryCounter());
+        args.setAutocommit(osi.getAutocommit());
+        args.setStartTransaction(osi.getStartTransaction());
     }
 };
 

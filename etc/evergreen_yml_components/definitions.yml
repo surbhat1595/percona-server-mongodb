@@ -31,9 +31,12 @@ variables:
 - package_variants: &package_variants
   - amazon
   - enterprise-linux-64-amazon-ami
+  - amazon2
   - amazon2023
   - amazon2023-arm64
+  - enterprise-amazon2
   - enterprise-amazon2-openssl111
+  - enterprise-amazon2-arm64
   - enterprise-amazon2-arm64-openssl111
   - enterprise-amazon2023
   - enterprise-amazon2023-arm64
@@ -353,7 +356,7 @@ functions:
     command: keyval.inc
     display_name: "get buildnumber"
     params:
-      key: "${build_variant}_master"
+      key: "${build_variant}_${project}"
       destination: "builder_num"
 
   "run diskstats": &run_diskstats
@@ -2265,19 +2268,6 @@ functions:
       permissions: public-read
       display_name: SCons cache debug log
 
-  "attach scons cache prune logs": &attach_scons_cache_prune_logs
-    command: s3.put
-    params:
-      optional: true
-      aws_key: ${aws_key}
-      aws_secret: ${aws_secret}
-      local_file: src/scons_cache_prune.log
-      content_type: text/plain
-      remote_file: ${project}/${build_variant}/${revision}/artifacts/scons_cache_prune.log.${build_id}-${task_name}.${execution}
-      bucket: mciuploads
-      permissions: public-read
-      display_name: SCons cache prune log
-
   "attach scons stdout logs": &attach_scons_stdout_logs
     command: s3.put
     params:
@@ -2294,7 +2284,6 @@ functions:
   "attach scons logs":
   - *attach_scons_config_logs
   - *attach_scons_cache_logs
-  - *attach_scons_cache_prune_logs
   - *attach_scons_stdout_logs
 
   "attach report":
@@ -2427,12 +2416,25 @@ functions:
       optional: true
       aws_key: ${aws_key}
       aws_secret: ${aws_secret}
-      local_file: src/docker_compose.tgz
+      local_file: docker_compose.tgz
       remote_file: ${project}/${build_variant}/${revision}/docker-compose-${task_id}-${execution}.tgz
       bucket: mciuploads
       permissions: public-read
       content_type: application/gzip
       display_name: Docker Compose
+
+  "attach docker logs":
+    command: s3.put
+    params:
+      optional: true
+      aws_key: ${aws_key}
+      aws_secret: ${aws_secret}
+      local_file: src/docker_logs.txt
+      remote_file: ${project}/${build_variant}/${revision}/docker-logs-${task_id}-${execution}.txt
+      bucket: mciuploads
+      permissions: public-read
+      content_type: text/plain
+      display_name: Docker Logs
 
   "attach task errors":
     command: s3.put
@@ -2523,6 +2525,12 @@ functions:
       binary: bash
       args:
       - "./src/evergreen/external_auth_oidc_teardown.sh"
+
+  - command: subprocess.exec
+    params:
+      binary: bash
+      args:
+      - "./src/evergreen/sasl_windows_cyrussasl_teardown.sh"
 
   "do scons setup":
   - command: manifest.load

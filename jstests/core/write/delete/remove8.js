@@ -1,7 +1,7 @@
 // @tags: [
 //   requires_non_retryable_commands,
 //   requires_non_retryable_writes,
-//   requires_fastcount,
+//   requires_getmore,
 // ]
 
 let t = db.remove8;
@@ -16,11 +16,11 @@ function fill() {
 }
 
 fill();
-assert.eq(N, t.count(), "A");
+assert.eq(N, t.find().itcount(), "A");
 t.remove({});
-assert.eq(0, t.count(), "B");
+assert.eq(0, t.find().itcount(), "B");
 
 fill();
-assert.eq(N, t.count(), "C");
+assert.eq(N, t.find().itcount(), "C");
 t.remove({});
-assert.eq(0, t.count(), "D");
+assert.eq(0, t.find().itcount(), "D");

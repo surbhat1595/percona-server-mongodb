@@ -57,6 +57,7 @@
 #include "mongo/db/query/query_planner_common.h"
 #include "mongo/db/read_concern_support_result.h"
 #include "mongo/db/repl/read_concern_args.h"
+#include "mongo/db/repl/read_concern_gen.h"
 #include "mongo/db/repl/read_concern_level.h"
 #include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/tenant_id.h"
@@ -892,6 +893,32 @@ StatusWith<CollectionRoutingInfo> getCollectionRoutingInfoForTxnCmd(OperationCon
     return catalogCache->getCollectionRoutingInfo(opCtx, nss, allowLocks);
 }
 
+BSONObj forceReadConcernLocal(OperationContext* opCtx, BSONObj& cmd) {
+    const auto& readConcernArgs = repl::ReadConcernArgs::get(opCtx);
+    auto atClusterTime = readConcernArgs.getArgsAtClusterTime();
+    auto afterClusterTime = readConcernArgs.getArgsAfterClusterTime();
+    BSONObjBuilder bob(cmd.removeField(ReadConcernArgs::kReadConcernFieldName));
+
+    repl::ReadConcernIdl newReadConcern;
+    newReadConcern.setLevel(ReadConcernLevel::kLocalReadConcern);
+    // We should carry over the atClusterTime/afterClusterTime to keep causal consistency.
+    if (atClusterTime) {
+        // atClusterTime is only supported in snapshot readConcern, so we use afterClusterTime
+        // instead.
+        newReadConcern.setAfterClusterTime(atClusterTime);
+    } else if (afterClusterTime) {
+        newReadConcern.setAfterClusterTime(afterClusterTime);
+    }
+
+    {
+        BSONObjBuilder newReadConcernBuilder(
+            bob.subobjStart(ReadConcernArgs::kReadConcernFieldName));
+        newReadConcern.serialize(&newReadConcernBuilder);
+    }
+
+    return bob.obj();
+}
+
 StatusWith<Shard::QueryResponse> loadIndexesFromAuthoritativeShard(
     OperationContext* opCtx, const NamespaceString& nss, const CollectionRoutingInfo& cri) {
     auto [indexShard, listIndexesCmd] = [&]() -> std::pair<std::shared_ptr<Shard>, BSONObj> {
@@ -900,10 +927,7 @@ StatusWith<Shard::QueryResponse> loadIndexesFromAuthoritativeShard(
             opCtx, true /* appendRC */, false /* appendWC */, BSON("listIndexes" << nss.coll()));
 
         // force the read concern level to "local" as other values are not supported for listIndexes
-        BSONObjBuilder bob(cmdNoVersion.removeField(ReadConcernArgs::kReadConcernFieldName));
-        bob.append(ReadConcernArgs::kReadConcernFieldName,
-                   BSON(ReadConcernArgs::kLevelFieldName << repl::readConcernLevels::kLocalName));
-        cmdNoVersion = bob.obj();
+        cmdNoVersion = forceReadConcernLocal(opCtx, cmdNoVersion);
 
         if (cm.hasRoutingTable()) {
             // For a collection that has a routing table, we must load indexes from a shard with

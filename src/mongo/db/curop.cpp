@@ -202,8 +202,7 @@ private:
         // wait time.
         if (_top) {
             auto locker = shard_role_details::getLocker(opCtx());
-            curOp->_lockStatsBase = locker->getLockerInfo(boost::none).stats;
-            curOp->_ticketWaitBase = locker->getTimeQueuedForTicketMicros();
+            curOp->_lockerStatsBase = CurOp::getAdditiveLockerStats(locker);
         }
 
         _top = curOp;
@@ -378,10 +377,10 @@ CurOp::~CurOp() {
     invariant(!_stack || this == _stack->pop());
 }
 
-void CurOp::setGenericOpRequestDetails(NamespaceString nss,
-                                       const Command* command,
-                                       BSONObj cmdObj,
-                                       NetworkOp op) {
+void CurOp::setGenericOpRequestDetails_inlock(NamespaceString nss,
+                                              const Command* command,
+                                              BSONObj cmdObj,
+                                              NetworkOp op) {
     // Set the _isCommand flags based on network op only. For legacy writes on mongoS, we
     // resolve them to OpMsgRequests and then pass them into the Commands path, so having a
     // valid Command* here does not guarantee that the op was issued from the client using a
@@ -389,7 +388,6 @@ void CurOp::setGenericOpRequestDetails(NamespaceString nss,
     const bool isCommand = (op == dbMsg || (op == dbQuery && nss.isCommand()));
     auto logicalOp = (command ? command->getLogicalOp() : networkOpToLogicalOp(op));
 
-    stdx::lock_guard<Client> clientLock(*opCtx()->getClient());
     _isCommand = _debug.iscommand = isCommand;
     _logicalOp = _debug.logicalOp = logicalOp;
     _networkOp = _debug.networkOp = op;
@@ -398,15 +396,70 @@ void CurOp::setGenericOpRequestDetails(NamespaceString nss,
     _nss = std::move(nss);
 }
 
+void CurOp::_fetchStorageStatsIfNecessary(Date_t deadline, AdmissionContext::Priority priority) {
+    auto opCtx = this->opCtx();
+    // Do not fetch operation statistics again if we have already got them (for
+    // instance, as a part of stashing the transaction). Take a lock before calling into
+    // the storage engine to prevent racing against a shutdown. Any operation that used
+    // a storage engine would have at-least held a global lock at one point, hence we
+    // limit our lock acquisition to such operations. We can get here and our lock
+    // acquisition be timed out or interrupted, in which case we'll throw. Callers should
+    // handle that case, e.g., by logging a warning.
+    if (_debug.storageStats == nullptr &&
+        shard_role_details::getLocker(opCtx)->wasGlobalLockTaken() &&
+        opCtx->getServiceContext()->getStorageEngine()) {
+        ScopedAdmissionPriority<ExecutionAdmissionContext> admissionControl(opCtx, priority);
+        Lock::GlobalLock lk(opCtx,
+                            MODE_IS,
+                            deadline,
+                            Lock::InterruptBehavior::kThrow,
+                            Lock::GlobalLockSkipOptions{.skipRSTLLock = true});
+        _debug.storageStats =
+            shard_role_details::getRecoveryUnit(opCtx)->computeOperationStatisticsSinceLastCall();
+    }
+}
+
 void CurOp::setEndOfOpMetrics(long long nreturned) {
     _debug.additiveMetrics.nreturned = nreturned;
-    // A non-none queryStatsInfo.keyHash indicates the current query is being tracked for queryStats
-    // and therefore the executionTime needs to be recorded as part of that effort. executionTime is
-    // set with the final executionTime in completeAndLogOperation, but for query stats collection
-    // we want it set before incrementing cursor metrics using OpDebug's AdditiveMetrics. The value
-    // set here will be overwritten later in completeAndLogOperation.
-    if (_debug.queryStatsInfo.keyHash) {
-        _debug.additiveMetrics.executionTime = elapsedTimeExcludingPauses();
+    // A non-none queryStatsInfo.keyHash indicates the current query is being tracked locally for
+    // queryStats, and a metricsRequested being true indicates the query is being tracked remotely
+    // via the metrics included in cursor responses. In either case, we need to track the current
+    // working and storage metrics, as they are recorded in the query stats store and returned
+    // in cursor responses. When tracking locally, we also need to record executionTime.
+    // executionTime is set with the final executionTime in completeAndLogOperation, but
+    // for query stats collection we want it set before incrementing cursor metrics using OpDebug's
+    // AdditiveMetrics. The value of executionTime set here will be overwritten later in
+    // completeAndLogOperation.
+    const auto& info = _debug.queryStatsInfo;
+    if (info.keyHash || info.metricsRequested) {
+        auto& metrics = _debug.additiveMetrics;
+        auto elapsed = elapsedTimeExcludingPauses();
+        // We don't strictly need to record executionTime unless keyHash is non-none, but there's
+        // no harm in recording it since we've already computed the value.
+        metrics.executionTime = elapsed;
+        metrics.clusterWorkingTime = metrics.clusterWorkingTime.value_or(Milliseconds(0)) +
+            (duration_cast<Milliseconds>(
+                elapsed - (std::get<0>(_getAndSumBlockedTimeTotal()) - _blockedTimeAtStart)));
+
+        try {
+            // If we need them, try to fetch the storage stats. We use an unlimited timeout here,
+            // but the lock acquisition could still be interrupted, which we catch and log.
+            // We need to be careful of the priority, it has to match that of this operation.
+            // If we choose a fixed priority other than kExempt (e.g., kNormal), it may
+            // be lower than the operation's current priority, which would cause an exception to be
+            // thrown.
+            const auto& admCtx = ExecutionAdmissionContext::get(opCtx());
+            _fetchStorageStatsIfNecessary(Date_t::max(), admCtx.getPriority());
+        } catch (DBException& ex) {
+            LOGV2_WARNING(8457400,
+                          "Failed to gather storage statistics for query stats",
+                          "opId"_attr = opCtx()->getOpID(),
+                          "error"_attr = redact(ex));
+        }
+
+        if (_debug.storageStats) {
+            _debug.additiveMetrics.aggregateStorageStats(*_debug.storageStats);
+        }
     }
 }
 
@@ -438,9 +491,10 @@ void CurOp::updateStatsOnTransactionUnstash() {
     // accrued outside of this CurOp instance so we will ignore/subtract them when reporting on this
     // operation.
     auto locker = shard_role_details::getLocker(opCtx());
-    _lockStatsBase = locker->getLockerInfo(boost::none).stats;
-    _ticketWaitBase = locker->getTimeQueuedForTicketMicros() +
-        Microseconds(locker->getFlowControlStats().timeAcquiringMicros);
+    if (!_lockerStatsBase) {
+        _lockerStatsBase.emplace();
+    }
+    _lockerStatsBase->append(getAdditiveLockerStats(locker));
 }
 
 void CurOp::updateStatsOnTransactionStash() {
@@ -449,13 +503,10 @@ void CurOp::updateStatsOnTransactionStash() {
     // the snapshot of locker stats when it was unstashed. This stats delta on stashing is added
     // when reporting on this operation.
     auto locker = shard_role_details::getLocker(opCtx());
-
-    _lockStatsOnceStashed = locker->getLockerInfo(_lockStatsBase).stats;
-    _lockStatsBase = boost::none;
-
-    _ticketWaitWhenStashed = locker->getTimeQueuedForTicketMicros() +
-        Microseconds(locker->getFlowControlStats().timeAcquiringMicros) - _ticketWaitBase;
-    _ticketWaitBase = Microseconds(0);
+    if (!_lockerStatsBase) {
+        _lockerStatsBase.emplace();
+    }
+    _lockerStatsBase->subtract(getAdditiveLockerStats(locker));
 }
 
 void CurOp::setNS_inlock(NamespaceString nss) {
@@ -478,10 +529,7 @@ TickSource::Tick CurOp::startTime() {
         _cpuTimer->start();
     }
 
-    _debug.waitForTicketDurationMillis = duration_cast<Milliseconds>(
-        shard_role_details::getLocker(opCtx())->getTimeQueuedForTicketMicros() - _ticketWaitBase +
-        _ticketWaitWhenStashed);
-    _blockedTimeAtStart = _sumBlockedTimeTotal();
+    std::tie(_blockedTimeAtStart, std::ignore) = _getAndSumBlockedTimeTotal();
 
     // The '_start' value is initialized to 0 and gets assigned on demand the first time it gets
     // accessed. The above thread ownership requirement ensures that there will never be
@@ -514,21 +562,22 @@ Microseconds CurOp::computeElapsedTimeTotal(TickSource::Tick startTime,
     return _tickSource->ticksTo<Microseconds>(endTime - startTime);
 }
 
-Milliseconds CurOp::_sumBlockedTimeTotal() {
+std::tuple<Milliseconds, Milliseconds> CurOp::_getAndSumBlockedTimeTotal() {
     auto locker = shard_role_details::getLocker(opCtx());
-    auto lockStats = locker->getLockerInfo(_lockStatsBase).stats;
+    auto cumulativeLockWaitTime = Microseconds(locker->stats().getCumulativeWaitTimeMicros());
+    auto timeQueuedForTickets = locker->getTimeQueuedForTicketMicros();
+    auto timeQueuedForFlowControl = Microseconds(locker->getFlowControlStats().timeAcquiringMicros);
 
-    auto waitForTickets = _debug.waitForTicketDurationMillis +
-        duration_cast<Milliseconds>(
-                              Microseconds(locker->getFlowControlStats().timeAcquiringMicros));
+    if (_lockerStatsBase) {
+        cumulativeLockWaitTime -= _lockerStatsBase->cumulativeLockWaitTime;
+        timeQueuedForTickets -= _lockerStatsBase->timeQueuedForTickets;
+        timeQueuedForFlowControl -= _lockerStatsBase->timeQueuedForFlowControl;
+    }
 
-    if (_lockStatsOnceStashed)
-        lockStats.append(_lockStatsOnceStashed.get());
-
-    auto waitForLocks =
-        duration_cast<Milliseconds>(Microseconds(lockStats.getCumulativeWaitTimeMicros()));
-
-    return waitForTickets + waitForLocks;
+    return std::make_pair(duration_cast<Milliseconds>(cumulativeLockWaitTime +
+                                                      timeQueuedForTickets +
+                                                      timeQueuedForFlowControl),
+                          duration_cast<Milliseconds>(timeQueuedForTickets));
 }
 
 void CurOp::enter_inlock(NamespaceString nss, int dbProfileLevel) {
@@ -588,15 +637,10 @@ bool CurOp::completeAndLogOperation(const logv2::LogOptions& logOptions,
         oplogGetMoreStats.recordMillis(executionTimeMillis);
     }
 
-    // The ticket wait time from the locker reports wait times from preceding operations in the
-    // CurOpStack. The precise time queued for tickets of a sub-operation is the ticket wait time
-    // from the locker minus the ticket wait time taken when this operation started.
-    _debug.waitForTicketDurationMillis = duration_cast<Milliseconds>(
-        shard_role_details::getLocker(opCtx)->getTimeQueuedForTicketMicros() - _ticketWaitBase +
-        _ticketWaitWhenStashed);
-
-    auto totalBlockedTime = _sumBlockedTimeTotal() - _blockedTimeAtStart;
-    auto workingMillis = Milliseconds(executionTimeMillis) - totalBlockedTime;
+    Milliseconds totalBlockedTime;
+    std::tie(totalBlockedTime, _debug.waitForTicketDurationMillis) = _getAndSumBlockedTimeTotal();
+    auto workingMillis =
+        Milliseconds(executionTimeMillis) - (totalBlockedTime - _blockedTimeAtStart);
     // Round up to zero if necessary to allow precision errors from FastClockSource used by flow
     // control ticketholder.
     _debug.workingTimeMillis = (workingMillis < Milliseconds(0) ? Milliseconds(0) : workingMillis);
@@ -639,39 +683,22 @@ bool CurOp::completeAndLogOperation(const logv2::LogOptions& logOptions,
     }
 
     if (forceLog || shouldLogSlowOp) {
-        auto lockerInfo = shard_role_details::getLocker(opCtx)->getLockerInfo(_lockStatsBase);
-        if (_lockStatsOnceStashed)
-            lockerInfo.stats.append(_lockStatsOnceStashed.get());
-        if (_debug.storageStats == nullptr &&
-            shard_role_details::getLocker(opCtx)->wasGlobalLockTaken() &&
-            opCtx->getServiceContext()->getStorageEngine()) {
-            // Do not fetch operation statistics again if we have already got them (for
-            // instance, as a part of stashing the transaction). Take a lock before calling into
-            // the storage engine to prevent racing against a shutdown. Any operation that used
-            // a storage engine would have at-least held a global lock at one point, hence we
-            // limit our lock acquisition to such operations. We can get here and our lock
-            // acquisition be timed out or interrupted, log a message if that happens.
-            try {
-                // Slow query logs are critical for observability and should not wait for ticket
-                // acquisition. Slow queries can happen for various reasons; however, if queries
-                // are slower due to ticket exhaustion, queueing in order to log can compound
-                // the issue.
-                ScopedAdmissionPriority<ExecutionAdmissionContext> skipAdmissionControl(
-                    opCtx, AdmissionContext::Priority::kExempt);
-                Lock::GlobalLock lk(opCtx,
-                                    MODE_IS,
-                                    Date_t::now() + Milliseconds(500),
-                                    Lock::InterruptBehavior::kThrow,
-                                    Lock::GlobalLockSkipOptions{.skipRSTLLock = true});
-                _debug.storageStats = shard_role_details::getRecoveryUnit(opCtx)
-                                          ->computeOperationStatisticsSinceLastCall();
-            } catch (const DBException& ex) {
-                LOGV2_WARNING_OPTIONS(20526,
-                                      logOptions,
-                                      "Failed to gather storage statistics for slow operation",
-                                      "opId"_attr = opCtx->getOpID(),
-                                      "error"_attr = redact(ex));
-            }
+        auto locker = shard_role_details::getLocker(opCtx);
+        SingleThreadedLockStats lockStats(locker->stats());
+
+        try {
+            // Slow query logs are critical for observability and should not wait for ticket
+            // acquisition. Slow queries can happen for various reasons; however, if queries
+            // are slower due to ticket exhaustion, queueing in order to log can compound
+            // the issue. Hence we pass the kExempt priority to _fetchStorageStatsIfNecessary.
+            _fetchStorageStatsIfNecessary(Date_t::now() + Milliseconds(500),
+                                          AdmissionContext::Priority::kExempt);
+        } catch (const DBException& ex) {
+            LOGV2_WARNING_OPTIONS(20526,
+                                  logOptions,
+                                  "Failed to gather storage statistics for slow operation",
+                                  "opId"_attr = opCtx->getOpID(),
+                                  "error"_attr = redact(ex));
         }
 
         // Gets the time spent blocked on prepare conflicts.
@@ -689,7 +716,7 @@ bool CurOp::completeAndLogOperation(const logv2::LogOptions& logOptions,
         }();
 
         logv2::DynamicAttributes attr;
-        _debug.report(opCtx, &lockerInfo.stats, operationMetricsPtr, &attr);
+        _debug.report(opCtx, &lockStats, operationMetricsPtr, &attr);
 
         LOGV2_OPTIONS(51803, logOptions, "Slow query", attr);
 
@@ -1019,6 +1046,30 @@ void CurOp::reportState(BSONObjBuilder* builder,
             builder->appendNull("currentQueue");
         }
     }
+}
+
+CurOp::AdditiveLockerStats CurOp::getAdditiveLockerStats(const Locker* locker) {
+    CurOp::AdditiveLockerStats stats;
+    stats.lockStats = locker->stats();
+    stats.cumulativeLockWaitTime = Microseconds(stats.lockStats.getCumulativeWaitTimeMicros());
+    stats.timeQueuedForTickets = locker->getTimeQueuedForTicketMicros();
+    stats.timeQueuedForFlowControl =
+        Microseconds(locker->getFlowControlStats().timeAcquiringMicros);
+    return stats;
+}
+
+void CurOp::AdditiveLockerStats::append(const CurOp::AdditiveLockerStats& other) {
+    lockStats.append(other.lockStats);
+    cumulativeLockWaitTime += other.cumulativeLockWaitTime;
+    timeQueuedForTickets += other.timeQueuedForTickets;
+    timeQueuedForFlowControl += other.timeQueuedForFlowControl;
+}
+
+void CurOp::AdditiveLockerStats::subtract(const CurOp::AdditiveLockerStats& other) {
+    lockStats.subtract(other.lockStats);
+    cumulativeLockWaitTime -= other.cumulativeLockWaitTime;
+    timeQueuedForTickets -= other.timeQueuedForTickets;
+    timeQueuedForFlowControl -= other.timeQueuedForFlowControl;
 }
 
 bool CurOp::_shouldDBProfileWithRateLimit(long long slowMS) {
@@ -1359,17 +1410,6 @@ void OpDebug::report(OperationContext* opCtx,
         pAttrs->add("remoteOpWaitMillis", durationCount<Milliseconds>(*remoteOpWaitTime));
     }
 
-    if (gFeatureFlagLogSlowOpsBasedOnTimeWorking.isEnabled(
-            serverGlobalParams.featureCompatibility.acquireFCVSnapshot())) {
-        // workingMillis should always be present for any operation
-        pAttrs->add("workingMillis", workingTimeMillis.count());
-    }
-
-    // durationMillis should always be present for any operation
-    pAttrs->add(
-        "durationMillis",
-        durationCount<Milliseconds>(additiveMetrics.executionTime.value_or(Microseconds{0})));
-
     // (Ignore FCV check): This feature flag is not FCV gated (shouldBeFCVGated is false)
     if (gFeatureFlagIngressAdmissionControl.isEnabledAndIgnoreFCVUnsafe()) {
         BSONObjBuilder queuesBuilder;
@@ -1384,6 +1424,17 @@ void OpDebug::report(OperationContext* opCtx,
 
         pAttrs->add("queues", queuesBuilder.obj());
     }
+
+    if (gFeatureFlagLogSlowOpsBasedOnTimeWorking.isEnabled(
+            serverGlobalParams.featureCompatibility.acquireFCVSnapshot())) {
+        // workingMillis should always be present for any operation
+        pAttrs->add("workingMillis", workingTimeMillis.count());
+    }
+
+    // durationMillis should always be present for any operation
+    pAttrs->add(
+        "durationMillis",
+        durationCount<Milliseconds>(additiveMetrics.executionTime.value_or(Microseconds{0})));
 }
 
 void OpDebug::reportStorageStats(logv2::DynamicAttributes* pAttrs) const {
@@ -1918,6 +1969,12 @@ std::function<BSONObj(ProfileFilter::Args)> OpDebug::appendStaged(StringSet requ
                            args.op.additiveMetrics.executionTime.value_or(Microseconds{0})));
     });
 
+    addIfNeeded("workingMillis", [](auto field, auto args, auto& b) {
+        b.appendNumber(field,
+                       durationCount<Milliseconds>(
+                           args.op.additiveMetrics.clusterWorkingTime.value_or(Milliseconds{0})));
+    });
+
     addIfNeeded("rateLimit", [](auto field, auto args, auto& b) {
         b.append(field,
                  durationCount<Milliseconds>(args.op.additiveMetrics.executionTime.value_or(
@@ -1985,7 +2042,7 @@ std::function<BSONObj(ProfileFilter::Args)> OpDebug::appendStaged(StringSet requ
     };
 }
 
-void OpDebug::setPlanSummaryMetrics(const PlanSummaryStats& planSummaryStats) {
+void OpDebug::setPlanSummaryMetrics(PlanSummaryStats&& planSummaryStats) {
     // Data-bearing node metrics need to be aggregated here rather than just assigned.
     // Certain operations like $mergeCursors may have already accumulated metrics from remote
     // data-bearing nodes, and we need to add in the work done locally.
@@ -2009,10 +2066,11 @@ void OpDebug::setPlanSummaryMetrics(const PlanSummaryStats& planSummaryStats) {
     sortSpills = planSummaryStats.sortSpills;
     sortTotalDataSizeBytes = planSummaryStats.sortTotalDataSizeBytes;
     keysSorted = planSummaryStats.keysSorted;
-    replanReason = planSummaryStats.replanReason;
     collectionScans = planSummaryStats.collectionScans;
     collectionScansNonTailable = planSummaryStats.collectionScansNonTailable;
-    indexesUsed = planSummaryStats.indexesUsed;
+
+    replanReason = std::move(planSummaryStats.replanReason);
+    indexesUsed = std::move(planSummaryStats.indexesUsed);
 }
 
 BSONObj OpDebug::makeFlowControlObject(FlowControlTicketholder::CurOp stats) {
@@ -2093,6 +2151,11 @@ CursorMetrics OpDebug::getCursorMetrics() const {
 
     metrics.setKeysExamined(additiveMetrics.keysExamined.value_or(0));
     metrics.setDocsExamined(additiveMetrics.docsExamined.value_or(0));
+    metrics.setBytesRead(additiveMetrics.bytesRead.value_or(0));
+
+    metrics.setReadingTimeMicros(additiveMetrics.readingTime.value_or(Microseconds(0)).count());
+    metrics.setWorkingTimeMillis(
+        additiveMetrics.clusterWorkingTime.value_or(Milliseconds(0)).count());
 
     metrics.setHasSortStage(additiveMetrics.hasSortStage);
     metrics.setUsedDisk(additiveMetrics.usedDisk);
@@ -2175,6 +2238,7 @@ boost::optional<T> addOptionals(const boost::optional<T>& lhs, const boost::opti
 void OpDebug::AdditiveMetrics::add(const AdditiveMetrics& otherMetrics) {
     keysExamined = addOptionals(keysExamined, otherMetrics.keysExamined);
     docsExamined = addOptionals(docsExamined, otherMetrics.docsExamined);
+    bytesRead = addOptionals(bytesRead, otherMetrics.bytesRead);
     nMatched = addOptionals(nMatched, otherMetrics.nMatched);
     nreturned = addOptionals(nreturned, otherMetrics.nreturned);
     nBatches = addOptionals(nBatches, otherMetrics.nBatches);
@@ -2184,6 +2248,8 @@ void OpDebug::AdditiveMetrics::add(const AdditiveMetrics& otherMetrics) {
     nUpserted = addOptionals(nUpserted, otherMetrics.nUpserted);
     keysInserted = addOptionals(keysInserted, otherMetrics.keysInserted);
     keysDeleted = addOptionals(keysDeleted, otherMetrics.keysDeleted);
+    readingTime = addOptionals(readingTime, otherMetrics.readingTime);
+    clusterWorkingTime = addOptionals(clusterWorkingTime, otherMetrics.clusterWorkingTime);
     prepareReadConflicts.fetchAndAdd(otherMetrics.prepareReadConflicts.load());
     writeConflicts.fetchAndAdd(otherMetrics.writeConflicts.load());
     temporarilyUnavailableErrors.fetchAndAdd(otherMetrics.temporarilyUnavailableErrors.load());
@@ -2205,6 +2271,9 @@ void OpDebug::AdditiveMetrics::aggregateDataBearingNodeMetrics(
     const query_stats::DataBearingNodeMetrics& metrics) {
     keysExamined = keysExamined.value_or(0) + metrics.keysExamined;
     docsExamined = docsExamined.value_or(0) + metrics.docsExamined;
+    bytesRead = bytesRead.value_or(0) + metrics.bytesRead;
+    readingTime = readingTime.value_or(Microseconds(0)) + metrics.readingTime;
+    clusterWorkingTime = clusterWorkingTime.value_or(Milliseconds(0)) + metrics.clusterWorkingTime;
     hasSortStage = hasSortStage || metrics.hasSortStage;
     usedDisk = usedDisk || metrics.usedDisk;
     fromMultiPlanner = fromMultiPlanner || metrics.fromMultiPlanner;
@@ -2228,10 +2297,18 @@ void OpDebug::AdditiveMetrics::aggregateCursorMetrics(const CursorMetrics& metri
     aggregateDataBearingNodeMetrics(
         query_stats::DataBearingNodeMetrics{static_cast<uint64_t>(metrics.getKeysExamined()),
                                             static_cast<uint64_t>(metrics.getDocsExamined()),
+                                            static_cast<uint64_t>(metrics.getBytesRead()),
+                                            Microseconds(metrics.getReadingTimeMicros()),
+                                            Milliseconds(metrics.getWorkingTimeMillis()),
                                             metrics.getHasSortStage(),
                                             metrics.getUsedDisk(),
                                             metrics.getFromMultiPlanner(),
                                             metrics.getFromPlanCache()});
+}
+
+void OpDebug::AdditiveMetrics::aggregateStorageStats(const StorageStats& stats) {
+    bytesRead = bytesRead.value_or(0) + stats.bytesRead();
+    readingTime = readingTime.value_or(Microseconds(0)) + stats.readingTime();
 }
 
 void OpDebug::AdditiveMetrics::reset() {

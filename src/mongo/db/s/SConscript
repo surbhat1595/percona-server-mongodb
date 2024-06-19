@@ -157,11 +157,9 @@ env.Library(
         'resharding/resharding_oplog_session_application.cpp',
         'resharding/resharding_recipient_service.cpp',
         'resharding/resharding_recipient_service_external_state.cpp',
-        'resharding/resharding_server_parameters.idl',
         'resharding/resharding_txn_cloner.cpp',
         'resharding/resharding_txn_cloner_progress.idl',
         'resharding/resharding_util.cpp',
-        'scoped_operation_completion_sharding_actions.cpp',
         'session_catalog_migration.cpp',
         'session_catalog_migration_destination.cpp',
         'session_catalog_migration_source.cpp',
@@ -207,6 +205,7 @@ env.Library(
         '$BUILD_DIR/mongo/s/query/cluster_aggregate',
         '$BUILD_DIR/mongo/s/sharding_api',
         'forwardable_operation_metadata',
+        'resharding_server_parameters_idl',
         'sharding_catalog_manager',
         'transaction_coordinator',
     ],
@@ -401,9 +400,9 @@ env.Library(
         '$BUILD_DIR/mongo/s/common_s',
         '$BUILD_DIR/mongo/s/query/cluster_aggregate',
         '$BUILD_DIR/mongo/util/log_and_backoff',
-        '$BUILD_DIR/mongo/util/namespace_string_database_name_util',
         '$BUILD_DIR/mongo/util/pcre_wrapper',
         'forwardable_operation_metadata',
+        'resharding_server_parameters_idl',
         'sharding_logging',
         'user_writes_recoverable_critical_section',
     ],
@@ -540,6 +539,7 @@ env.Library(
         'shardsvr_commit_reshard_collection_command.cpp',
         'shardsvr_compact_structured_encryption_data_command.cpp',
         'shardsvr_convert_to_capped_command.cpp',
+        'shardsvr_convert_to_capped_participant_command.cpp',
         'shardsvr_create_collection_command.cpp',
         'shardsvr_create_collection_participant_command.cpp',
         'shardsvr_create_global_index_command.cpp',
@@ -555,6 +555,7 @@ env.Library(
         'shardsvr_get_stats_for_balancing_command.cpp',
         'shardsvr_index_catalog_test_commands.cpp',
         'shardsvr_insert_global_index_key_command.cpp',
+        'shardsvr_join_ddl_coordinators_command.cpp',
         'shardsvr_join_migrations_command.cpp',
         'shardsvr_merge_all_chunks_on_shard_command.cpp',
         'shardsvr_merge_chunks_command.cpp',
@@ -726,6 +727,12 @@ env.Library(
         '$BUILD_DIR/mongo/db/op_observer/operation_logger_impl',
         '$BUILD_DIR/mongo/s/catalog/sharding_catalog_client_impl',
     ],
+)
+
+env.Library(
+    target="resharding_server_parameters_idl",
+    source=["resharding/resharding_server_parameters.idl"],
+    LIBDEPS_PRIVATE=["$BUILD_DIR/mongo/db/server_base"],
 )
 
 env.CppUnitTest(

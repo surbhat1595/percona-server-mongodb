@@ -55,7 +55,6 @@
 #include "mongo/db/exec/document_value/value_comparator.h"
 #include "mongo/db/feature_flag.h"
 #include "mongo/db/pipeline/aggregate_command_gen.h"
-#include "mongo/db/pipeline/sharded_agg_helpers.h"
 #include "mongo/db/query/getmore_command_gen.h"
 #include "mongo/db/repl/read_concern_args.h"
 #include "mongo/db/repl/read_concern_level.h"
@@ -270,10 +269,10 @@ std::unique_ptr<Pipeline, PipelineDeleter> ReshardingCollectionCloner::_targetAg
         request.setHint(*hint);
     }
 
-    request.setReadConcern(BSON(repl::ReadConcernArgs::kLevelFieldName
-                                << repl::readConcernLevels::kSnapshotName
-                                << repl::ReadConcernArgs::kAtClusterTimeFieldName
-                                << _atClusterTime));
+    request.setReadConcern(
+        BSON(repl::ReadConcernArgs::kLevelFieldName
+             << repl::readConcernLevels::toString(repl::ReadConcernLevel::kSnapshotReadConcern)
+             << repl::ReadConcernArgs::kAtClusterTimeFieldName << _atClusterTime));
 
     // The read preference on the request is merely informational (e.g. for profiler entries) -- the
     // pipeline's opCtx setting is actually used when sending the request.
@@ -566,12 +565,9 @@ private:
     stdx::condition_variable _allProducerConsumerClosed;
 };
 
-void ReshardingCollectionCloner::_runOnceWithNaturalOrder(
-    OperationContext* opCtx,
-    std::shared_ptr<MongoProcessInterface> mongoProcessInterface,
-    std::shared_ptr<executor::TaskExecutor> executor,
-    std::shared_ptr<executor::TaskExecutor> cleanupExecutor,
-    CancellationToken cancelToken) {
+sharded_agg_helpers::DispatchShardPipelineResults
+ReshardingCollectionCloner::_queryOnceWithNaturalOrder(
+    OperationContext* opCtx, std::shared_ptr<MongoProcessInterface> mongoProcessInterface) {
     auto resumeData = resharding::data_copy::getRecipientResumeData(opCtx, _reshardingUUID);
     LOGV2_DEBUG(7763604,
                 resumeData.empty() ? 2 : 1,
@@ -632,11 +628,14 @@ void ReshardingCollectionCloner::_runOnceWithNaturalOrder(
 
     auto pipeline = Pipeline::makePipeline(rawPipeline, expCtx, pipelineOpts);
 
-    const Document serializedCommand = aggregation_request_helper::serializeToCommandDoc(request);
-    auto readConcern = BSON(repl::ReadConcernArgs::kLevelFieldName
-                            << repl::readConcernLevels::kSnapshotName
-                            << repl::ReadConcernArgs::kAtClusterTimeFieldName << _atClusterTime
-                            << repl::ReadConcernArgs::kWaitLastStableRecoveryTimestamp << true);
+    const Document serializedCommand =
+        aggregation_request_helper::serializeToCommandDoc(expCtx, request);
+
+    auto readConcern =
+        BSON(repl::ReadConcernArgs::kLevelFieldName
+             << repl::readConcernLevels::toString(repl::ReadConcernLevel::kSnapshotReadConcern)
+             << repl::ReadConcernArgs::kAtClusterTimeFieldName << _atClusterTime
+             << repl::ReadConcernArgs::kWaitLastStableRecoveryTimestamp << true);
     request.setReadConcern(readConcern);
 
     // The read preference on the request is merely informational (e.g. for profiler entries) -- the
@@ -658,6 +657,15 @@ void ReshardingCollectionCloner::_runOnceWithNaturalOrder(
                                                    std::move(resumeTokenMap),
                                                    std::move(shardsToSkip));
 
+    return dispatchResults;
+}
+
+void ReshardingCollectionCloner::_writeOnceWithNaturalOrder(
+    OperationContext* opCtx,
+    std::shared_ptr<executor::TaskExecutor> executor,
+    std::shared_ptr<executor::TaskExecutor> cleanupExecutor,
+    CancellationToken cancelToken,
+    sharded_agg_helpers::DispatchShardPipelineResults& dispatchResults) {
     // If we don't establish any cursors, there is no work to do. Return.
     if (dispatchResults.remoteCursors.empty()) {
         return;
@@ -725,6 +733,24 @@ void ReshardingCollectionCloner::_runOnceWithNaturalOrder(
                                true /*useNaturalOrderCloner*/);
              })
         .get();
+}
+
+void ReshardingCollectionCloner::_runOnceWithNaturalOrder(
+    OperationContext* opCtx,
+    std::shared_ptr<MongoProcessInterface> mongoProcessInterface,
+    std::shared_ptr<executor::TaskExecutor> executor,
+    std::shared_ptr<executor::TaskExecutor> cleanupExecutor,
+    CancellationToken cancelToken) {
+    auto dispatchResults = shardVersionRetry(
+        opCtx,
+        Grid::get(opCtx)->catalogCache(),
+        _sourceNss,
+        "resharding collection cloner fetching with natural order (query stage)"_sd,
+        [&] { return _queryOnceWithNaturalOrder(opCtx, mongoProcessInterface); });
+
+    resharding::data_copy::withOneStaleConfigRetry(opCtx, [&] {
+        _writeOnceWithNaturalOrder(opCtx, executor, cleanupExecutor, cancelToken, dispatchResults);
+    });
 }
 
 std::unique_ptr<Pipeline, PipelineDeleter> ReshardingCollectionCloner::_restartPipeline(
@@ -866,13 +892,11 @@ SemiFuture<void> ReshardingCollectionCloner::run(
                    // We can run into StaleConfig errors when cloning collections. To make it
                    // safer during retry, we retry the whole cloning process and rely on the
                    // resume token to be correct.
-                   resharding::data_copy::withOneStaleConfigRetry(opCtx.get(), [&] {
-                       _runOnceWithNaturalOrder(opCtx.get(),
-                                                MongoProcessInterface::create(opCtx.get()),
-                                                executor,
-                                                cleanupExecutor,
-                                                cancelToken);
-                   });
+                   _runOnceWithNaturalOrder(opCtx.get(),
+                                            MongoProcessInterface::create(opCtx.get()),
+                                            executor,
+                                            cleanupExecutor,
+                                            cancelToken);
                    // If we got here, we succeeded and there is no more to come.  Otherwise
                    // _runOnceWithNaturalOrder would uassert.
                    chainCtx->moreToCome = false;

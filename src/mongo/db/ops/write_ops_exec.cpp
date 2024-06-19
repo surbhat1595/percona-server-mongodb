@@ -290,8 +290,7 @@ void makeCollection(OperationContext* opCtx, const NamespaceString& ns) {
             uassertStatusOK(userAllowedCreateNS(opCtx, ns));
             // TODO (SERVER-77915): Remove once 8.0 becomes last LTS.
             // TODO (SERVER-82066): Update handling for direct connections.
-            // TODO (SERVER-81937): Update handling for transactions.
-            // TODO (SERVER-85366): Update handling for retryable writes.
+            // TODO (SERVER-86254): Update handling for transactions and retryable writes.
             boost::optional<OperationShardingState::ScopedAllowImplicitCollectionCreate_UNSAFE>
                 allowCollectionCreation;
             const auto fcvSnapshot = serverGlobalParams.featureCompatibility.acquireFCVSnapshot();
@@ -512,19 +511,17 @@ bool handleError(OperationContext* opCtx,
     if (ex.code() == ErrorCodes::StaleDbVersion || ErrorCodes::isStaleShardVersionError(ex) ||
         ex.code() == ErrorCodes::ShardCannotRefreshDueToLocksHeld ||
         ex.code() == ErrorCodes::CannotImplicitlyCreateCollection) {
+        // Fail the write for direct shard operations so that a RetryableWriteError label can be
+        // returned and the write can be retried by the driver.
+        if (!OperationShardingState::isComingFromRouter(opCtx) &&
+            ex.code() == ErrorCodes::StaleConfig && opCtx->isRetryableWrite()) {
+            throw;
+        }
+
         if (!opCtx->getClient()->isInDirectClient() &&
             ex.code() != ErrorCodes::CannotImplicitlyCreateCollection) {
             auto& oss = OperationShardingState::get(opCtx);
             oss.setShardingOperationFailedStatus(ex.toStatus());
-        }
-
-        // Fail the write for direct shard operations so that a RetryableWriteError label
-        // can be returned and the write can be retried by the driver. The retry should succeed
-        // because a command failing with StaleConfig triggers sharding metadata refresh in the
-        // ScopedOperationCompletionShardingActions destructor.
-        if (!OperationShardingState::isComingFromRouter(opCtx) &&
-            ex.code() == ErrorCodes::StaleConfig && opCtx->isRetryableWrite()) {
-            throw;
         }
 
         // For routing errors, it is guaranteed that all subsequent operations will fail
@@ -843,8 +840,7 @@ UpdateResult performUpdate(OperationContext* opCtx,
         uassertStatusOK(userAllowedCreateNS(opCtx, nsString));
         // TODO (SERVER-77915): Remove once 8.0 becomes last LTS.
         // TODO (SERVER-82066): Update handling for direct connections.
-        // TODO (SERVER-81937): Update handling for transactions.
-        // TODO (SERVER-85366): Update handling for retryable writes.
+        // TODO (SERVER-86254): Update handling for transactions and retryable writes.
         boost::optional<OperationShardingState::ScopedAllowImplicitCollectionCreate_UNSAFE>
             allowCollectionCreation;
         const auto fcvSnapshot = serverGlobalParams.featureCompatibility.acquireFCVSnapshot();
@@ -912,7 +908,7 @@ UpdateResult performUpdate(OperationContext* opCtx,
 
     write_ops_exec::recordUpdateResultInOpDebug(updateResult, &curOp->debug());
 
-    curOp->debug().setPlanSummaryMetrics(summaryStats);
+    curOp->debug().setPlanSummaryMetrics(std::move(summaryStats));
 
     if (updateResult.containsDotsAndDollarsField) {
         // If it's an upsert, increment 'inserts' metric, otherwise increment 'updates'.
@@ -1018,7 +1014,7 @@ long long performDelete(OperationContext* opCtx,
     if (const auto& coll = collectionPtr) {
         CollectionQueryInfo::get(coll).notifyOfQuery(opCtx, coll, summaryStats);
     }
-    curOp->debug().setPlanSummaryMetrics(summaryStats);
+    curOp->debug().setPlanSummaryMetrics(std::move(summaryStats));
 
     // Fill out OpDebug with the number of deleted docs.
     auto nDeleted = exec->getDeleteResult();
@@ -1118,7 +1114,6 @@ void logOperationAndProfileIfNeeded(OperationContext* opCtx, CurOp* curOp) {
 WriteResult performInserts(OperationContext* opCtx,
                            const write_ops::InsertCommandRequest& wholeOp,
                            OperationSource source) {
-
     // Insert performs its own retries, so we should only be within a WriteUnitOfWork when run in a
     // transaction.
     auto txnParticipant = TransactionParticipant::get(opCtx);
@@ -1182,11 +1177,19 @@ WriteResult performInserts(OperationContext* opCtx,
     const size_t maxBatchBytes = write_ops::insertVectorMaxBytes;
     batch.reserve(std::min(wholeOp.getDocuments().size(), maxBatchSize));
 
+    // If 'wholeOp.getBypassEmptyTsReplacement()' is true or if 'source' is 'kFromMigrate', set
+    // "bypassEmptyTsReplacement=true" for fixDocumentForInsert().
+    const bool bypassEmptyTsReplacement = (source == OperationSource::kFromMigrate) ||
+        static_cast<bool>(wholeOp.getBypassEmptyTsReplacement());
+
     for (auto&& doc : wholeOp.getDocuments()) {
         const auto currentOpIndex = nextOpIndex++;
         const bool isLastDoc = (&doc == &wholeOp.getDocuments().back());
         bool containsDotsAndDollarsField = false;
-        auto fixedDoc = fixDocumentForInsert(opCtx, doc, &containsDotsAndDollarsField);
+
+        auto fixedDoc = fixDocumentForInsert(
+            opCtx, doc, bypassEmptyTsReplacement, &containsDotsAndDollarsField);
+
         const StmtId stmtId = getStmtIdForWriteOp(opCtx, wholeOp, currentOpIndex);
         const bool wasAlreadyExecuted = opCtx->isRetryableWrite() &&
             txnParticipant.checkStatementExecutedNoOplogEntryFetch(opCtx, stmtId);
@@ -1302,7 +1305,7 @@ static SingleWriteResult performSingleUpdateOpNoRetry(OperationContext* opCtx,
     if (source != OperationSource::kTimeseriesInsert) {
         recordUpdateResultInOpDebug(updateResult, &curOp.debug());
     }
-    curOp.debug().setPlanSummaryMetrics(summary);
+    curOp.debug().setPlanSummaryMetrics(std::move(summary));
 
     const bool didInsert = !updateResult.upsertedId.isEmpty();
     const long long nMatchedOrInserted = didInsert ? 1 : updateResult.numMatched;
@@ -1435,6 +1438,7 @@ static SingleWriteResult performSingleUpdateOpWithDupKeyRetry(
     const write_ops::UpdateOpEntry& op,
     LegacyRuntimeConstants runtimeConstants,
     const boost::optional<BSONObj>& letParams,
+    const OptionalBool& bypassEmptyTsReplacement,
     const boost::optional<UUID>& sampleId,
     OperationSource source,
     bool forgoOpCounterIncrements) {
@@ -1464,6 +1468,7 @@ static SingleWriteResult performSingleUpdateOpWithDupKeyRetry(
     if (letParams) {
         request.setLetParameters(std::move(letParams));
     }
+    request.setBypassEmptyTsReplacement(bypassEmptyTsReplacement);
     request.setStmtIds(stmtIds);
     request.setYieldPolicy(PlanYieldPolicy::YieldPolicy::YIELD_AUTO);
     request.setSource(source);
@@ -1700,6 +1705,7 @@ WriteResult performUpdates(OperationContext* opCtx,
                                                      singleOp,
                                                      runtimeConstants,
                                                      wholeOp.getLet(),
+                                                     wholeOp.getBypassEmptyTsReplacement(),
                                                      sampleId,
                                                      source,
                                                      forgoOpCounterIncrements);
@@ -1858,7 +1864,7 @@ static SingleWriteResult performSingleDeleteOp(OperationContext* opCtx,
     if (const auto& coll = collection.getCollectionPtr()) {
         CollectionQueryInfo::get(coll).notifyOfQuery(opCtx, coll, summary);
     }
-    curOp.debug().setPlanSummaryMetrics(summary);
+    curOp.debug().setPlanSummaryMetrics(std::move(summary));
 
     if (curOp.shouldDBProfile()) {
         auto&& [stats, _] = explainer.getWinningPlanStats(ExplainOptions::Verbosity::kExecStats);
@@ -2338,6 +2344,8 @@ write_ops::UpdateCommandRequest makeTimeseriesTransformationOp(
     // The schema validation configured in the bucket collection is intended for direct
     // operations by end users and is not applicable here.
     base.setBypassDocumentValidation(true);
+
+    base.setBypassEmptyTsReplacement(request.getBypassEmptyTsReplacement());
 
     // Timeseries compression operation is not a user operation and should not use a
     // statement id from any user op. Set to Uninitialized to bypass.

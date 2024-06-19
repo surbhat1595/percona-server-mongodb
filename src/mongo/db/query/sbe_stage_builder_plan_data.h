@@ -32,6 +32,7 @@
 #include "mongo/db/exec/sbe/expressions/compile_ctx.h"
 #include "mongo/db/exec/sbe/expressions/expression.h"
 #include "mongo/db/exec/sbe/expressions/runtime_environment.h"
+#include "mongo/db/exec/sbe/in_list.h"
 #include "mongo/db/exec/sbe/values/slot.h"
 #include "mongo/db/matcher/expression.h"
 #include "mongo/db/namespace_string.h"
@@ -231,12 +232,6 @@ struct PlanStageStaticData {
     // SBE Slots. The slots are registered in the 'RuntimeEnvironment'.
     VariableIdToSlotMap variableIdToSlotMap;
 
-    // Stores variables that are not global/part of the runtime environment, but are temporarily
-    // injected when translating a specific expression. This is useful if we're translating an MQL
-    // expression as part of translating some larger entity (e.g. a match expression).
-    stdx::unordered_map<Variables::Id, std::pair<sbe::FrameId, sbe::value::SlotId>>
-        injectedVariables;
-
     // Stores auxiliary data to restore index bounds for a cached auto-parameterized SBE plan
     // for every index used by the plan.
     std::vector<IndexBoundsEvaluationInfo> indexBoundsEvaluationInfos;
@@ -259,10 +254,10 @@ struct PlanStageStaticData {
     // structures, so it must be kept stable.
     std::shared_ptr<CollatorInterface> queryCollator;
 
-    // Shared pointers to InListDatas used by this SBE plan.
-    std::vector<std::shared_ptr<InListData>> inLists;
+    // InLists used by this SBE plan.
+    std::vector<std::unique_ptr<sbe::InList>> inLists;
 
-    // Shared pointers (and a map) to the additonal collators used by this SBE plan.
+    // Collators used by this SBE plan.
     std::vector<std::unique_ptr<CollatorInterface>> collators;
 
     /**
@@ -297,9 +292,7 @@ struct PlanStageData {
           replanReason(other.replanReason),
           savedStatsOnEarlyExit(std::unique_ptr<sbe::PlanStageStats>(
               other.savedStatsOnEarlyExit ? other.savedStatsOnEarlyExit->clone() : nullptr)),
-          debugInfo(other.debugInfo),
-          inLists(other.inLists),
-          inListsSet(other.inListsSet) {}
+          debugInfo(other.debugInfo) {}
 
     PlanStageData& operator=(PlanStageData&&) = default;
 
@@ -311,8 +304,6 @@ struct PlanStageData {
             savedStatsOnEarlyExit = std::unique_ptr<sbe::PlanStageStats>{
                 other.savedStatsOnEarlyExit ? other.savedStatsOnEarlyExit->clone() : nullptr};
             debugInfo = other.debugInfo;
-            inLists = other.inLists;
-            inListsSet = other.inListsSet;
         }
         return *this;
     }
@@ -336,12 +327,6 @@ struct PlanStageData {
     // Stores plan cache entry information used as debug information or for "explain" purpose. Note
     // that 'debugInfo' is present only if this PlanStageData is recovered from the plan cache.
     std::shared_ptr<const DebugInfoSBE> debugInfo;
-
-    // Shared pointers to InListDatas used by this SBE plan.
-    std::vector<std::shared_ptr<InListData>> inLists;
-
-    // Hash set of the InListData pointers in 'inLists'.
-    absl::flat_hash_set<InListData*> inListsSet;
 };
 
 }  // namespace mongo::stage_builder

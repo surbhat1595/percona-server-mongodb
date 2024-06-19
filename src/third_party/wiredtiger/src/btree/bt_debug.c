@@ -549,7 +549,7 @@ __debug_cell_int(WT_DBG *ds, const WT_PAGE_HEADER *dsk, WT_CELL_UNPACK_ADDR *unp
 
     session = ds->session;
 
-    WT_RET(ds->f(ds, "\t%s: len: %" PRIu32, __wt_cell_type_string(unpack->raw), unpack->size));
+    WT_RET(ds->f(ds, "\t%s: len: %" PRIu32, __wti_cell_type_string(unpack->raw), unpack->size));
 
     /* Dump the cell's per-disk page type information. */
     switch (dsk->type) {
@@ -627,7 +627,7 @@ __debug_cell_kv(
         WT_RET(ds->f(ds,
           "\t"
           "cell_type: %s | len: %" PRIu32,
-          __wt_cell_type_string(unpack->raw), unpack->size));
+          __wti_cell_type_string(unpack->raw), unpack->size));
     else if (F_ISSET(ds, WT_DEBUG_UNREDACT_KEYS)) {
         if (unpack->raw == WT_CELL_KEY || unpack->raw == WT_CELL_KEY_PFX ||
           unpack->raw == WT_CELL_KEY_OVFL || unpack->raw == WT_CELL_KEY_SHORT ||
@@ -635,17 +635,17 @@ __debug_cell_kv(
             WT_RET(ds->f(ds,
               "\t"
               "cell_type: %s | len: %" PRIu32,
-              __wt_cell_type_string(unpack->raw), unpack->size));
+              __wti_cell_type_string(unpack->raw), unpack->size));
         else
             WT_RET(ds->f(ds,
               "\t"
               "cell_type: %s | len: {REDACTED}",
-              __wt_cell_type_string(unpack->raw)));
+              __wti_cell_type_string(unpack->raw)));
     } else
         WT_RET(ds->f(ds,
           "\t"
           "cell_type: %s | len: {REDACTED}",
-          __wt_cell_type_string(unpack->raw)));
+          __wti_cell_type_string(unpack->raw)));
 
     /* Dump per-disk page type information. */
     switch (page_type) {
@@ -677,10 +677,6 @@ __debug_cell_kv(
         break;
     }
 
-    /* Early exit for column store deleted cells. There's nothing further to print. */
-    if (unpack->raw == WT_CELL_DEL)
-        return (0);
-
     /* Overflow addresses. */
     switch (unpack->raw) {
     case WT_CELL_KEY_OVFL:
@@ -690,6 +686,10 @@ __debug_cell_kv(
         break;
     }
     WT_RET(ds->f(ds, "\n"));
+
+    /* Early exit for column store deleted cells. There's nothing further to print. */
+    if (unpack->raw == WT_CELL_DEL)
+        return (0);
 
     WT_RET(page == NULL ? __wt_dsk_cell_data_ref_kv(session, page_type, unpack, ds->t1) :
                           __wt_page_cell_data_ref_kv(session, page, unpack, ds->t1));
@@ -745,7 +745,7 @@ __debug_dsk_col_fix(WT_DBG *ds, const WT_PAGE_HEADER *dsk)
 
     btree = S2BT(ds->session);
 
-    WT_RET(__wt_col_fix_read_auxheader(ds->session, dsk, &auxhdr));
+    WT_RET(__wti_col_fix_read_auxheader(ds->session, dsk, &auxhdr));
 
     WT_RET(ds->f(ds, "\t> "));
     switch (auxhdr.version) {
@@ -1288,7 +1288,7 @@ __debug_page_metadata(WT_DBG *ds, WT_REF *ref)
     if (split_gen != 0)
         WT_RET(ds->f(ds, " | split_gen: %" PRIu64, split_gen));
     if (mod != NULL)
-        WT_RET(ds->f(ds, " | page_state: %" PRIu32, mod->page_state));
+        WT_RET(ds->f(ds, " | page_state: %" PRIu32, __wt_atomic_load32(&mod->page_state)));
     WT_RET(ds->f(ds, " | page_mem_size: %" WT_SIZET_FMT, page->memory_footprint));
     return (ds->f(ds, "\n"));
 }
@@ -1582,7 +1582,7 @@ __debug_row_skip(WT_DBG *ds, WT_INSERT_HEAD *head)
 static int
 __debug_modify(WT_DBG *ds, const uint8_t *data)
 {
-    size_t nentries, data_size, offset, size;
+    size_t data_size, nentries, offset, size;
     const size_t *p;
 
     p = (size_t *)data;
@@ -1724,10 +1724,17 @@ __debug_ref(WT_DBG *ds, WT_REF *ref)
         WT_RET(ds->f(ds, " | page_type: ["));
         if (F_ISSET(ref, WT_REF_FLAG_INTERNAL))
             WT_RET(ds->f(ds, "%s", "internal"));
-        if (F_ISSET(ref, WT_REF_FLAG_LEAF))
+        else
             WT_RET(ds->f(ds, "%s", "leaf"));
-        if (F_ISSET(ref, WT_REF_FLAG_READING))
-            WT_RET(ds->f(ds, ", %s", "reading"));
+        WT_RET(ds->f(ds, "]"));
+    }
+
+    if (ref->flags_atomic != 0) {
+        WT_RET(ds->f(ds, " | flags_atomic: [ "));
+        if (F_ISSET_ATOMIC_8(ref, WT_REF_FLAG_READING))
+            WT_RET(ds->f(ds, "%s", "reading "));
+        if (F_ISSET_ATOMIC_8(ref, WT_REF_FLAG_PREFETCH))
+            WT_RET(ds->f(ds, "%s", "prefetch "));
         WT_RET(ds->f(ds, "]"));
     }
 

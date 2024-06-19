@@ -188,7 +188,7 @@ __wt_evict(WT_SESSION_IMPL *session, WT_REF *ref, uint8_t previous_state, uint32
     WT_DECL_RET;
     WT_PAGE *page;
     uint8_t stats_flags;
-    bool clean_page, closing, inmem_split, tree_dead, ebusy_only;
+    bool clean_page, closing, ebusy_only, inmem_split, tree_dead;
 
     conn = S2C(session);
     page = ref->page;
@@ -248,7 +248,7 @@ __wt_evict(WT_SESSION_IMPL *session, WT_REF *ref, uint8_t previous_state, uint32
          * freeing the page memory or otherwise touching the reference because eviction paths assume
          * a non-NULL reference on the queue is pointing at valid memory.
          */
-        __wt_evict_list_clear_page(session, ref);
+        __wti_evict_list_clear_page(session, ref);
     }
 
     if (F_ISSET_ATOMIC_16(page, WT_PAGE_PREFETCH))
@@ -546,8 +546,6 @@ __evict_child_check(WT_SESSION_IMPL *session, WT_REF *parent)
     bool busy, visible;
 
     busy = false;
-    /* Pre-fetch queue flags on a ref need to be checked while holding the pre-fetch lock. */
-    __wt_spin_lock(session, &S2C(session)->prefetch_lock);
 
     /*
      * There may be cursors in the tree walking the list of child pages. The parent is locked, so
@@ -559,7 +557,7 @@ __evict_child_check(WT_SESSION_IMPL *session, WT_REF *parent)
      */
     WT_INTL_FOREACH_BEGIN (session, parent->page, child) {
         /* It isn't safe to evict if there is a child on the pre-fetch queue. */
-        if (F_ISSET(child, WT_REF_FLAG_PREFETCH)) {
+        if (F_ISSET_ATOMIC_8(child, WT_REF_FLAG_PREFETCH)) {
             busy = true;
             break;
         }
@@ -575,7 +573,7 @@ __evict_child_check(WT_SESSION_IMPL *session, WT_REF *parent)
             break;
     }
     WT_INTL_FOREACH_END;
-    __wt_spin_unlock(session, &S2C(session)->prefetch_lock);
+
     if (busy)
         return (__wt_set_return(session, EBUSY));
 
@@ -784,8 +782,8 @@ __evict_reconcile(WT_SESSION_IMPL *session, WT_REF *ref, uint32_t evict_flags)
     WT_CONNECTION_IMPL *conn;
     WT_DECL_RET;
     uint32_t flags;
-    bool closing, is_eviction_thread, use_snapshot_for_app_thread,
-      is_application_thread_snapshot_refreshed;
+    bool closing, is_application_thread_snapshot_refreshed, is_eviction_thread,
+      use_snapshot_for_app_thread;
 
     btree = S2BT(session);
     conn = S2C(session);

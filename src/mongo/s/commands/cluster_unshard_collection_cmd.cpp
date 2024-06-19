@@ -64,18 +64,22 @@ public:
             shardsvrReshardCollection.setDbName(request().getDbName());
 
             ReshardCollectionRequest reshardCollectionRequest;
-            reshardCollectionRequest.setKey(BSON("_id" << 1));
+            reshardCollectionRequest.setKey(cluster::unsplittable::kUnsplittableCollectionShardKey);
             reshardCollectionRequest.setProvenance(ProvenanceEnum::kUnshardCollection);
 
             ShardId toShard;
             if (request().getToShard().has_value()) {
                 toShard = request().getToShard().get();
             } else {
-                toShard = shardutil::selectLeastLoadedShard(opCtx);
+                toShard = shardutil::selectLeastLoadedNonDrainingShard(opCtx);
             }
 
-            std::vector<mongo::ShardKeyRange> destinationShard = {toShard};
-            reshardCollectionRequest.setShardDistribution(destinationShard);
+
+            mongo::ShardKeyRange destinationRange(toShard);
+            destinationRange.setMin(cluster::unsplittable::kUnsplittableCollectionMinKey);
+            destinationRange.setMax(cluster::unsplittable::kUnsplittableCollectionMaxKey);
+            std::vector<mongo::ShardKeyRange> distribution = {destinationRange};
+            reshardCollectionRequest.setShardDistribution(distribution);
             reshardCollectionRequest.setForceRedistribution(true);
             reshardCollectionRequest.setNumInitialChunks(1);
 

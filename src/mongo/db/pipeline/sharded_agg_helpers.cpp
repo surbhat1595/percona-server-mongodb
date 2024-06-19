@@ -290,7 +290,7 @@ std::vector<RemoteCursor> establishShardCursors(
                 str::stream() << "Expected same request for each shard when targeting every shard "
                                  "server, found different requests for shards: "
                               << cmdObj << " " << request.cmdObj,
-                cmdObj.binaryEqual(cmdObj));
+                cmdObj.binaryEqual(request.cmdObj));
         }
         return establishCursorsOnAllHosts(
             opCtx, std::move(executor), nss, shardIds, cmdObj, false, getDesiredRetryPolicy(opCtx));
@@ -1111,8 +1111,7 @@ BSONObj createPassthroughCommandForShard(
 
         if (arrayBuilder.arrSize() > 0) {
             filteredCommand = filteredCommand.addField(
-                BSON(Generic_args_unstable_v1::kRequestGossipRoutingCacheFieldName
-                     << arrayBuilder.arr())
+                BSON(GenericArguments::kRequestGossipRoutingCacheFieldName << arrayBuilder.arr())
                     .firstElement());
         }
     }
@@ -1162,7 +1161,7 @@ BSONObj createCommandForTargetedShards(const boost::intrusive_ptr<ExpressionCont
         }
 
         if (arrayBuilder.arrSize() > 0) {
-            targetedCmd[Generic_args_unstable_v1::kRequestGossipRoutingCacheFieldName] =
+            targetedCmd[GenericArguments::kRequestGossipRoutingCacheFieldName] =
                 Value(arrayBuilder.arr());
         }
     }
@@ -1251,6 +1250,23 @@ TargetingResults targetPipeline(const boost::intrusive_ptr<ExpressionContext>& e
                                      shardQuery,
                                      shardTargetingCollation,
                                      mergeShardId);
+
+        // Check that no shard has been removed since the change stream open time to detect a
+        // possible event loss. It is important to execute it after retrieving the most recent list
+        // of shards: anyShardRemovedSince() performs a snapshot read that might miss the effects of
+        // a removeShard(sId) being committed in parallel; when this happens, the change stream
+        // opening is expected to fail at a later stage with a ShardNotFound error which will be
+        // returned to the client; upon retry, anyShardRemovedSince() will return an accurate
+        // response.
+        if (expCtx->inMongos) {
+            const auto changeStreamOpeningTime =
+                ResumeToken::parse(expCtx->initialPostBatchResumeToken).getData().clusterTime;
+            uassert(ErrorCodes::ChangeStreamHistoryLost,
+                    "Change stream events no more available due to removed shard",
+                    !Grid::get(expCtx->opCtx)
+                         ->catalogClient()
+                         ->anyShardRemovedSince(expCtx->opCtx, changeStreamOpeningTime));
+        }
     }
 
     return {std::move(shardQuery),
@@ -1780,6 +1796,7 @@ BSONObj targetShardsForExplain(Pipeline* ownedPipeline) {
     }();
 
     AggregateCommandRequest aggRequest(expCtx->ns, rawStages);
+
     LiteParsedPipeline liteParsedPipeline(aggRequest);
     auto hasChangeStream = liteParsedPipeline.hasChangeStream();
     auto startsWithQueue = liteParsedPipeline.startsWithQueue();
@@ -1787,7 +1804,7 @@ BSONObj targetShardsForExplain(Pipeline* ownedPipeline) {
         : startsWithQueue                     ? PipelineDataSource::kQueue
                                               : PipelineDataSource::kNormal;
     auto shardDispatchResults =
-        dispatchShardPipeline(aggregation_request_helper::serializeToCommandDoc(aggRequest),
+        dispatchShardPipeline(aggregation_request_helper::serializeToCommandDoc(expCtx, aggRequest),
                               pipelineDataSource,
                               expCtx->eligibleForSampling(),
                               std::move(pipeline),
@@ -1851,17 +1868,17 @@ std::unique_ptr<Pipeline, PipelineDeleter> dispatchTargetedPipelineAndAddMergeCu
         aggRequest.setMaxTimeMS(durationCount<Milliseconds>(maxTimeMS));
     }
 
-    auto shardDispatchResults =
-        dispatchTargetedShardPipeline(aggregation_request_helper::serializeToCommandDoc(aggRequest),
-                                      targeting,
-                                      hasChangeStream,
-                                      expCtx->eligibleForSampling(),
-                                      cri,
-                                      std::move(pipeline),
-                                      boost::none /* explain */,
-                                      readConcern,
-                                      {} /* designatedHostsMap */,
-                                      {} /* resumeTokenMap */);
+    auto shardDispatchResults = dispatchTargetedShardPipeline(
+        aggregation_request_helper::serializeToCommandDoc(expCtx, aggRequest),
+        targeting,
+        hasChangeStream,
+        expCtx->eligibleForSampling(),
+        cri,
+        std::move(pipeline),
+        boost::none /* explain */,
+        readConcern,
+        {} /* designatedHostsMap */,
+        {} /* resumeTokenMap */);
 
     std::vector<ShardId> targetedShards;
     targetedShards.reserve(shardDispatchResults.remoteCursors.size());

@@ -146,7 +146,6 @@ env.Library(
         '$BUILD_DIR/mongo/db/server_base',
         '$BUILD_DIR/mongo/db/server_options',
         '$BUILD_DIR/mongo/db/service_context',
-        '$BUILD_DIR/mongo/util/namespace_string_database_name_util',
     ],
 )
 
@@ -365,16 +364,6 @@ env.Library(
 )
 
 env.Library(
-    target='storage_change_lock',
-    source=[
-        'storage_change_lock.cpp',
-    ],
-    LIBDEPS=[
-        '$BUILD_DIR/mongo/base',
-    ],
-)
-
-env.Library(
     target='storage_engine_common',
     source=[
         'storage_engine_init.cpp',
@@ -387,7 +376,6 @@ env.Library(
         '$BUILD_DIR/mongo/db/service_context',
         '$BUILD_DIR/mongo/db/shard_role_api',
         '$BUILD_DIR/mongo/util/concurrency/spin_lock',
-        'storage_change_lock',
         'storage_control',
         'storage_engine_lock_file',
         'storage_engine_metadata',
@@ -597,7 +585,6 @@ env.Library(
         '$BUILD_DIR/mongo/db/concurrency/lock_manager',
         '$BUILD_DIR/mongo/db/multitenancy',
         '$BUILD_DIR/mongo/db/server_base',
-        '$BUILD_DIR/mongo/util/namespace_string_database_name_util',
         'record_store_base',
         'storage_options',
     ],

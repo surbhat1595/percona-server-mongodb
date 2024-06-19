@@ -35,29 +35,16 @@ env.Library(
 
 env.Library(
     target=[
-        'read_preference_validators',
-    ],
-    source=[
-        'read_preference_validators.cpp',
-    ],
-    LIBDEPS=[
-        '$BUILD_DIR/mongo/base',
-    ],
-)
-
-env.Library(
-    target=[
         'read_preference',
     ],
     source=[
         'read_preference.cpp',
-        'hedging_mode.idl',
-        'read_preference.idl',
+        'read_preference_setting.idl',
     ],
     LIBDEPS=[
         '$BUILD_DIR/mongo/bson/util/bson_extract',
+        '$BUILD_DIR/mongo/db/server_base',
         '$BUILD_DIR/mongo/db/service_context',
-        'read_preference_validators',
     ],
 )
 
@@ -147,8 +134,8 @@ saslClientEnv.Library(
     LIBDEPS_PRIVATE=[
         '$BUILD_DIR/mongo/db/auth/oidc_protocol',
         '$BUILD_DIR/mongo/db/commands/server_status_core',
+        '$BUILD_DIR/mongo/db/server_base',
         '$BUILD_DIR/mongo/shell/program_runner',
-        '$BUILD_DIR/mongo/util/namespace_string_database_name_util',
         '$BUILD_DIR/mongo/util/net/http_client',
         'connection_string',
     ],
@@ -168,7 +155,7 @@ env.Library(
     ],
     LIBDEPS_PRIVATE=[
         '$BUILD_DIR/mongo/db/auth/auth',
-        '$BUILD_DIR/mongo/util/namespace_string_database_name_util',
+        '$BUILD_DIR/mongo/db/server_base',
         'connection_string',
     ],
 )
@@ -244,7 +231,7 @@ clientDriverEnv.Library(
     ],
     LIBDEPS=[
         '$BUILD_DIR/mongo/client/sdam/sdam',
-        '$BUILD_DIR/mongo/db/write_concern_options',
+        '$BUILD_DIR/mongo/db/server_base',
         '$BUILD_DIR/mongo/executor/connection_pool_stats',
         '$BUILD_DIR/mongo/executor/network_interface',
         '$BUILD_DIR/mongo/executor/network_interface_factory',
@@ -352,7 +339,6 @@ env.Library(
     ],
     LIBDEPS_PRIVATE=[
         '$BUILD_DIR/mongo/db/server_base',
-        '$BUILD_DIR/mongo/util/namespace_string_database_name_util',
     ],
 )
 
@@ -391,8 +377,8 @@ if wiredtiger:
             '$BUILD_DIR/mongo/client/sdam/sdam',
             '$BUILD_DIR/mongo/client/sdam/sdam_test_util',
             '$BUILD_DIR/mongo/db/auth/authmocks',
+            '$BUILD_DIR/mongo/db/server_base',
             '$BUILD_DIR/mongo/db/service_context_test_fixture',
-            '$BUILD_DIR/mongo/db/write_concern_options',
             '$BUILD_DIR/mongo/dbtests/mocklib',
             '$BUILD_DIR/mongo/executor/network_interface_mock',
             '$BUILD_DIR/mongo/executor/task_executor_test_fixture',
@@ -469,16 +455,14 @@ if shouldBuildGRPC(env):
         ],
     )
 
-# TODO SERVER-75914: remove the condition when the test can reliably run on Windows.
-if not env.TargetOSIs('windows'):
-    env.CppUnitTest(
-        target='scoped_db_connection_pool_test',
-        source=['scoped_db_connection_test.cpp'],
-        LIBDEPS=[
-            '$BUILD_DIR/mongo/dbtests/mocklib',
-            'clientdriver_network',
-        ],
-    )
+env.CppUnitTest(
+    target='scoped_db_connection_pool_test',
+    source=['scoped_db_connection_test.cpp'],
+    LIBDEPS=[
+        '$BUILD_DIR/mongo/dbtests/mocklib',
+        'clientdriver_network',
+    ],
+)
 
 env.CppUnitTest(
     target='dbclient_connection_test',

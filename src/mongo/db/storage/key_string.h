@@ -432,6 +432,8 @@ public:
         return *this;
     }
 
+    static Value makeValue(Version version, StringData ks, StringData rid, StringData typeBits);
+
     /**
      * Compare with another key_string::Value or Builder.
      */
@@ -472,6 +474,10 @@ public:
         const char* buf = _buffer.get() + _ksSize;
         BufReader reader(buf, _buffer.size() - _ksSize);
         return TypeBits::fromBuffer(_version, &reader);
+    }
+
+    StringData getTypeBitsView() const {
+        return {_buffer.get() + _ksSize, _buffer.size() - _ksSize};
     }
 
     // Compute hash over key
@@ -660,6 +666,23 @@ public:
         // after a call on its 'release' method.
         const size_t newBufLen = newBuf.len();
         return {version, _buffer().len(), SharedBufferFragment(newBuf.release(), newBufLen)};
+    }
+
+    /**
+     * Ends the build state and returns the buffer held by the builder.
+     * The buffer holds the KeyString with no RecordId or TypeBits encoded, suitable to pass into
+     * SortedDataInterface::seek().
+     * Caller must only use the returned buffer within the lifetime of the builder.
+     *
+     * If 'discriminator' is specified, then it overrides the previously set _discriminator.
+     */
+    StringData finishAndGetBuffer(boost::optional<Discriminator> discriminator = boost::none) {
+        invariant(_state == BuildState::kAppendingBSONElements || _state == BuildState::kEndAdded);
+        if (discriminator) {
+            _discriminator = *discriminator;
+        }
+        _doneAppending();
+        return {_buffer().buf(), static_cast<StringData::size_type>(_buffer().len())};
     }
 
     void appendRecordId(const RecordId& loc);

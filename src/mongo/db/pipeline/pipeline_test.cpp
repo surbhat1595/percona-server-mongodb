@@ -530,6 +530,22 @@ TEST(PipelineOptimizationTest, SortDoesNotSwapBeforeUnwindBecauseUnwindPathEqual
     assertPipelineOptimizesAndSerializesTo(inputPipe, outputPipe, serializedPipe);
 }
 
+TEST(PipelineOptimizationTest, SortDoesNotSwapBeforeUnwindBecauseArrayIndexField) {
+    std::string inputPipe =
+        "[{$unwind : {path: '$a', includeArrayIndex: 'i'}}"
+        ",{$sort : {i: 1}}"
+        "]";
+    std::string outputPipe =
+        "[{$unwind : {path: '$a', includeArrayIndex: 'i'}}"
+        ",{$sort : {sortKey: {i: 1}}}"
+        "]";
+    std::string serializedPipe =
+        "[{$unwind : {path: '$a', includeArrayIndex: 'i'}}"
+        ",{$sort : {i: 1}}"
+        "]";
+    assertPipelineOptimizesAndSerializesTo(inputPipe, outputPipe, serializedPipe);
+}
+
 TEST(PipelineOptimizationTest, LookupShouldCoalesceWithUnwindOnAsSortDoesNotInterfere) {
     std::string inputPipe =
         "[{$lookup: {from : 'lookupColl', as : 'same', localField: 'left', foreignField: "
@@ -1631,106 +1647,6 @@ TEST(PipelineOptimizationTest, GroupShouldSwapWithMatchIfFilteringOnID) {
     assertPipelineOptimizesAndSerializesTo(inputPipe, outputPipe, serializedPipe);
 }
 
-TEST(PipelineOptimizationTest, GroupShouldSwapWithMatchIfFilteringOnCompoundIDIndirectly) {
-    std::string inputPipe =
-        "[{$group : {_id: {a: '$a', b: '$b'}, a: {$first: '$a'}, b: {$last: '$b'}}}, "
-        " {$match: {$or: [{a: {$lt: 4}}, {b: 4}]}}]";
-    std::string outputPipe =
-        "[{$match: {$or: [{b: {$eq: 4}}, {a: {$lt: 4}}]}}, "
-        " {$group: {_id: {a: '$a', b: '$b'}, a: {$first: '$a'}, b: {$last: '$b'}}}]";
-    std::string serializedPipe =
-        "[{$match: {$or: [{a: {$lt: 4}}, {b: {$eq: 4}}]}}, "
-        " {$group: {_id: {a: '$a', b: '$b'}, a: {$first: '$a'}, b: {$last: '$b'}}}]";
-
-    assertPipelineOptimizesAndSerializesTo(inputPipe, outputPipe, serializedPipe);
-}
-
-TEST(PipelineOptimizationTest, GroupShouldSwapWithMatchIfFilteringOnIDIndirectly) {
-    auto operators = {"$first", "$last", "$min", "$max"};
-    for (auto& op : operators) {
-        std::string inputPipe = std::string("[{$group : {_id:'$a', b: {") + op +
-            ": '$a'}}}, "
-            " {$match: {b : 4}}]";
-        std::string outputPipe = std::string("[{$match: {a:{$eq : 4}}}, ") +
-            " {$group:{_id:'$a', b: {" + op + ": '$a'}}}]";
-        std::string serializedPipe = std::string("[{$match: {a:{$eq : 4}}}, ") +
-            " {$group:{_id:'$a', b: {" + op + ": '$a'}}}]";
-        assertPipelineOptimizesAndSerializesTo(inputPipe, outputPipe, serializedPipe);
-    }
-}
-
-TEST(PipelineOptimizationTest, GroupShouldSwapWithMatchIfFilteringOnIDIndirectlyRoot) {
-    auto operators = {"$first", "$last", "$min", "$max"};
-    for (auto& op : operators) {
-        std::string inputPipe = std::string("[{$group : {_id: '$a', b: {") + op +
-            ": '$$ROOT'}}}, "
-            " {$match: {'b.a' : 4}}]";
-        std::string outputPipe = std::string("[{$match: {a: {$eq : 4}}}, ") +
-            " {$group:{_id:'$a', b: {" + op + ": '$$ROOT'}}}]";
-        std::string serializedPipe = std::string("[{$match: {a: {$eq : 4}}}, ") +
-            " {$group:{_id:'$a', b: {" + op + ": '$$ROOT'}}}]";
-        assertPipelineOptimizesAndSerializesTo(inputPipe, outputPipe, serializedPipe);
-    }
-}
-
-TEST(PipelineOptimizationTest, GroupShouldntSwapWithMatchIfFilteringOnIDIndirectlyRootNonID) {
-    auto operators = {"$first", "$last", "$min", "$max"};
-    for (auto& op : operators) {
-        std::string inputPipe = std::string("[{$group : {_id: '$a', b: {") + op +
-            ": '$$ROOT'}}}, "
-            " {$match: {'b.b' : 4}}]";
-        std::string outputPipe = std::string("[{$group : {_id: '$a', b: {") + op +
-            ": '$$ROOT'}}}, "
-            " {$match: {'b.b' : {$eq: 4}}}]";
-        std::string serializedPipe = std::string("[{$group : {_id: '$a', b: {") + op +
-            ": '$$ROOT'}}}, "
-            " {$match: {'b.b' : 4}}]";
-        assertPipelineOptimizesAndSerializesTo(inputPipe, outputPipe, serializedPipe);
-    }
-}
-
-TEST(PipelineOptimizationTest, GroupShouldntSwapWithMatchIfFilteringOnNonIDIndirectly) {
-    auto operators = {"$first", "$last", "$min", "$max"};
-    for (auto& op : operators) {
-        std::string inputPipe = std::string("[{$group : {_id: '$a', b: {") + op +
-            ": '$a'}}}, "
-            " {$match: {'b.b' : 4}}]";
-        std::string outputPipe = std::string("[{$match: {'a.b' : {$eq: 4}}}, ") +
-            " {$group : {_id: '$a', b: {" + op + ": '$a'}}}]";
-        std::string serializedPipe = std::string("[{$match: {'a.b' : {$eq: 4}}}, ") +
-            " {$group : {_id: '$a', b: {" + op + ": '$a'}}}]";
-        assertPipelineOptimizesAndSerializesTo(inputPipe, outputPipe, serializedPipe);
-    }
-}
-
-TEST(PipelineOptimizationTest, GroupShouldntSwapWithMatchIfFilteringOnIDSubpathIndirectlyRoot) {
-    auto operators = {"$first", "$last", "$min", "$max"};
-    for (auto& op : operators) {
-        std::string inputPipe = std::string("[{$group : {_id: '$a', b: {") + op +
-            ": '$$ROOT'}}}, "
-            " {$match: {'b.a.c' : 4}}]";
-        std::string outputPipe = std::string("[{$match: {'a.c' : {$eq: 4}}}, ") +
-            " {$group : {_id: '$a', b: {" + op + ": '$$ROOT'}}}]";
-        std::string serializedPipe = std::string("[{$match: {'a.c' : {$eq: 4}}}, ") +
-            " {$group : {_id: '$a', b: {" + op + ": '$$ROOT'}}}]";
-        assertPipelineOptimizesAndSerializesTo(inputPipe, outputPipe, serializedPipe);
-    }
-}
-
-TEST(PipelineOptimizationTest, GroupShouldntSwapWithMatchIfFilteringOnIDSubpathIndirectly) {
-    auto operators = {"$first", "$last", "$min", "$max"};
-    for (auto& op : operators) {
-        std::string inputPipe = std::string("[{$group : {_id: '$a', b: {") + op +
-            ": '$a'}}}, "
-            " {$match: {'b.a.c' : 4}}]";
-        std::string outputPipe = std::string("[{$match: {'a.a.c' : {$eq: 4}}}, ") +
-            " {$group : {_id: '$a', b: {" + op + ": '$a'}}}]";
-        std::string serializedPipe = std::string("[{$match: {'a.a.c' : {$eq: 4}}}, ") +
-            " {$group : {_id: '$a', b: {" + op + ": '$a'}}}]";
-        assertPipelineOptimizesAndSerializesTo(inputPipe, outputPipe, serializedPipe);
-    }
-}
-
 TEST(PipelineOptimizationTest, GroupShouldSwapWithMatchOnExprIfFilteringOnID) {
     std::string inputPipe =
         "[{$group: {_id: '$a'}}, "
@@ -2539,38 +2455,46 @@ TEST(PipelineOptimizationTest, MatchOnArrayFieldCanSplitAcrossRenameWithMapAndPr
 }
 
 TEST(PipelineOptimizationTest,
-     MatchElemMatchValueOnArrayFieldCanSplitAcrossRenameWithMapAndProject) {
-    // The $project simply renames 'a.b' & 'a.c' to 'd.e' & 'd.f' and the $match with $elemMatch on
-    // the leaf value can be swapped with $project.
-    std::string inputPipe = R"(
-[
-    {
-        $project: {
-            d: {
-                $map: {input: '$a', as: 'iter', in : {e: '$$iter.b', f: '$$iter.c'}}
-            }
-        }
-    },
-    {$match: {"d.e": {$elemMatch: {$eq: 1}}, "d.f": {$elemMatch: {$eq: 1}}}}
-]
-        )";
-    std::string outputPipe = R"(
-[
-    {
-        $match: {$and: [{"a.b": {$elemMatch: {$eq: 1}}}, {"a.c": {$elemMatch: {$eq: 1}}}]}
-    },
-    {
-        $project: {
-            _id: true,
-            d: {
-                $map: {input: '$a', as: 'iter', in : {e: '$$iter.b', f: '$$iter.c'}}
-            }
-        }
-    }
-]
-        )";
-
+     MatchElemMatchValueOnArrayFieldCanSplitAcrossRenameWithSimpleProject) {
+    // The $project simply renames 'a' to 'b', and the $match with $elemMatch on
+    // the value can be swapped with $project.
+    std::string inputPipe =
+        "[{$project: {b: '$a', _id: false}},{$match: {b: {$elemMatch: {$eq: 1}}}}]";
+    std::string outputPipe =
+        "[{$match: {a: {$elemMatch: {$eq: 1}}}},{$project: {b: '$a', _id: false}}]";
     assertPipelineOptimizesTo(inputPipe, outputPipe);
+}
+
+TEST(PipelineOptimizationTest,
+     MatchElemMatchValueOnArrayFieldCanNotSplitAcrossRenameWithMapAndAddFields) {
+    // The $addFields simply maps an array of objects to one containing their inner 'elementField'
+    // scalar values . The $match stage on the reshaped array should not be swapped with $project to
+    // preserve the original $elemMatch semantics.
+    std::string pipeline = R"(
+[
+    {
+        $addFields: {
+            "reshapedArray": {
+                $map: {input: '$arrayField', as: 'iter', in : "$$iter.elementField"}
+            },
+            _id: { "$const": false }
+        }
+    },
+    {$match: {"reshapedArray": {$elemMatch: {$eq: 1}}}}
+]
+        )";
+    assertPipelineOptimizesTo(pipeline, pipeline);
+}
+
+TEST(PipelineOptimizationTest,
+     MatchElemMatchValueOnArrayFieldCanNotSplitAcrossRenameWithDottedProject) {
+    // The $project stage maps a dotted field path to a simple non-dotted one which is then matched
+    // upon. Expect no swap to be happen as it might affect the result of the query due to
+    // $elemMatch.
+    std::string pipeline =
+        "[{$project: {reshaped: '$document.array.element.deeply.nested.field', _id: false}},"
+        "{$match: {reshaped: {$elemMatch: {$eq: 1}}}}]";
+    assertPipelineOptimizesTo(pipeline, pipeline);
 }
 
 // TODO SERVER-74298 The $match can be swapped with $project after renaming.
@@ -3587,229 +3511,6 @@ TEST(PipelineOptimizationTest, MatchGetsPushedIntoBothChildrenOfUnion) {
         "    ]"
         " }}"
         "]");
-}
-
-TEST(PipelineOptimizationTest, MatchPushedBeforeReplaceRoot) {
-    std::string inputPipe =
-        "[{$replaceRoot: { newRoot: '$subDocument' }}, "
-        "{$match: { x: 2 }}]";
-    std::string outputPipe =
-        "["
-        " {$match: {$or: [{'subDocument.x': {$eq: 2}},"
-        " {$expr: {$ne: [{$type: ['$subDocument']}, {$const: 'object'}]}}]}},"
-        " {$replaceRoot: {newRoot: '$subDocument'}}"
-        "]";
-    assertPipelineOptimizesTo(inputPipe, outputPipe);
-}
-
-TEST(PipelineOptimizationTest, MatchPushedBeforeReplaceWith) {
-    std::string inputPipe =
-        "["
-        " {$replaceWith: '$subDocument'},"
-        " {$match: {x: 6.98}}"
-        "]";
-    std::string outputPipe =
-        "["
-        " {$match: {$or: [{'subDocument.x': {$eq: 6.98}},"
-        " {$expr: {$ne: [{$type: ['$subDocument']}, {$const: 'object'}]}}]}},"
-        " {$replaceRoot: {newRoot: '$subDocument'}}"
-        "]";
-    assertPipelineOptimizesTo(inputPipe, outputPipe);
-}
-
-TEST(PipelineOptimizationTest, MatchPushedBeforeReplaceWithComplex) {
-    std::string inputPipe =
-        "["
-        " {$replaceWith: '$subDocument'},"
-        " {$match: {$or: [{x: 'big'}, {y: 'small'}]}}"
-        "]";
-    std::string outputPipe =
-        "["
-        " {$match: {$or: [{'subDocument.x': {$eq: 'big'}},"
-        " {'subDocument.y': {$eq: 'small'}},"
-        " {$expr: {$ne: [{$type: ['$subDocument']}, {$const: 'object'}]}}]}},"
-        " {$replaceRoot: {newRoot: '$subDocument'}}"
-        "]";
-    assertPipelineOptimizesTo(inputPipe, outputPipe);
-}
-
-TEST(PipelineOptimizationTest, MatchPushedBeforeReplaceWithNestedAnd) {
-    std::string inputPipe =
-        "["
-        " {$replaceWith: '$subDocument'},"
-        " {$match: {$and: [{x: 'big', y: 'small'}, {$and: [{a: 'big', b: 'small'}]}]}}"
-        "]";
-    std::string outputPipe =
-        "["
-        " {$match: {$or: [{$and: [{'subDocument.a': {$eq: 'big'}},"
-        " {'subDocument.b': {$eq: 'small'}},"
-        " {'subDocument.x': {$eq: 'big'}},"
-        " {'subDocument.y': {$eq: 'small'}}]},"
-        " {$expr: {$ne: [{$type: ['$subDocument']}, {$const: 'object'}]}}]}},"
-        " {$replaceRoot: {newRoot: '$subDocument'}}"
-        "]";
-    std::string serializedPipe =
-        "["
-        " {$match: {$or: [{$and: [{$and: [{'subDocument.x': {$eq: 'big'}},"
-        " {'subDocument.y': {$eq: 'small'}}]},"
-        " {$and: [{$and: [{'subDocument.a': {$eq: 'big'}},"
-        " {'subDocument.b': {$eq: 'small'}}]}]}]},"
-        " {$expr: {$ne: [{$type: ['$subDocument']}, {$const: 'object'}]}}]}},"
-        " {$replaceRoot: {newRoot: '$subDocument'}}"
-        "]";
-    assertPipelineOptimizesAndSerializesTo(inputPipe, outputPipe, serializedPipe);
-}
-
-TEST(PipelineOptimizationTest, MatchPushedBeforeReplaceWithAndOr) {
-    std::string inputPipe =
-        "["
-        " {$replaceWith: '$subDocument'},"
-        " {$match: {$and: [{a: 'big', b: 'small'}, {$or: [{'lord': 'cat'}, {'friend': 'dog'}]}]}}"
-        "]";
-    std::string outputPipe =
-        "["
-        " {$match: {$or: [{$and: [{$or: [{'subDocument.friend': {$eq: 'dog'}},"
-        " {'subDocument.lord': {$eq: 'cat'}}]},"
-        " {'subDocument.a': {$eq: 'big'}},"
-        " {'subDocument.b': {$eq: 'small'}}]},"
-        " {$expr: {$ne: [{$type: ['$subDocument']}, {$const: 'object'}]}}]}},"
-        " {$replaceRoot: {newRoot: '$subDocument'}}"
-        "]";
-    std::string serializedPipe =
-        "["
-        " {$match: {$or: [{$and: [{$and: [{'subDocument.a': {$eq: 'big'}},"
-        " {'subDocument.b': {$eq: 'small'}}]},"
-        " {$or: [{'subDocument.lord': {$eq: 'cat'}},"
-        " {'subDocument.friend': {$eq: 'dog'}}]}]},"
-        " {$expr: {$ne: [{$type: ['$subDocument']}, {$const: 'object'}]}}]}},"
-        " {$replaceRoot: {newRoot: '$subDocument'}}"
-        "]";
-    assertPipelineOptimizesAndSerializesTo(inputPipe, outputPipe, serializedPipe);
-}
-
-TEST(PipelineOptimizationTest, MultipleMatchesPushedBeforeReplaceWith) {
-    std::string inputPipe =
-        "["
-        " {$replaceWith: '$subDocument'},"
-        " {$match: {x: 'small'}},"
-        " {$match: {y: 1}}"
-        "]";
-    std::string outputPipe =
-        "["
-        " {$match: {$or: [{$and: [{'subDocument.x': {$eq: 'small'}},"
-        " {'subDocument.y': {$eq: 1}}]},"
-        " {$expr: {$ne: [{$type: ['$subDocument']}, {$const: 'object'}]}}]}},"
-        " {$replaceRoot: {newRoot: '$subDocument'}}"
-        "]";
-    std::string serializedPipe =
-        "["
-        " {$match: {$and: [{$or: [{'subDocument.x': {$eq: 'small'}},"
-        " {$expr: {$ne: [{$type: ['$subDocument']}, {$const: 'object'}]}}]},"
-        " {$or: [{'subDocument.y': {$eq: 1}},"
-        " {$expr: {$ne: [{$type: ['$subDocument']}, {$const: 'object'}]}}]}]}},"
-        " {$replaceRoot: {newRoot: '$subDocument'}}"
-        "]";
-    assertPipelineOptimizesAndSerializesTo(inputPipe, outputPipe, serializedPipe);
-}
-
-TEST(PipelineOptimizationTest, MatchPushedBeforeMultipleReplaceWithsDiffPredName) {
-    std::string inputPipe =
-        "["
-        " {$replaceWith: '$subDocumentA'},"
-        " {$replaceWith: '$subDocumentB'},"
-        " {$match: {'x.a': 2}}"
-        "]";
-    std::string outputPipe =
-        "["
-        " {$match: {$or: [{'subDocumentA.subDocumentB.x.a': {$eq: 2}},"
-        " {$expr: {$ne: [{$type: ['$subDocumentA.subDocumentB']}, {$const: 'object'}]}},"
-        " {$expr: {$ne: [{$type: ['$subDocumentA']}, {$const: 'object'}]}}]}},"
-        " {$replaceRoot: {newRoot: '$subDocumentA'}},"
-        " {$replaceRoot: {newRoot: '$subDocumentB'}}"
-        "]";
-    assertPipelineOptimizesTo(inputPipe, outputPipe);
-}
-
-TEST(PipelineOptimizationTest, ExprMatchPushedBeforeReplaceWith) {
-    std::string inputPipe =
-        "["
-        " {$replaceWith: '$subDocument'},"
-        " {$match: {$expr: {$eq: ['$x', 2]}}}"
-        "]";
-    std::string outputPipe =
-        "["
-        " {$match: {$or: [{$and: [{$expr: {$eq: ['$subDocument.x', {$const: 2}]}},"
-        " {'subDocument.x': {$_internalExprEq: 2}}]},"
-        " {$expr: {$ne: [{$type: ['$subDocument']}, {$const: 'object'}]}}]}},"
-        " {$replaceRoot: {newRoot: '$subDocument'}}"
-        "]";
-    std::string serializedPipe =
-        "["
-        " {$match: {$or: [{$expr: {$eq: ['$subDocument.x', {$const: 2}]}},"
-        " {$expr: {$ne: [{$type: ['$subDocument']}, {$const: 'object'}]}}]}},"
-        " {$replaceRoot: {newRoot: '$subDocument'}}"
-        "]";
-    assertPipelineOptimizesAndSerializesTo(inputPipe, outputPipe, serializedPipe);
-}
-
-// TODO SERVER-88463: Enable match pushdown when predicates in the previous stage and the $match
-// stage are independent but have the same name
-TEST(PipelineOptimizationTest, NoReplaceWithMatchOptSamePredicateName) {
-    std::string inputPipe =
-        "["
-        " {$replaceWith: '$subDocument'},"
-        " {$match: {'subDocument.x': 2}}"
-        "]";
-    std::string outputPipe =
-        "["
-        " {$replaceRoot: {newRoot: '$subDocument'}},"
-        " {$match: {'subDocument.x': {$eq: 2}}}"
-        "]";
-    std::string serializedPipe =
-        "["
-        " {$replaceRoot: {newRoot: '$subDocument'}},"
-        " {$match: {'subDocument.x': 2}}"
-        "]";
-    assertPipelineOptimizesAndSerializesTo(inputPipe, outputPipe, serializedPipe);
-}
-
-// TODO SERVER-88463: Enable match pushdown when predicates in the previous stage and the $match
-// stage are independent but have the same name
-TEST(PipelineOptimizationTest, MatchNotPushedBeforeMultipleReplaceWithsSamePredName) {
-    std::string inputPipe =
-        "["
-        " {$replaceWith: '$subDocument'},"
-        " {$replaceWith: '$subDocument'},"
-        " {$match: {'x.a': 2}}"
-        "]";
-    std::string outputPipe =
-        "["
-        " {$replaceRoot: {newRoot: '$subDocument'}},"
-        " {$match: {$or: [{'subDocument.x.a': {$eq: 2}},"
-        " {$expr: {$ne: [{$type: ['$subDocument']}, {$const: 'object'}]}}]}},"
-        " {$replaceRoot: {newRoot: '$subDocument'}}"
-        "]";
-    assertPipelineOptimizesTo(inputPipe, outputPipe);
-}
-
-// TODO SERVER-88464: Optimize out $replaceRoot stage if newRoot is $$ROOT
-TEST(PipelineOptimizationTest, NoReplaceWithMatchOptWhenReplaceWithIsRoot) {
-    std::string inputPipe =
-        "["
-        " {$replaceWith: '$$ROOT'},"
-        " {$match: {x: 2}}"
-        "]";
-    std::string outputPipe =
-        "["
-        " {$replaceRoot: {newRoot: '$$ROOT'}},"
-        " {$match: {x: {$eq: 2}}}"
-        "]";
-    std::string serializedPipe =
-        "["
-        " {$replaceRoot: {newRoot: '$$ROOT'}},"
-        " {$match: {x: 2}}"
-        "]";
-    assertPipelineOptimizesAndSerializesTo(inputPipe, outputPipe, serializedPipe);
 }
 
 TEST(PipelineOptimizationTest, internalAllCollectionStatsAbsorbsMatchOnNs) {

@@ -139,7 +139,7 @@ CanonicalDistinct parseDistinctCmd(OperationContext* opCtx,
                                        extensionsCallback,
                                        MatchExpressionParser::kAllowAllSpecialFeatures);
 
-    expCtx->setQuerySettings(
+    expCtx->setQuerySettingsIfNotPresent(
         query_settings::lookupQuerySettingsForDistinct(expCtx, *parsedDistinct, nss));
 
     return CanonicalDistinct::parse(std::move(expCtx), std::move(parsedDistinct));
@@ -379,9 +379,8 @@ public:
                 vts, dbName, uassertStatusOK(canonicalDistinct.asAggregationCommand()))
                 .body;
         auto viewAggRequest = aggregation_request_helper::parseFromBSON(
-            opCtx,
-            nss,
             viewAggCmd,
+            vts,
             verbosity,
             APIParameters::get(opCtx).getAPIStrict().value_or(false),
             canonicalDistinct.getQuery()->getFindCommandRequest().getSerializationContext());

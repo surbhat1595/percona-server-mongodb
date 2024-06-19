@@ -119,13 +119,13 @@ TEST(ReadPreferenceSetting, ParseHedgingMode) {
     ASSERT_TRUE(rps.pref == ReadPreference::PrimaryOnly);
     ASSERT_FALSE(rps.hedgingMode.has_value());
 
-    // Implicit opt-in for readPreference mode "nearest".
+    // Implicit opt-in for readPreference mode "nearest" should no longer default to hedging mode
+    // enabled.
     rpsObj = BSON("mode"
                   << "nearest");
     rps = parse(rpsObj);
     ASSERT_TRUE(rps.pref == ReadPreference::Nearest);
-    ASSERT_TRUE(rps.hedgingMode.has_value());
-    ASSERT_TRUE(rps.hedgingMode->getEnabled());
+    ASSERT_FALSE(rps.hedgingMode.has_value());
 
     // Default hedging mode.
     rpsObj = BSON("mode"
@@ -345,5 +345,23 @@ TEST(ReadPreferenceSetting, Roundtrip) {
                                          boost::none,
                                          true /* isPretargeted */));
 }
+
+// Verify TagSet isFlags work correctly
+TEST(TagSet, TestFlags) {
+    TagSet tsPrimary = TagSet::primaryOnly();
+    ASSERT_TRUE(tsPrimary.isPrimaryOnly());
+    ASSERT_FALSE(tsPrimary.isMatchAnyNode());
+
+    TagSet tsMatchAny;
+    ASSERT_FALSE(tsMatchAny.isPrimaryOnly());
+    ASSERT_TRUE(tsMatchAny.isMatchAnyNode());
+    ASSERT_FALSE(tsMatchAny == TagSet::primaryOnly());
+
+    TagSet tsSomething(BSON_ARRAY(BSON("x" << 1)));
+    ASSERT_FALSE(tsSomething.isPrimaryOnly());
+    ASSERT_FALSE(tsSomething.isMatchAnyNode());
+    ASSERT_FALSE(tsSomething == TagSet::primaryOnly());
+}
+
 
 }  // namespace

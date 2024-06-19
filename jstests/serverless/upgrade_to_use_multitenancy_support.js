@@ -4,7 +4,6 @@
  */
 
 import {arrayEq} from "jstests/aggregation/extras/utils.js";
-import {waitForState} from "jstests/replsets/rslib.js";
 
 // In production, we will upgrade to start using multitenancySupport before enabling this feature
 // flag, and this test is meant to exercise that upgrade behavior, so don't run if the feature flag
@@ -94,6 +93,13 @@ function assertFindBothTenantsUsingSecurityToken(
     runFindUsingSecurityToken(conn, db, collName, token2, expectedDocsReturnedTenant2);
 }
 
+function awaitReplication(rst) {
+    // Reset the security token on connections as rst.awaitReplication calls commands against
+    // interal "local" db which is not tenant aware.
+    rst.nodes.forEach(node => node._setSecurityToken(undefined));
+    rst.awaitReplication();
+}
+
 const rst = new ReplSetTest({
     nodes: 2,
     nodeOptions: {
@@ -122,6 +128,7 @@ const primaryAdminDb = originalPrimary.getDB('admin');
 let secondaryAdminDb = originalSecondary.getDB('admin');
 assert.commandWorked(primaryAdminDb.runCommand({createUser: 'admin', pwd: 'pwd', roles: ['root']}));
 assert(primaryAdminDb.auth('admin', 'pwd'));
+awaitReplication(rst);
 assert(secondaryAdminDb.auth('admin', 'pwd'));
 
 // Insert data for two different tenants - multitenancySupport is not yet enabled, so we use a
@@ -139,6 +146,7 @@ assert.commandWorked(originalPrimary.getDB(tenant2DbPrefixed)
 
 assertFindBothTenantsPrefixedDb(
     originalPrimary, tenant1DbPrefixed, tenant2DbPrefixed, kCollName, tenant1Docs, tenant2Docs);
+awaitReplication(rst);
 assertFindBothTenantsPrefixedDb(
     originalSecondary, tenant1DbPrefixed, tenant2DbPrefixed, kCollName, tenant1Docs, tenant2Docs);
 
@@ -146,9 +154,12 @@ assertFindBothTenantsPrefixedDb(
 // multitenancySupport enabled.
 originalSecondary = rst.restart(originalSecondary,
                                 {startClean: false, setParameter: {'multitenancySupport': true}});
-
+rst.waitForState(originalSecondary, ReplSetTest.State.SECONDARY);
 originalSecondary.setSecondaryOk();
 assert(originalSecondary.getDB("admin").auth('admin', 'pwd'));
+
+// Make sure the original primary is still primary after restarting secondary.
+rst.stepUp(originalPrimary);
 
 // Get another connecton of secondary as connection protocol cannot change once set.
 let prefixedOriginalSecondary = new Mongo(originalSecondary.host);
@@ -196,7 +207,7 @@ assertFindBothTenantsPrefixedDb(originalPrimary,
                                 allTenant2Docs);
 // The token must be used on the secondary.
 assertTokenMustBeUsed(originalSecondary, tenant1DbPrefixed, tenant2DbPrefixed, kCollName);
-
+awaitReplication(rst);
 // Assert both tenants find the new doc on the secondary using token.
 assertFindBothTenantsUsingSecurityToken(
     originalSecondary, kDbName, kCollName, kToken1, kToken2, allTenant1Docs, allTenant2Docs);
@@ -224,6 +235,7 @@ runFindAndModOnPrefixedDb(originalPrimary,
 
 const modifiedTenant1Docs = tenant1Docs.concat([{_id: 2, x: 4}]);
 const modifiedTenant2Docs = tenant2Docs.concat([{_id: 12, a: 40}]);
+awaitReplication(rst);
 assertFindBothTenantsUsingSecurityToken(originalSecondary,
                                         kDbName,
                                         kCollName,
@@ -248,8 +260,8 @@ runFindUsingSecurityTokenAndPrefix(prefixedOriginalSecondary,
 originalPrimary =
     rst.restart(originalPrimary, {startClean: false, setParameter: {'multitenancySupport': true}});
 assert(originalPrimary.getDB("admin").auth('admin', 'pwd'));
-waitForState(originalSecondary, ReplSetTest.State.PRIMARY);
-waitForState(originalPrimary, ReplSetTest.State.SECONDARY);
+rst.waitForState(originalSecondary, ReplSetTest.State.PRIMARY);
+rst.waitForState(originalPrimary, ReplSetTest.State.SECONDARY);
 originalPrimary.setSecondaryOk();
 
 // Get another connecton of original primary as connection protocol cannot change once set.

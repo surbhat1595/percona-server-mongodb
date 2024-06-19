@@ -132,7 +132,7 @@ repl::OpTime _logOp(OperationContext* opCtx,
     oplogEntry.setTid(nss.tenantId() ? nss.tenantId() : tenantIdForStartStop);
     oplogEntry.setUuid(uuid);
     oplogEntry.setObject(obj);
-    AutoGetOplogFastPath oplogWrite(opCtx, OplogAccessMode::kWrite);
+    AutoGetOplog oplogWrite(opCtx, OplogAccessMode::kWrite);
     return writeConflictRetry(
         opCtx, "dbCheck oplog entry", NamespaceString::kRsOplogNamespace, [&] {
             auto const clockSource = opCtx->getServiceContext()->getFastClockSource();
@@ -604,13 +604,11 @@ void DbChecker::doCollection(OperationContext* opCtx) {
 }
 
 
-key_string::Value DbChecker::_stripRecordIdFromKeyString(const key_string::Value& keyString,
-                                                         const key_string::Version& version,
-                                                         const Collection* collection) {
+StringData DbChecker::_stripRecordIdFromKeyString(const key_string::Value& keyString,
+                                                  const key_string::Version& version,
+                                                  const Collection* collection) {
     const size_t keyStringSize = getKeyStringSizeWithoutRecordId(collection, keyString);
-    key_string::Builder keyStringBuilder(version);
-    keyStringBuilder.resetFromBuffer(keyString.getBuffer(), keyStringSize);
-    return keyStringBuilder.getValueCopy();
+    return {keyString.getBuffer(), keyStringSize};
 }
 
 void DbChecker::_extraIndexKeysCheck(OperationContext* opCtx) {
@@ -700,7 +698,9 @@ void DbChecker::_extraIndexKeysCheck(OperationContext* opCtx) {
                         logAttrs(_info.nss),
                         "uuid"_attr = _info.uuid);
             // TODO SERVER-79850: Raise all errors to the upper level.
-            if (hashStatus.code() != ErrorCodes::IndexNotFound) {
+            if (hashStatus.code() != ErrorCodes::IndexNotFound &&
+                hashStatus.code() != ErrorCodes::WriteConcernFailed &&
+                hashStatus.code() != ErrorCodes::UnsatisfiableWriteConcern) {
                 // Raise the error to the upper level.
                 iassert(hashStatus);
             }
@@ -768,6 +768,30 @@ Status DbChecker::_hashExtraIndexKeysCheck(OperationContext* opCtx,
         batchStats->logToHealthLog) {
         // On debug builds, health-log every batch result.
         HealthLogInterface::get(opCtx)->log(*logEntry);
+    }
+
+    WriteConcernResult unused;
+    status = waitForWriteConcern(opCtx, batchStats->time, _info.writeConcern, &unused);
+
+    if (!status.isOK()) {
+        BSONObjBuilder context;
+        if (batchStats->batchId) {
+            context.append("batchId", batchStats->batchId->toBSON());
+        }
+        context.append("firstKey", batchStats->firstBson);
+        context.append("lastKey", batchStats->lastBson);
+
+        // TODO SERVER-79850: Investigate refactoring dbcheck code to only check for errors
+        // in one location.
+        auto entry = dbCheckErrorHealthLogEntry(_info.nss,
+                                                _info.uuid,
+                                                "dbCheck failed waiting for writeConcern",
+                                                ScopeEnum::Collection,
+                                                OplogEntriesEnum::Batch,
+                                                status,
+                                                context.done());
+        HealthLogInterface::get(opCtx)->log(*entry);
+        return status;
     }
     return Status::OK();
 }
@@ -912,6 +936,12 @@ Status DbChecker::_runHashExtraKeyCheck(OperationContext* opCtx,
         batchStats->firstBson = firstBsonWithoutRecordId;
         batchStats->lastBson = lastBsonWithoutRecordId;
     }
+
+    if (MONGO_unlikely(hangBeforeAddingDBCheckBatchToOplog.shouldFail())) {
+        LOGV2(8831800, "Hanging dbCheck due to failpoint 'hangBeforeAddingDBCheckBatchToOplog'");
+        hangBeforeAddingDBCheckBatchToOplog.pauseWhileSet();
+    }
+
     batchStats->time = _logOp(
         opCtx, _info.nss, boost::none /* tenantIdForStartStop */, _info.uuid, oplogBatch.toBSON());
     return Status::OK();
@@ -1091,15 +1121,14 @@ Status DbChecker::_getCatalogSnapshotAndRunReverseLookup(
 
     BSONObj snapshotFirstKeyStringBsonRehydrated = BSONObj();
     boost::optional<KeyStringEntry> currIndexKeyWithRecordId = boost::none;
-    // Create keystring to seek without recordId. This is because if the index
-    // is an older format unique index, the keystring will not have the recordId appended, so we
-    // need to seek for the keystring without the recordId.
-    key_string::Value snapshotFirstKeyWithoutRecordId;
 
     // If we're in the middle of an index check, snapshotFirstKeyWithRecordId should be set.
     // Strip the recordId and seek.
     if (snapshotFirstKeyWithRecordId.is_initialized()) {
-        snapshotFirstKeyWithoutRecordId = _stripRecordIdFromKeyString(
+        // Create keystring to seek without recordId. This is because if the index
+        // is an older format unique index, the keystring will not have the recordId appended, so we
+        // need to seek for the keystring without the recordId.
+        auto snapshotFirstKeyWithoutRecordId = _stripRecordIdFromKeyString(
             snapshotFirstKeyWithRecordId.get(), version, collection.get());
         snapshotFirstKeyStringBsonRehydrated = key_string::rehydrateKey(
             index->keyPattern(),
@@ -1119,10 +1148,9 @@ Status DbChecker::_getCatalogSnapshotAndRunReverseLookup(
             key_string::Builder keyStringBuilder(version);
             keyStringBuilder.resetToKey(_info.start, ordering);
 
-            snapshotFirstKeyWithoutRecordId = keyStringBuilder.getValueCopy();
+            auto snapshotFirstKeyWithoutRecordId = keyStringBuilder.finishAndGetBuffer();
             snapshotFirstKeyStringBsonRehydrated = key_string::rehydrateKey(
-                index->keyPattern(),
-                _keyStringToBsonSafeHelper(snapshotFirstKeyWithoutRecordId, ordering));
+                index->keyPattern(), _builderToBsonSafeHelper(keyStringBuilder, ordering));
 
             // seek for snapshotFirstKeyWithoutRecordId.
             // Note that seekForKeyString always returns a keyString with RecordId appended,
@@ -1389,9 +1417,10 @@ bool DbChecker::_shouldEndCatalogSnapshotOrBatch(
         // key we just checked), we need update it to the next distinct one. We make a keystring to
         // search with kExclusiveAfter so that seekForKeyString will seek to the next distinct
         // keyString after the current one.
+        key_string::Builder builder(version);
         auto keyStringForSeekWithoutRecordId =
             IndexEntryComparison::makeKeyStringFromBSONKeyForSeek(
-                currKeyStringBson, version, ordering, true /*isForward*/, false /*inclusive*/);
+                currKeyStringBson, ordering, true /*isForward*/, false /*inclusive*/, builder);
 
 
         // Check to make sure there are still more distinct keys in the index.
@@ -1716,15 +1745,22 @@ void DbChecker::_dataConsistencyCheck(OperationContext* opCtx) {
         WriteConcernResult unused;
         auto status = waitForWriteConcern(opCtx, stats.time, _info.writeConcern, &unused);
         if (!status.isOK()) {
+            BSONObjBuilder context;
+            if (stats.batchId) {
+                context.append("batchId", stats.batchId->toBSON());
+            }
+            context.append("lastKey", stats.lastKey);
             // TODO SERVER-79850: Investigate refactoring dbcheck code to only check for errors
             // in one location.
-            auto entry = dbCheckWarningHealthLogEntry(_info.nss,
-                                                      _info.uuid,
-                                                      "dbCheck failed waiting for writeConcern",
-                                                      ScopeEnum::Collection,
-                                                      OplogEntriesEnum::Batch,
-                                                      status);
+            auto entry = dbCheckErrorHealthLogEntry(_info.nss,
+                                                    _info.uuid,
+                                                    "dbCheck failed waiting for writeConcern",
+                                                    ScopeEnum::Collection,
+                                                    OplogEntriesEnum::Batch,
+                                                    status,
+                                                    context.done());
             HealthLogInterface::get(opCtx)->log(*entry);
+            return;
         }
 
         start = stats.lastKey;

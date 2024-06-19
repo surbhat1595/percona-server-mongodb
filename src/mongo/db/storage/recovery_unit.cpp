@@ -64,18 +64,10 @@ SnapshotId getNextSnapshotId() {
 }
 }  // namespace
 
-RecoveryUnit::RecoveryUnit() : _snapshot(getNextSnapshotId()) {}
-
-RecoveryUnit::~RecoveryUnit() = default;
-
-RecoveryUnit::Snapshot& RecoveryUnit::getSnapshot() {
-    return _snapshot.get();
-}
-
-void RecoveryUnit::assignNextSnapshot() {
-    // The current snapshot's destructor will be called first, followed by the constructors for the
-    // next snapshot.
-    _snapshot.emplace(getNextSnapshotId());
+void RecoveryUnit::ensureSnapshot() {
+    if (!_snapshot) {
+        _snapshot.emplace(getNextSnapshotId());
+    }
 }
 
 void RecoveryUnit::registerPreCommitHook(std::function<void(OperationContext*)> callback) {
@@ -124,13 +116,13 @@ void RecoveryUnit::beginUnitOfWork(bool readOnly) {
 void RecoveryUnit::commitUnitOfWork() {
     invariant(!_readOnly);
     doCommitUnitOfWork();
-    assignNextSnapshot();
+    resetSnapshot();
 }
 
 void RecoveryUnit::abortUnitOfWork() {
     invariant(!_readOnly);
     doAbortUnitOfWork();
-    assignNextSnapshot();
+    resetSnapshot();
 }
 
 void RecoveryUnit::endReadOnlyUnitOfWork() {
@@ -139,7 +131,7 @@ void RecoveryUnit::endReadOnlyUnitOfWork() {
 
 void RecoveryUnit::abandonSnapshot() {
     doAbandonSnapshot();
-    assignNextSnapshot();
+    resetSnapshot();
 }
 
 void RecoveryUnit::setOperationContext(OperationContext* opCtx) {
@@ -161,6 +153,11 @@ void RecoveryUnit::_executeCommitHandlers(boost::optional<Timestamp> commitTimes
             }
             change->commit(_opCtx, commitTimestamp);
         } catch (...) {
+            LOGV2_FATAL_CONTINUE(
+                8861102,
+                "Custom commit failed. Refer to log message with ID 6384300 for exception details.",
+                "commitTimestamp"_attr = commitTimestamp,
+                "changeName"_attr = redact(demangleName(typeid(*change))));
             std::terminate();
         }
     }
@@ -170,11 +167,16 @@ void RecoveryUnit::_executeCommitHandlers(boost::optional<Timestamp> commitTimes
             if (debugLoggingThreeEnabled) {
                 LOGV2_DEBUG(5255701,
                             3,
-                            "Custom commit",
+                            "Custom commit.",
                             "changeName"_attr = redact(demangleName(typeid(*change))));
             }
             change->commit(_opCtx, commitTimestamp);
         } catch (...) {
+            LOGV2_FATAL_CONTINUE(
+                8861101,
+                "Custom commit failed. Refer to log message with ID 6384300 for exception details.",
+                "commitTimestamp"_attr = commitTimestamp,
+                "changeName"_attr = redact(demangleName(typeid(*change))));
             std::terminate();
         }
     }
@@ -184,11 +186,16 @@ void RecoveryUnit::_executeCommitHandlers(boost::optional<Timestamp> commitTimes
             if (debugLoggingThreeEnabled) {
                 LOGV2_DEBUG(22244,
                             3,
-                            "Custom commit",
+                            "Custom commit.",
                             "changeName"_attr = redact(demangleName(typeid(*change))));
             }
             change->commit(_opCtx, commitTimestamp);
         } catch (...) {
+            LOGV2_FATAL_CONTINUE(
+                8861100,
+                "Custom commit failed. Refer to log message with ID 6384300 for exception details.",
+                "commitTimestamp"_attr = commitTimestamp,
+                "changeName"_attr = redact(demangleName(typeid(*change))));
             std::terminate();
         }
     }

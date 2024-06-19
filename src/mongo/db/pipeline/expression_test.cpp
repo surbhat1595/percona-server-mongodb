@@ -1599,11 +1599,10 @@ boost::intrusive_ptr<Expression> parseObject(BSONObj specification) {
 TEST(ParseObject, ShouldAcceptEmptyObject) {
     auto resultExpression = parseObject(BSONObj());
 
-    // Should return an empty ExpressionObject.
-    auto resultObject = dynamic_cast<ExpressionObject*>(resultExpression.get());
+    // Should return an empty object.
+    auto resultObject = dynamic_cast<ExpressionConstant*>(resultExpression.get());
     ASSERT_TRUE(resultObject);
-
-    ASSERT_EQ(resultObject->getChildExpressions().size(), 0UL);
+    ASSERT_VALUE_EQ(resultObject->getValue(), Value(Document{}));
 }
 
 TEST(ParseObject, ShouldRecognizeKnownExpression) {
@@ -3806,7 +3805,9 @@ TEST(ExpressionGetFieldTest, GetFieldSerializesCorrectly) {
                     "field": {
                         "$const": "$foo"
                     },
-                    input: {"?": "?"}
+                    input: {
+                        $const: {"?": "?"}
+                    }
                 }
             }
         })",
@@ -3869,11 +3870,13 @@ TEST(ExpressionGetFieldTest, GetFieldWithDynamicFieldExpressionSerializesCorrect
                             "to": {
                                 "$const": "string"
                             },
-                            "format": "?"
+                            "format": {"$const": "?"}
                         }
                     },
                     "input": {
-                         "?": "?"
+                        "$const": {
+                            "?": "?"
+                        }
                     }
                 }
             }
@@ -3936,7 +3939,9 @@ TEST(ExpressionGetFieldTest, GetFieldWithDynamicFieldExpressionSerializesCorrect
                             }
                         }
                     },
-                    input: {"?": "?"}
+                    input: {
+                        $const: {"?": "?"}
+                    }
                 }
             }
         })",
@@ -3999,7 +4004,9 @@ TEST(ExpressionGetFieldTest, GetFieldWithDynamicFieldExpressionSerializesCorrect
                             }
                         }
                     },
-                    input: {"?": "?"}
+                    input: {
+                        $const: {"?": "?"}
+                    }
                 }
             }
         })",
@@ -4070,8 +4077,8 @@ TEST(ExpressionGetFieldTest, GetFieldWithDynamicFieldExpressionSerializesCorrect
                             }
                         }
                     },
-                    "input": {
-                        "?": "?"
+                    input: {
+                        $const: {"?": "?"}
                     }
                 }
             }
@@ -4121,7 +4128,9 @@ TEST(ExpressionGetFieldTest, GetFieldWithDynamicFieldExpressionSerializesCorrect
             "ignoredField": {
                 "$getField": {
                     "field": "$foo",
-                    "input": {"?": "?"}
+                    input: {
+                        $const: {"?": "?"}
+                    }
                 }
             }
         })",
@@ -5111,6 +5120,13 @@ TEST(ExpressionParseParenthesisExpressionObjTest, SingleExprSimplification) {
     auto specObject = fromjson("{$expr: [123]}");
     auto expr = Expression::parseObject(&expCtx, specObject, expCtx.variablesParseState);
     ASSERT_EQ(expr->serialize().toString(), "[{$const: 123}]");
+}
+
+TEST(ExpressionParseParenthesisExpressionObjTest, EmptyObject) {
+    auto expCtx = ExpressionContextForTest{};
+    auto specObject = fromjson("{$expr: {}}");
+    auto expr = Expression::parseObject(&expCtx, specObject, expCtx.variablesParseState);
+    ASSERT_EQ(expr->serialize().toString(), "{$const: {}}");
 }
 
 /**

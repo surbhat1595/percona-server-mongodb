@@ -307,9 +307,10 @@ void DocumentSourceGraphLookUp::doBreadthFirstSearch() {
         auto cached = pExpCtx->getDocumentComparator().makeUnorderedDocumentSet();
         auto matchStage = makeMatchStageFromFrontier(&cached);
 
-        ValueUnorderedSet queried = pExpCtx->getValueComparator().makeUnorderedValueSet();
+        ValueFlatUnorderedSet queried = pExpCtx->getValueComparator().makeFlatUnorderedValueSet();
         _frontier.swap(queried);
-        _frontierUsageBytes = 0;
+        // _frontier is a flat set that has 'capacity'-many slots, each sizeof(Value) bytes.
+        _frontierUsageBytes = sizeof(Value) * _frontier.capacity();
 
         // Process cached values, populating '_frontier' for the next iteration of search.
         while (!cached.empty()) {
@@ -334,6 +335,11 @@ void DocumentSourceGraphLookUp::doBreadthFirstSearch() {
                 ? ShardTargetingPolicy::kAllowed
                 : ShardTargetingPolicy::kNotAllowed;
             _variables.copyToExpCtx(_variablesParseState, _fromExpCtx.get());
+
+            // Query settings are looked up after parsing and therefore are not populated in the
+            // '_fromExpCtx' as part of DocumentSourceGraphLookUp constructor. Assign query settings
+            // to the '_fromExpCtx' by copying them from the parent query ExpressionContext.
+            _fromExpCtx->setQuerySettingsIfNotPresent(pExpCtx->getQuerySettings());
 
             std::unique_ptr<Pipeline, PipelineDeleter> pipeline;
             try {
@@ -393,7 +399,7 @@ void DocumentSourceGraphLookUp::doBreadthFirstSearch() {
              (!_maxDepth || depth <= *_maxDepth));
 
     _frontier.clear();
-    _frontierUsageBytes = 0;
+    _frontierUsageBytes = sizeof(Value) * _frontier.capacity();
 }
 
 bool DocumentSourceGraphLookUp::addToVisitedAndFrontier(Document result, long long depth) {
@@ -417,8 +423,7 @@ bool DocumentSourceGraphLookUp::addToVisitedAndFrontier(Document result, long lo
     // '_frontier'.
     document_path_support::visitAllValuesAtPath(
         result, _connectFromField, [this](const Value& nextFrontierValue) {
-            _frontier.insert(nextFrontierValue);
-            _frontierUsageBytes += nextFrontierValue.getApproximateSize();
+            frontierInsertWithMemoryTracking(nextFrontierValue);
         });
 
     // Add the object to our '_visited' list and update the size of '_visited' appropriately.
@@ -431,8 +436,21 @@ bool DocumentSourceGraphLookUp::addToVisitedAndFrontier(Document result, long lo
     return true;
 }
 
+inline void DocumentSourceGraphLookUp::frontierInsertWithMemoryTracking(Value value) {
+    auto prevCapacity = _frontier.capacity();
+    _frontier.insert(value);
+    // Track allocations internal to 'value.'
+    _frontierUsageBytes += value.getApproximateSize() - sizeof(Value);
+    // Track increased capacity in slot array, if any.
+    _frontierUsageBytes += sizeof(Value) * (_frontier.capacity() - prevCapacity);
+}
+
+void DocumentSourceGraphLookUp::frontierInsertWithMemoryTracking_forTest(Value value) {
+    frontierInsertWithMemoryTracking(value);
+}
+
 void DocumentSourceGraphLookUp::addToCache(const Document& result,
-                                           const ValueUnorderedSet& queried) {
+                                           const ValueFlatUnorderedSet& queried) {
     document_path_support::visitAllValuesAtPath(
         result, _connectToField, [this, &queried, &result](const Value& connectToValue) {
             // It is possible that 'connectToValue' is a single value, but was not queried for. For
@@ -457,8 +475,8 @@ boost::optional<BSONObj> DocumentSourceGraphLookUp::makeMatchStageFromFrontier(
 
             // If the cached value increased in size while in the cache, we don't want to underflow
             // '_frontierUsageBytes'.
-            invariant(valueSize <= _frontierUsageBytes);
-            _frontierUsageBytes -= valueSize;
+            invariant((valueSize - sizeof(Value)) <= _frontierUsageBytes);
+            _frontierUsageBytes -= (valueSize - sizeof(Value));
         } else {
             ++it;
         }
@@ -522,18 +540,11 @@ void DocumentSourceGraphLookUp::performSearch() {
     // If _startWith evaluates to an array, treat each value as a separate starting point.
     if (startingValue.isArray()) {
         for (const auto& value : startingValue.getArray()) {
-            _frontier.insert(value);
-            _frontierUsageBytes += value.getApproximateSize();
+            frontierInsertWithMemoryTracking(value);
         }
     } else {
-        _frontier.insert(startingValue);
-        _frontierUsageBytes += startingValue.getApproximateSize();
+        frontierInsertWithMemoryTracking(startingValue);
     }
-
-    // Query settings are looked up after parsing and therefore are not populated in the
-    // '_fromExpCtx' as part of DocumentSourceGraphLookUp constructor. Assign query settings to the
-    // '_fromExpCtx' by copying them from the parent query ExpressionContext.
-    setQuerySettingsIfNeeded(_fromExpCtx, pExpCtx->getQuerySettings());
 
     try {
         doBreadthFirstSearch();
@@ -712,7 +723,7 @@ DocumentSourceGraphLookUp::DocumentSourceGraphLookUp(
       _additionalFilter(additionalFilter),
       _depthField(depthField),
       _maxDepth(maxDepth),
-      _frontier(pExpCtx->getValueComparator().makeUnorderedValueSet()),
+      _frontier(pExpCtx->getValueComparator().makeFlatUnorderedValueSet()),
       _visited(ValueComparator::kInstance.makeUnorderedValueMap<Document>()),
       _cache(pExpCtx->getValueComparator()),
       _unwind(unwindSrc),
@@ -749,7 +760,7 @@ DocumentSourceGraphLookUp::DocumentSourceGraphLookUp(
           original._fromExpCtx->copyWith(original.pExpCtx->getResolvedNamespace(_from).ns,
                                          original.pExpCtx->getResolvedNamespace(_from).uuid)),
       _fromPipeline(original._fromPipeline),
-      _frontier(pExpCtx->getValueComparator().makeUnorderedValueSet()),
+      _frontier(pExpCtx->getValueComparator().makeFlatUnorderedValueSet()),
       _visited(ValueComparator::kInstance.makeUnorderedValueMap<Document>()),
       _cache(pExpCtx->getValueComparator()),
       _variables(original._variables),
@@ -899,17 +910,6 @@ void DocumentSourceGraphLookUp::addInvolvedCollections(
     for (auto&& stage : introspectionPipeline->getSources()) {
         stage->addInvolvedCollections(collectionNames);
     }
-}
-
-void DocumentSourceGraphLookUp::setQuerySettingsIfNeeded(
-    const boost::intrusive_ptr<ExpressionContext>& expCtx,
-    const query_settings::QuerySettings& querySettings) {
-    if (_didSetQuerySettingsToPipeline) {
-        return;
-    }
-
-    expCtx->setQuerySettings(querySettings);
-    _didSetQuerySettingsToPipeline = true;
 }
 
 }  // namespace mongo

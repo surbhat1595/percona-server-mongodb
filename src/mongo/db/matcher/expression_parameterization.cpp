@@ -114,12 +114,16 @@ void MatchExpressionParameterizationVisitor::visitComparisonMatchExpression(
         case BSONType::MaxKey:
         case BSONType::Undefined:
         case BSONType::Object:
+        case BSONType::Bool:
             break;
 
         case BSONType::String:
+            if (!expr->getData().str().empty()) {
+                expr->setInputParamId(_context->nextReusableInputParamId(expr));
+            }
+            break;
         case BSONType::BinData:
         case BSONType::jstOID:
-        case BSONType::Bool:
         case BSONType::RegEx:
         case BSONType::Code:
         case BSONType::Symbol:
@@ -180,7 +184,7 @@ void MatchExpressionParameterizationVisitor::visit(InMatchExpression* expr) {
     // multiple-element $in query has more than one (point) intervals for the index bounds, which is
     // ineligible for COUNT_SCAN. This is to make sure that $in queries with multiple elements will
     // not share the same query shape with any other single-element $in query.
-    if (auto inList = expr->getInList(); inList && inList->hasSingleElement()) {
+    if (expr->equalitiesHasSingleElement()) {
         return;
     }
 

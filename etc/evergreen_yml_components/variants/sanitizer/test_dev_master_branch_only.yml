@@ -7,6 +7,7 @@
 variables:
 # THIS HAS COPIES IN:
 # - etc/evergreen_yml_components/variants/rhel/test_dev_master_branch_only.yml
+# - etc/evergreen_yml_components/variants/rhel/test_dev_master_and_lts_branches_only.yml
 # - etc/evergreen_yml_components/variants/rhel/test_dev.yml
 # - etc/evergreen_yml_components/variants/sanitizer/test_dev_master_branch_only.yml
 # ANY MODIFICATIONS HERE SHOULD ALSO BE MADE IN THOSE FILES
@@ -41,6 +42,7 @@ variables:
 
 # THIS HAS COPIES IN:
 # - etc/evergreen_yml_components/variants/rhel/test_dev_master_branch_only.yml
+# - etc/evergreen_yml_components/variants/rhel/test_dev_master_and_lts_branches_only.yml
 # - etc/evergreen_yml_components/variants/rhel/test_dev.yml
 # - etc/evergreen_yml_components/variants/sanitizer/test_dev_master_branch_only.yml
 # ANY MODIFICATIONS HERE SHOULD ALSO BE MADE IN THOSE FILES
@@ -105,6 +107,7 @@ variables:
   max_sub_suites: 3
   num_scons_link_jobs_available: 0.99
   large_distro_name: rhel80-build
+  xlarge_distro_name: rhel80-xxlarge
   multiversion_platform: rhel80
   multiversion_edition: enterprise
   gcov_tool: /opt/mongodbtoolchain/v4/bin/gcov
@@ -118,6 +121,7 @@ buildvariants:
 
 - name: &enterprise-rhel-80-64-bit-dynamic-debug-mode enterprise-rhel-80-64-bit-dynamic-debug-mode
   display_name: "Shared Library Enterprise RHEL 8.0 Debug Mode"
+  tags: []
   cron: "0 4 * * 0" # From the ${project_weekly_cron} parameter
   run_on:
   - rhel80-small
@@ -182,7 +186,7 @@ buildvariants:
     distros:
     - rhel80-xlarge
   - name: .jscore .common !jsCore
-  - name: jsCore_min_batch_repeat_queries_ese_gsm
+  - name: jsCore_min_batch_repeat_queries_multiplan_single_solutions_ese_gsm
   - name: jsCore_txns_large_txns_format
   - name: json_schema
   # TODO(SERVER-69996) reenable after ticket is complete
@@ -259,6 +263,7 @@ buildvariants:
 
 - name: &windows-debug-suggested windows-debug-suggested
   display_name: "* Windows DEBUG"
+  tags: ["suggested"]
   cron: "0 */4 * * *" # From the ${project_required_suggested_cron} parameter
   run_on:
   - windows-vsCurrent-small
@@ -299,6 +304,7 @@ buildvariants:
 
 - name: &enterprise-windows-debug-unoptimized enterprise-windows-debug-unoptimized
   display_name: "Enterprise Windows DEBUG (Unoptimized)"
+  tags: []
   cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
   run_on:
   - windows-vsCurrent-small
@@ -346,6 +352,7 @@ buildvariants:
 - &macos-debug-template
   name: &macos-debug-suggested macos-debug-suggested
   display_name: "* macOS DEBUG"
+  tags: ["suggested"]
   cron: "0 */4 * * *" # From the ${project_required_suggested_cron} parameter
   run_on:
   - macos-1100
@@ -374,6 +381,7 @@ buildvariants:
 
 - name: &enterprise-macos enterprise-macos
   display_name: "Enterprise macOS DEBUG"
+  tags: []
   cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
   run_on:
   - macos-1100
@@ -410,6 +418,7 @@ buildvariants:
 - &rhel80-debug-ubsan-all-feature-flags-template
   name: &rhel80-debug-ubsan-all-feature-flags rhel80-debug-ubsan-all-feature-flags
   display_name: "* Shared Library UBSAN Enterprise RHEL 8.0 DEBUG (all feature flags)"
+  tags: ["suggested"]
   cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
   run_on:
   - rhel80-build
@@ -453,6 +462,7 @@ buildvariants:
   <<: *linux_debug_aubsan_compile_variant_dependency
   name: &rhel80-debug-aubsan-lite-all-feature-flags-required rhel80-debug-aubsan-lite-all-feature-flags-required
   display_name: "! Shared Library {A,UB}SAN Enterprise RHEL 8.0 DEBUG (all feature flags)"
+  tags: ["required"]
   cron: "0 */4 * * *" # From the ${project_required_suggested_cron} parameter
   run_on:
   - rhel80-build
@@ -471,6 +481,7 @@ buildvariants:
 - <<: *rhel80-debug-aubsan-lite-all-feature-flags-required-template
   name: &rhel80-debug-aubsan-all-feature-flags rhel80-debug-aubsan-all-feature-flags
   display_name: "* Shared Library {A,UB}SAN Enterprise RHEL 8.0 DEBUG (all feature flags)"
+  tags: ["suggested"]
   cron: "0 4 * * *" # From the ${project_required_suggested_cron} parameter
   expansions:
     <<: *aubsan-lite-required-expansions
@@ -479,14 +490,17 @@ buildvariants:
     test_flags: >-
       --runAllFeatureFlagTests
   tasks:
-  - name: .development_critical !.requires_compile_variant !.incompatible_development_variant !.incompatible_aubsan !.incompatible_all_feature_flags
-  - name: .release_critical !.requires_compile_variant !.incompatible_development_variant !.incompatible_aubsan !.incompatible_all_feature_flags
-  - name: .default !.requires_compile_variant !.incompatible_development_variant !.incompatible_aubsan !.incompatible_all_feature_flags
-  - name: .non_deterministic !.requires_compile_variant !.incompatible_development_variant !.incompatible_aubsan !.incompatible_all_feature_flags
+  # TODO: DEVPROD-5173
+  # Add !.incompatible_all_feature_flags back when the tag is added to any task or DEVPROD-5173 is completed.
+  - name: .development_critical !.requires_compile_variant !.incompatible_development_variant !.incompatible_aubsan #!.incompatible_all_feature_flags
+  - name: .release_critical !.requires_compile_variant !.incompatible_development_variant !.incompatible_aubsan #!.incompatible_all_feature_flags
+  - name: .default !.requires_compile_variant !.incompatible_development_variant !.incompatible_aubsan #!.incompatible_all_feature_flags
+  - name: .non_deterministic !.requires_compile_variant !.incompatible_development_variant !.incompatible_aubsan #!.incompatible_all_feature_flags
 
 - &enterprise-rhel80-debug-tsan-template
   name: &enterprise-rhel80-debug-tsan enterprise-rhel80-debug-tsan
   display_name: "* TSAN Enterprise RHEL 8.0 DEBUG"
+  tags: ["suggested"]
   cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
   run_on:
   - rhel80-large
@@ -538,7 +552,7 @@ buildvariants:
   - name: compile_integration_and_test_parallel_stream_TG
   - name: check_feature_flag_tags
   # TODO SERVER-82766: timeseries, multiversion, and optimization fuzzers had been timing out on TSAN builds.
-  - name: .aggfuzzer !.feature_flag_guarded !.timeseries !.multiversion !.optimization !.no_debug_mode
+  - name: .aggfuzzer !.feature_flag_guarded !.timeseries !.blockprocessing !.multiversion !.optimization !.no_debug_mode
   - name: .aggregation !.feature_flag_guarded
   - name: audit
   - name: .auth
@@ -562,7 +576,7 @@ buildvariants:
     distros:
     - rhel80-xlarge
   - name: .jscore .common !jsCore
-  - name: jsCore_min_batch_repeat_queries_ese_gsm
+  - name: jsCore_min_batch_repeat_queries_multiplan_single_solutions_ese_gsm
   - name: jsCore_txns_large_txns_format
   - name: json_schema
   - name: .jstestfuzz !.feature_flag_guarded !.flow_control  # Flow control jstestfuzz take longer.
@@ -631,8 +645,8 @@ buildvariants:
 
 - name: &enterprise-rhel80-unoptimized-64-bit enterprise-rhel80-unoptimized-64-bit
   display_name: "~ Enterprise RHEL 8.0 DEBUG (Unoptimized)"
-  cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
   tags: ["bazel_check"]
+  cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
   expansions:
     compile_flags: >-
       MONGO_DISTMOD=rhel80

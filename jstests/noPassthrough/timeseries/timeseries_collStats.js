@@ -52,7 +52,6 @@ const clearCollection = function() {
     expectedStats.numBucketsClosedDueToCount = 0;
     expectedStats.numBucketsClosedDueToSize = 0;
     expectedStats.numBucketsClosedDueToTimeForward = 0;
-    expectedStats.numBucketsClosedDueToTimeBackward = 0;
     expectedStats.numBucketsClosedDueToMemoryThreshold = 0;
     expectedStats.numBucketsArchivedDueToMemoryThreshold = 0;
     expectedStats.numBucketsArchivedDueToTimeBackward = 0;
@@ -297,14 +296,5 @@ testIdleBucketExpiry(i => {
 testIdleBucketExpiry(i => {
     return {[timeFieldName]: ISODate(), [metaFieldName]: i, a: largeValue};
 });
-
-// Ensure that creating a non-time-series collection on a system.buckets namespace doesn't confuse
-// the stats collector.
-const nonTimeseries = testDB.getCollection('nonTimeseries');
-const nonTimeseriesBuckets = testDB.getCollection('system.buckets.nonTimeseries');
-assert.commandWorked(testDB.createCollection(nonTimeseries.getName()));
-assert.commandWorked(testDB.createCollection(nonTimeseriesBuckets.getName()));
-assert.eq(null, nonTimeseries.stats().timeseries);
-assert.eq(null, nonTimeseriesBuckets.stats().timeseries);
 
 MongoRunner.stopMongod(conn);

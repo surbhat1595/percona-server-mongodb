@@ -29,10 +29,10 @@
 
 #include "mongo/db/query/classic_runtime_planner_for_sbe/planner_interface.h"
 
+#include <absl/functional/bind_front.h>
+
 #include "mongo/db/query/plan_executor_factory.h"
-#include "mongo/db/query/plan_explainer_impl.h"
 #include "mongo/db/query/plan_yield_policy_impl.h"
-#include "mongo/db/query/query_planner.h"
 #include "mongo/db/query/stage_builder_util.h"
 #include "mongo/logv2/log.h"
 
@@ -42,18 +42,22 @@ namespace mongo::classic_runtime_planner_for_sbe {
 
 MultiPlanner::MultiPlanner(PlannerDataForSBE plannerData,
                            std::vector<std::unique_ptr<QuerySolution>> candidatePlans,
-                           PlanCachingMode cachingMode,
+                           bool shouldWriteToPlanCache,
                            boost::optional<std::string> replanReason)
     : PlannerBase(std::move(plannerData)),
-      _cachingMode((std::move(cachingMode))),
+      _shouldWriteToPlanCache(shouldWriteToPlanCache),
       _replanReason(replanReason) {
     LOGV2_DEBUG(
         6215001, 5, "Using classic multi-planner for SBE", "replanReason"_attr = _replanReason);
+
+    // Set up the callback that 'MultiPlanStage' will call to write to the SBE plan cache.
+    auto planCacheWriter = absl::bind_front(&MultiPlanner::_buildSbePlanAndMaybeCache, this);
+
     _multiPlanStage =
         std::make_unique<MultiPlanStage>(cq()->getExpCtxRaw(),
                                          collections().getMainCollectionPtrOrAcquisition(),
                                          cq(),
-                                         PlanCachingMode::NeverCache,
+                                         std::move(planCacheWriter),
                                          replanReason);
     for (auto&& solution : candidatePlans) {
         auto nextPlanRoot = stage_builder::buildClassicExecutableTree(
@@ -72,23 +76,14 @@ MultiPlanner::MultiPlanner(PlannerDataForSBE plannerData,
 
 std::unique_ptr<PlanExecutor, PlanExecutor::Deleter> MultiPlanner::makeExecutor(
     std::unique_ptr<CanonicalQuery> canonicalQuery) {
-    // Calculate and update the number of works based on totalKeysExamined + totalDocsExamined to
-    // align with how SBE calculates the works.
-    auto stats = _multiPlanStage->getStats();
-    auto summary = collectExecutionStatsSummary(stats.get(), _multiPlanStage->bestPlanIdx());
-    plan_ranker::PlanRankingDecision ranking = _multiPlanStage->planRankingDecision();
-    tassert(8523807,
-            "Expected StatsDetails in classic runtime planner ranking decision.",
-            std::holds_alternative<plan_ranker::StatsDetails>(ranking.stats));
-    auto& rankerDetails = std::get<plan_ranker::StatsDetails>(ranking.stats);
-    rankerDetails.candidatePlanStats[0]->common.works =
-        summary.totalKeysExamined + summary.totalDocsExamined;
+    // We should have already constructed the full SBE plan in order to write it to the SBE plan
+    // cache.
+    invariant(_sbePlanAndData);
 
     if (_shouldUseEofOptimization()) {
-        // We don't need to extend the solution with the agg pipeline, because we don't do EOF
-        // optimization if the pipeline is present.
-        _buildSbePlanAndUpdatePlanCache(_multiPlanStage->bestSolution(), ranking);
         auto nss = cq()->nss();
+        // Return a classic plan executor which will unspool the data buffered during
+        // multi-planning.
         return uassertStatusOK(
             plan_executor_factory::make(std::move(canonicalQuery),
                                         extractWs(),
@@ -101,35 +96,18 @@ std::unique_ptr<PlanExecutor, PlanExecutor::Deleter> MultiPlanner::makeExecutor(
                                         cachedPlanHash()));
     }
 
-    std::unique_ptr<QuerySolution> winningSolution = _multiPlanStage->extractBestSolution();
-
-    // Extend the winning solution with the agg pipeline and build the execution tree.
-    if (!cq()->cqPipeline().empty()) {
-        winningSolution = QueryPlanner::extendWithAggPipeline(
-            *cq(), std::move(winningSolution), plannerParams().secondaryCollectionsInfo);
-    }
-
-    auto sbePlanAndData = _buildSbePlanAndUpdatePlanCache(winningSolution.get(), ranking);
+    // The winning plan did not reach EOF during the trial period, or we were otherwise unable to
+    // use the EOF optimization. Construct an SBE plan executor.
+    //
+    // When the EOF optimization is not in use, we should own the 'QuerySolution'. In contrast, when
+    // the EOF optimization is used, MultiPlanStage retains ownership of the winning solution.
+    invariant(_winningSolution);
     return prepareSbePlanExecutor(std::move(canonicalQuery),
-                                  std::move(winningSolution),
-                                  std::move(sbePlanAndData),
+                                  std::move(_winningSolution),
+                                  std::move(*_sbePlanAndData),
                                   false /*isFromPlanCache*/,
                                   cachedPlanHash(),
                                   std::move(_multiPlanStage));
-}
-
-MultiPlanner::SbePlanAndData MultiPlanner::_buildSbePlanAndUpdatePlanCache(
-    const QuerySolution* winningSolution, const plan_ranker::PlanRankingDecision& ranking) {
-    auto sbePlanAndData = prepareSbePlanAndData(*winningSolution, std::move(_replanReason));
-    plan_cache_util::updateSbePlanCacheFromClassicCandidates(opCtx(),
-                                                             collections(),
-                                                             _cachingMode,
-                                                             *cq(),
-                                                             ranking,
-                                                             _multiPlanStage->candidates(),
-                                                             sbePlanAndData,
-                                                             winningSolution);
-    return sbePlanAndData;
 }
 
 bool MultiPlanner::_shouldUseEofOptimization() const {
@@ -143,6 +121,53 @@ bool MultiPlanner::_shouldUseEofOptimization() const {
         cq()->cqPipeline().empty() &&
         // We want more coverage for SBE in debug builds.
         !kDebugBuild;
+}
+
+void MultiPlanner::_buildSbePlanAndMaybeCache(
+    const CanonicalQuery& queryToCache,
+    MultiPlanStage& mps,
+    std::unique_ptr<plan_ranker::PlanRankingDecision> ranking,
+    std::vector<plan_ranker::CandidatePlan>& candidates) {
+    invariant(queryToCache.isSbeCompatible());
+    // Note: 'queryToCache' is _not_ necessarily the same as the canonical query available in cq().
+    // This is because subplanning will plan (and cache) each branch of the top-level OR in a query
+    // separately, and invoke this callback with each branch as if it were an independent top-level
+    // query.
+
+    boost::optional<NumReads> numReads;
+    if (_shouldWriteToPlanCache) {
+        auto stats = _multiPlanStage->getStats();
+        numReads = plan_cache_util::computeNumReadsFromWorks(*stats, *ranking);
+    }
+
+    // If classic plan cache is enabled, write to it. We need to do this before we extend the QSN
+    // tree with the agg pipeline, since the agg portion does not get cached in classic.
+    if (_shouldWriteToPlanCache && !useSbePlanCache()) {
+        plan_cache_util::updateClassicPlanCacheFromClassicCandidatesForSbeExecution(
+            opCtx(),
+            collections().getMainCollection(),
+            queryToCache,
+            *numReads,
+            std::move(ranking),
+            candidates);
+    }
+
+    // Pointer to the query solution which should be used to construct the SBE plan cache entry.
+    const QuerySolution* solnToCache = _multiPlanStage->bestSolution();
+
+    if (!_shouldUseEofOptimization()) {
+        // Extend the winning solution with the agg pipeline. If using the EOF optimisation,
+        // plan_executor_factory::make(...) may later require the best solution to still be owned by
+        // `_multiPlanStage` (not yet extracted).
+        _winningSolution = extendSolutionWithPipeline(_multiPlanStage->extractBestSolution());
+        solnToCache = _winningSolution.get();
+    }
+
+    _sbePlanAndData = prepareSbePlanAndData(*solnToCache, std::move(_replanReason));
+    if (_shouldWriteToPlanCache && useSbePlanCache()) {
+        plan_cache_util::updateSbePlanCacheWithNumReads(
+            opCtx(), collections(), queryToCache, *numReads, *_sbePlanAndData, solnToCache);
+    }
 }
 
 }  // namespace mongo::classic_runtime_planner_for_sbe

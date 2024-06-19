@@ -72,6 +72,20 @@ public:
     ExtractResult extractCellBlocks(const BSONObj& bucket);
 
 private:
+    /**
+     * Tries to apply path-based decompression to the non-top-level paths for a block.
+     *
+     * If successful, updates 'outCells' accordingly and returns true. Otherwise, no paths are
+     * decompresssed and returns false.
+     *
+     * Currently path-based decompression is only supported for scalar fields.
+     */
+    bool tryPathBasedDecompression(TsBlock& tsBlock,
+                                   BSONElement fieldMin,
+                                   BSONElement fieldMax,
+                                   const std::vector<size_t>& nonTopLevelIdxesForCurrentField,
+                                   std::vector<std::unique_ptr<CellBlock>>& outCells) const;
+
     std::vector<CellBlock::PathRequest> _pathReqs;
 
     // Set of indexes in _pathReqs which are paths NOT of the form [Get <field> Id]. This includes
@@ -91,6 +105,10 @@ private:
 
     // True if the feature flag for block based decoding is enabled.
     bool _blockBasedDecompressionEnabled;
+
+    // True if the feature flag is enabled for block based decoding of paths to scalar fields in
+    // objects.
+    bool _blockBasedScalarInObjectDecompressionEnabled;
 };
 
 /**
@@ -146,7 +164,7 @@ public:
         return false;
     }
 
-    boost::optional<size_t> tryCount() const override {
+    size_t count() override {
         return _count;
     }
 
@@ -182,13 +200,37 @@ public:
         return static_cast<bool>(_decompressedBlock);
     }
 
-private:
+    boost::optional<size_t> argMin() override {
+        ensureDeblocked();
+        return _decompressedBlock->argMin();
+    }
+
+    boost::optional<size_t> argMax() override {
+        ensureDeblocked();
+        return _decompressedBlock->argMax();
+    }
+
+    std::pair<value::TypeTags, value::Value> at(size_t idx) override {
+        ensureDeblocked();
+        return _decompressedBlock->at(idx);
+    }
+
+    TypeTags getBlockTag() const {
+        return _blockTag;
+    }
+
     /**
      * Returns the BinData for this TsBlock, if present. It's illegal to call this for TsBlocks
      * backed by a bucket which does not use BinData/BSONColumn.
      */
     BSONBinData getBinData() const;
 
+    // Test-only helper.
+    ValueBlock* decompressedBlock_forTest() {
+        return _decompressedBlock.get();
+    }
+
+private:
     void ensureDeblocked();
 
     /**

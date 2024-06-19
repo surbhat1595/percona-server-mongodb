@@ -299,8 +299,7 @@ structs:
                     doesn't already exist. Only allowed if `unsplittable` is true.
                 type: shard_id
                 optional: true
-            # TODO SERVER-83878 Remove this parameter when unsplittable timeseries collections request coming 
-            # from the {create...} cmd start getting tracked in the catalog 
+            # TODO SERVER-85395 Remove this parameter once the test command is removed.
             isFromCreateUnsplittableCollectionTestCommand:
                 description: "Temporary field to differentiate calls originating from the createUnsplittableCollection test command."
                 type: optionalBool
@@ -828,6 +827,21 @@ commands:
         api_version: ""
         chained_structs:
             ShardsvrConvertToCappedRequest: ShardsvrConvertToCappedRequest
+
+    _shardsvrConvertToCappedParticipant:
+        command_name: _shardsvrConvertToCappedParticipant
+        cpp_name: ShardsvrConvertToCappedParticipant
+        description: "Internal command sent to the data shard to convert a collection to capped"
+        strict: false
+        api_version: ""
+        namespace: concatenate_with_db
+        chained_structs:
+            ShardsvrConvertToCappedRequest: ShardsvrConvertToCappedRequest
+        fields:
+            targetUUID:
+                type: uuid
+                description: "UUID of the new capped collection"
+        reply_type: OkReply
 
     _shardsvrUntrackUnsplittableCollection:
         command_name: _shardsvrUntrackUnsplittableCollection

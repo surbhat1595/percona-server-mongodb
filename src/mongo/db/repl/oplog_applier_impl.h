@@ -44,6 +44,7 @@
 #include "mongo/db/repl/oplog_buffer.h"
 #include "mongo/db/repl/oplog_entry.h"
 #include "mongo/db/repl/oplog_entry_or_grouped_inserts.h"
+#include "mongo/db/repl/oplog_writer.h"
 #include "mongo/db/repl/optime.h"
 #include "mongo/db/repl/replication_consistency_markers.h"
 #include "mongo/db/repl/replication_coordinator.h"
@@ -74,7 +75,7 @@ public:
      * Constructs this OplogApplier with specific options.
      * During steady state replication, _run() obtains batches of operations to apply
      * from the oplogBuffer. During the oplog application phase, the batch of operations is
-     * distributed across writer threads in 'writerPool'. Each writer thread applies its own vector
+     * distributed across writer threads in 'workerPool'. Each writer thread applies its own vector
      * of operations using 'func'. The writer thread pool is not owned by us.
      */
     OplogApplierImpl(executor::TaskExecutor* executor,
@@ -84,18 +85,12 @@ public:
                      ReplicationConsistencyMarkers* consistencyMarkers,
                      StorageInterface* storageInterface,
                      const Options& options,
-                     ThreadPool* writerPool);
+                     ThreadPool* workerPool);
 
     void fillWriterVectors_forTest(OperationContext* opCtx,
                                    std::vector<OplogEntry>* ops,
                                    std::vector<std::vector<ApplierOperation>>* writerVectors,
                                    std::vector<std::vector<OplogEntry>>* derivedOps) noexcept;
-
-    void scheduleWritesToOplogAndChangeCollection(OperationContext* opCtx,
-                                                  StorageInterface* storageInterface,
-                                                  ThreadPool* writerPool,
-                                                  const std::vector<OplogEntry>& ops,
-                                                  bool skipWritesToOplog) override;
 
 private:
     /**
@@ -137,15 +132,13 @@ private:
 
     // Pool of worker threads for writing ops to the databases.
     // Not owned by us.
-    ThreadPool* const _writerPool;
+    ThreadPool* const _workerPool;
 
-    StorageInterface* _storageInterface;
+    StorageInterface* const _storageInterface;
 
     ReplicationConsistencyMarkers* const _consistencyMarkers;
 
-    // Used to determine which operations should be applied during initial sync. If this is null,
-    // we will apply all operations that were fetched.
-    OpTime _beginApplyingOpTime = OpTime();
+    std::unique_ptr<OplogWriter> _oplogWriter;
 
 protected:
     // Marked as protected for use in unit tests.

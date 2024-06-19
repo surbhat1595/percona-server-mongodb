@@ -119,7 +119,7 @@ public:
      * This will not accept a KeyString with a Discriminator other than kInclusive.
      */
     virtual boost::optional<RecordId> findLoc(OperationContext* opCtx,
-                                              const key_string::Value& keyString) const = 0;
+                                              StringData keyString) const = 0;
 
     /**
      * Return ErrorCodes::DuplicateKey if there is more than one occurence of 'KeyString' in this
@@ -291,32 +291,39 @@ public:
         /**
          * Seeks to the provided keyString and returns the KeyStringEntry.
          * The provided keyString has discriminator information encoded.
+         * The keyString should not have RecordId or TypeBits encoded, which is guaranteed if
+         * obtained from BuilderBase::finishAndGetBuffer().
          */
-        virtual boost::optional<KeyStringEntry> seekForKeyString(
-            const key_string::Value& keyString) = 0;
+        virtual boost::optional<KeyStringEntry> seekForKeyString(StringData keyString) = 0;
 
         /**
          * Seeks to the provided keyString and returns the SortedDataKeyValueView.
          * The provided keyString has discriminator information encoded.
+         * The keyString should not have RecordId or TypeBits encoded, which is guaranteed if
+         * obtained from BuilderBase::finishAndGetBuffer().
+         *
          * Returns unowned data, which is invalidated upon calling a next() or seek()
          * variant, a save(), or when the cursor is destructed.
          */
-        virtual SortedDataKeyValueView seekForKeyValueView(const key_string::Value& keyString) = 0;
+        virtual SortedDataKeyValueView seekForKeyValueView(StringData keyString) = 0;
 
         /**
          * Seeks to the provided keyString and returns the IndexKeyEntry.
          * The provided keyString has discriminator information encoded.
+         * The keyString should not have RecordId or TypeBits encoded, which is guaranteed if
+         * obtained from BuilderBase::finishAndGetBuffer().
          */
         virtual boost::optional<IndexKeyEntry> seek(
-            const key_string::Value& keyString,
-            KeyInclusion keyInclusion = KeyInclusion::kInclude) = 0;
+            StringData keyString, KeyInclusion keyInclusion = KeyInclusion::kInclude) = 0;
 
         /**
          * Seeks to the provided keyString and returns the RecordId of the matching key, or
          * boost::none if one does not exist.
-         * The provided key must always have a kInclusive discriminator.
+         * The provided keyString must always have a kInclusive discriminator.
+         * The keyString should not have RecordId or TypeBits encoded, which is guaranteed if
+         * obtained from BuilderBase::finishAndGetBuffer().
          */
-        virtual boost::optional<RecordId> seekExact(const key_string::Value& keyString) = 0;
+        virtual boost::optional<RecordId> seekExact(StringData keyString) = 0;
 
         //
         // Saving and restoring state
@@ -457,14 +464,16 @@ public:
                            const char* typeBitsData,
                            int32_t typeBitsSize,
                            key_string::Version version,
-                           bool isRecordIdAtEndOfKeyString)
+                           bool isRecordIdAtEndOfKeyString,
+                           const RecordId* id = nullptr)
         : _ksData(ksData),
           _ridData(ridData),
           _tbData(typeBitsData),
           _ksSize(ksSize),
           _ridSize(ridSize),
           _tbSize(typeBitsSize),
-          _version(version) {
+          _version(version),
+          _id(id) {
         invariant(ksSize > 0 && ridSize > 0 && typeBitsSize >= 0);
         _ksOriginalSize = isRecordIdAtEndOfKeyString ? (ksSize + ridSize) : ksSize;
     }
@@ -494,6 +503,10 @@ public:
         return {_tbData, static_cast<StringData::size_type>(_tbSize)};
     }
 
+    StringData getRecordIdView() const {
+        return {_ridData, static_cast<StringData::size_type>(_ridSize)};
+    }
+
     key_string::Version getVersion() const {
         return _version;
     }
@@ -502,33 +515,16 @@ public:
         return _ksOriginalSize > _ksSize;
     }
 
-    RecordId decodeRecordId(KeyFormat ridFormat) const {
-        if (KeyFormat::Long == ridFormat) {
-            BufReader reader(_ridData, _ridSize);
-            return key_string::decodeRecordIdLong(&reader);
-        } else if (KeyFormat::String == ridFormat) {
-            return key_string::decodeRecordIdStrAtEnd(_ridData, _ridSize);
-        } else {
-            MONGO_UNREACHABLE;
-        }
+    const RecordId* getRecordId() const {
+        return _id;
     }
 
     /**
      * Create a Value copy from this view including all components.
      */
     key_string::Value getValueCopy() const {
-        const auto bufSize = _ksSize + _ridSize + (_tbSize > 0 ? _tbSize : 1);
-        BufBuilder buf(bufSize);
-        buf.appendBuf(_ksData, _ksSize);
-        buf.appendBuf(_ridData, _ridSize);
-        if (_tbSize == 0) {
-            buf.appendChar(0);
-        } else {
-            buf.appendBuf(_tbData, _tbSize);
-        }
-
-        invariant(bufSize == buf.len());
-        return {_version, _ksSize + _ridSize, SharedBufferFragment(buf.release(), bufSize)};
+        return key_string::Value::makeValue(
+            _version, getKeyStringWithoutRecordIdView(), getRecordIdView(), getTypeBitsView());
     }
 
     bool isEmpty() const {
@@ -558,6 +554,7 @@ private:
     int32_t _ridSize = 0;
     int32_t _tbSize = 0;
     key_string::Version _version;
+    const RecordId* _id = nullptr;
 };
 
 }  // namespace mongo

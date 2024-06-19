@@ -68,7 +68,6 @@
 
 namespace mongo {
 
-using unittest::assertGet;
 
 void QueryPlannerTest::setUp() {
     nss = NamespaceString::createNamespaceString_forTest("test.collection");
@@ -577,6 +576,10 @@ void QueryPlannerTest::assertSolutionExists(const std::string& solnJson, size_t 
        << '\n';
     dumpSolutions(ss);
     FAIL(ss);
+}
+
+void QueryPlannerTest::assertSolutionDoesntExist(const std::string& solnJson) const {
+    assertSolutionExists(solnJson, 0 /* expect zero matches */);
 }
 
 void QueryPlannerTest::assertHasOneSolutionOf(const std::vector<std::string>& solnStrs) const {

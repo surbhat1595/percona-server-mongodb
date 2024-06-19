@@ -228,20 +228,23 @@ public:
                                              summaryFields.nDeleted);
             }
 
-            ClusterClientCursorParams params(cursorNss,
-                                             APIParameters::get(opCtx),
-                                             ReadPreferenceSetting::get(opCtx),
-                                             repl::ReadConcernArgs::get(opCtx),
-                                             [&] {
-                                                 if (!opCtx->getLogicalSessionId())
-                                                     return OperationSessionInfoFromClient();
-                                                 // TODO (SERVER-80525): This code path does not
-                                                 // clear the setAutocommit field on the presence of
-                                                 // TransactionRouter::get
-                                                 return OperationSessionInfoFromClient(
-                                                     *opCtx->getLogicalSessionId(),
-                                                     opCtx->getTxnNumber());
-                                             }());
+            ClusterClientCursorParams params(
+                cursorNss,
+                APIParameters::get(opCtx),
+                ReadPreferenceSetting::get(opCtx),
+                repl::ReadConcernArgs::get(opCtx),
+                [&] {
+                    if (!opCtx->getLogicalSessionId())
+                        return OperationSessionInfoFromClient();
+                    // TODO (SERVER-80525): This code path does not
+                    // clear the setAutocommit field on the presence of
+                    // TransactionRouter::get
+                    return OperationSessionInfoFromClient(
+                        *opCtx->getLogicalSessionId(),
+                        // Retryable writes will have a txnNumber we do not want to associate with
+                        // the cursor. We only want to set this field for transactions.
+                        opCtx->inMultiDocumentTransaction() ? opCtx->getTxnNumber() : boost::none);
+                }());
 
             long long batchSize = std::numeric_limits<long long>::max();
             if (req.getCursor() && req.getCursor()->getBatchSize()) {
@@ -346,15 +349,24 @@ public:
                 bulkRequest.setLet(expCtx->variables.toBSON(expCtx->variablesParseState, *let));
             }
 
-            // "Fire and forget" bulk writes requested by the external clients need to be upgraded
-            // to w: 1 for potential writeErrors to be properly managed.
-            if (auto wc = opCtx->getWriteConcern();
-                !wc.requiresWriteAcknowledgement() && !opCtx->inMultiDocumentTransaction()) {
-                wc.w = 1;
-                opCtx->setWriteConcern(wc);
-            }
+            // Dispatch the bulk write through the cluster.
+            // - To ensure that possible writeErrors are properly managed, a "fire and forget"
+            //   request needs to be temporarily upgraded to 'w:1'(unless the request belongs to a
+            //   transaction, where per-operation WC settings are not supported);
+            // - Once done, The original WC is re-established to allow _populateCursorReply
+            //   evaluating whether a reply needs to be returned to the external client.
+            auto bulkWriteReply = [&] {
+                WriteConcernOptions originalWC = opCtx->getWriteConcern();
+                ScopeGuard resetWriteConcernGuard(
+                    [opCtx, &originalWC] { opCtx->setWriteConcern(originalWC); });
+                if (auto wc = opCtx->getWriteConcern();
+                    !wc.requiresWriteAcknowledgement() && !opCtx->inMultiDocumentTransaction()) {
+                    wc.w = 1;
+                    opCtx->setWriteConcern(wc);
+                }
+                return cluster::bulkWrite(opCtx, bulkRequest, targeters);
+            }();
 
-            auto bulkWriteReply = cluster::bulkWrite(opCtx, bulkRequest, targeters);
             bool updatedShardKey =
                 handleWouldChangeOwningShardError(opCtx, bulkRequest, bulkWriteReply, targeters);
             bulk_write_exec::BulkWriteExecStats execStats = std::move(bulkWriteReply.execStats);

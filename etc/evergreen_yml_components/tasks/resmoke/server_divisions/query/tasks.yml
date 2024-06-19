@@ -252,6 +252,28 @@ tasks:
       suite: generational_fuzzer
       resmoke_args: "--mongodSetParameters='{logComponentVerbosity: {command: 2}}'"
 
+## Standalone fuzzer for checking block_processing correctness ##
+- <<: *jstestfuzz_template
+  name: aggregation_blockprocessing_fuzzer_gen
+  tags: ["assigned_to_jira_team_server_query_execution", "release_critical", "incompatible_development_variant", "incompatible_mac", "incompatible_ppc", "incompatible_s390x", "aggfuzzer", "common", "timeseries", "blockprocessing", "require_npm", "random_name", "no_debug_mode"]
+  commands:
+  - func: "generate resmoke tasks"
+    vars:
+      <<: *jstestfuzz_config_vars
+      # We have seen some common scenarios where the generated pipelines take a while to run and can
+      # hit some timeouts. We'll split 70000 pipelines across 70 files, compared to 80000 pipelines
+      # across 20 files in the other generational agg fuzzers. This approach can be considered if we
+      # see similar timeouts elsewhere. It is not well understood whether/how we could pass
+      # 'numPipelines' as an argument in the yaml here, but it works as part of the
+      # 'jstestfuzz_vars' argument string. If a future reader better understands this evergreen
+      # integration, please update this comment and/or move numPipelines to a yaml arg here.
+      num_files: 70
+      num_tasks: 20
+      jstestfuzz_vars: --diffTestingMode blockprocessing --numPipelines=1000
+      npm_command: agg-fuzzer
+      suite: generational_fuzzer
+      resmoke_args: "--mongodSetParameters='{logComponentVerbosity: {command: 2}}'"
+
 ## Standalone fuzzer for checking wildcard index correctness ##
 - <<: *jstestfuzz_template
   name: aggregation_wildcard_fuzzer_gen
@@ -338,7 +360,7 @@ tasks:
 
 - <<: *task_template
   name: change_streams_multi_stmt_txn_passthrough_with_replica_set_endpoint
-  tags: ["assigned_to_jira_team_server_cluster_scalability", "default", "requires_all_feature_flags", "common", "sharding", "feature_flag_guarded"]
+  tags: ["assigned_to_jira_team_server_cluster_scalability", "default", "replica_set_endpoint", "requires_all_feature_flags"]
   depends_on:
   - name: change_streams
   commands:
@@ -382,7 +404,6 @@ tasks:
       change_streams_last_lts_old_new_new: last_lts
   - func: "generate resmoke tasks"
     vars:
-      suite: change_streams
       run_no_feature_flag_tests: "true"
 
 - <<: *task_template
@@ -411,7 +432,6 @@ tasks:
       change_streams_sharded_collections_passthrough_last_lts_new_old_old_new: last_lts
   - func: "generate resmoke tasks"
     vars:
-      suite: change_streams_sharded_collections_passthrough
       run_no_feature_flag_tests: "true"
 
 - <<: *task_template
@@ -425,7 +445,7 @@ tasks:
 
 - <<: *task_template
   name: change_streams_whole_cluster_passthrough_with_replica_set_endpoint
-  tags: ["assigned_to_jira_team_server_cluster_scalability", "default", "requires_all_feature_flags", "common", "sharding", "feature_flag_guarded"]
+  tags: ["assigned_to_jira_team_server_cluster_scalability", "default", "replica_set_endpoint", "requires_all_feature_flags"]
   depends_on:
   - name: change_streams
   commands:
@@ -452,7 +472,7 @@ tasks:
 
 - <<: *task_template
   name: change_streams_whole_db_passthrough_with_replica_set_endpoint
-  tags: ["assigned_to_jira_team_server_cluster_scalability", "default", "requires_all_feature_flags", "common", "sharding", "feature_flag_guarded"]
+  tags: ["assigned_to_jira_team_server_cluster_scalability", "default", "replica_set_endpoint", "requires_all_feature_flags"]
   depends_on:
   - name: change_streams
   commands:
@@ -470,7 +490,7 @@ tasks:
 
 - <<: *task_template
   name: change_streams_with_replica_set_endpoint
-  tags: ["assigned_to_jira_team_server_cluster_scalability", "default", "requires_all_feature_flags", "common", "sharding", "feature_flag_guarded"]
+  tags: ["assigned_to_jira_team_server_cluster_scalability", "default", "replica_set_endpoint", "requires_all_feature_flags"]
   depends_on:
   - name: change_streams
   commands:
@@ -500,15 +520,24 @@ tasks:
   - func: "do setup"
   - func: "run tests"
 
-- <<: *task_template
-  name: cursor_hints_to_query_settings_sharded_collections_passthrough
+- <<: *gen_task_template
+  name: cursor_hints_to_query_settings_sharded_collections_passthrough_gen
   tags: ["assigned_to_jira_team_server_query_execution", "default"]
   commands:
-  - func: "do setup"
-  - func: "run tests"
+  - func: "generate resmoke tasks"
+    vars:
+      use_large_distro: "true"
+
+- <<: *gen_task_template
+  name: cursor_hints_to_query_settings_unsharded_collections_passthrough_gen
+  tags: ["assigned_to_jira_team_server_query_execution", "default"]
+  commands:
+  - func: "generate resmoke tasks"
+    vars:
+      use_large_distro: "true"
 
 - <<: *task_template
-  name: cursor_hints_to_query_settings_unsharded_collections_passthrough
+  name: implicit_query_settings_fallback
   tags: ["assigned_to_jira_team_server_query_execution", "default"]
   commands:
   - func: "do setup"
@@ -730,7 +759,7 @@ tasks:
       npm_command: agg-fuzzer
 
 - <<: *task_template
-  name: aggregation_repeat_queries
+  name: aggregation_repeat_queries_multiplan_single_solutions
   tags: ["assigned_to_jira_team_server_query_optimization", "default"]
   depends_on:
   - name: aggregation

@@ -37,25 +37,8 @@ void BSONColumnBlockBased::decompress(Buffer& buffer) const {
     const char* end = _binary + _size;
     BSONType type = EOO;  // needs to be set as something else before deltas are parsed
 
-    while (ptr < end) {
-        const uint8_t control = *ptr;
-        if (control == EOO || isUncompressedLiteralControlByte(control) ||
-            isInterleavedStartControlByte(control))
-            break;
-
-        // If first block(s) are simple8B, these should all be skips. Before decompressing we must
-        // validate the scale factor.
-        uint8_t size = numSimple8bBlocksForControlByte(control) * sizeof(uint64_t);
-        uassert(8762804,
-                "Invalid control byte in BSON Column",
-                bsoncolumn::scaleIndexForControlByte(control) ==
-                    Simple8bTypeUtil::kMemoryAsInteger);
-        Simple8b<uint64_t> s8b(ptr + 1, size);
-        for (auto it = s8b.begin(); it != s8b.end(); ++it) {
-            buffer.appendMissing();
-        }
-        ptr += 1 + size;
-    }
+    // If first block(s) are simple8B, these should all be skips.
+    ptr = BSONColumnBlockDecompressHelpers::decompressAllMissing(ptr, end, buffer);
 
     while (ptr < end) {
         const uint8_t control = *ptr;
@@ -64,7 +47,7 @@ void BSONColumnBlockBased::decompress(Buffer& buffer) const {
                 8295703, "BSONColumn data ended without reaching end of buffer", ptr + 1 == end);
             return;
         } else if (isUncompressedLiteralControlByte(control)) {
-            BSONElement literal(ptr, 1, -1);
+            BSONElement literal(ptr, 1, BSONElement::TrustedInitTag{});
             type = literal.type();
             ptr += literal.size();
             switch (type) {

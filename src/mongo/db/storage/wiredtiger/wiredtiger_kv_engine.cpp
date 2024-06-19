@@ -916,7 +916,8 @@ WiredTigerKVEngine::WiredTigerKVEngine(
     }
 
     if (gFeatureFlagPrefetch.isEnabled(
-            serverGlobalParams.featureCompatibility.acquireFCVSnapshot())) {
+            serverGlobalParams.featureCompatibility.acquireFCVSnapshot()) &&
+        !_ephemeral) {
         ss << "prefetch=(available=true,default=false),";
     }
 
@@ -1660,11 +1661,22 @@ private:
         int wtRet;
         bool fileUnchangedFlag = false;
         if (!_wtBackup->dupCursor) {
-            wtRet = (_session)->open_cursor(
-                _session, nullptr, _wtBackup->cursor, config.c_str(), &_wtBackup->dupCursor);
-            if (wtRet != 0) {
-                return wtRCToStatus(wtRet, _session);
-            }
+            size_t attempt = 0;
+            do {
+                wtRet = _session->open_cursor(
+                    _session, nullptr, _wtBackup->cursor, config.c_str(), &_wtBackup->dupCursor);
+
+                if (wtRet == EBUSY) {
+                    logAndBackoff(8927900,
+                                  ::mongo::logv2::LogComponent::kStorage,
+                                  logv2::LogSeverity::Debug(1),
+                                  ++attempt,
+                                  "Opening duplicate backup cursor returned EBUSY, retrying",
+                                  "config"_attr = config);
+                } else if (wtRet != 0) {
+                    return wtRCToStatus(wtRet, _session);
+                }
+            } while (wtRet == EBUSY);
             fileUnchangedFlag = true;
         }
 
@@ -3319,6 +3331,19 @@ Status WiredTigerKVEngine::alterMetadata(StringData uri, StringData config) {
 Status WiredTigerKVEngine::dropIdent(RecoveryUnit* ru,
                                      StringData ident,
                                      const StorageEngine::DropIdentCallback& onDrop) {
+    return _dropIdent(ru, ident, "checkpoint_wait=false", onDrop);
+}
+
+Status WiredTigerKVEngine::dropIdentSynchronous(RecoveryUnit* ru,
+                                                StringData ident,
+                                                const StorageEngine::DropIdentCallback& onDrop) {
+    return _dropIdent(ru, ident, "checkpoint_wait=true,lock_wait=true", onDrop);
+}
+
+Status WiredTigerKVEngine::_dropIdent(RecoveryUnit* ru,
+                                      StringData ident,
+                                      const char* config,
+                                      const StorageEngine::DropIdentCallback& onDrop) {
     string uri = _uri(ident);
 
     WiredTigerRecoveryUnit* wtRu = checked_cast<WiredTigerRecoveryUnit*>(ru);
@@ -3327,8 +3352,7 @@ Status WiredTigerKVEngine::dropIdent(RecoveryUnit* ru,
 
     WiredTigerSession session(_conn);
 
-    int ret =
-        session.getSession()->drop(session.getSession(), uri.c_str(), "checkpoint_wait=false");
+    int ret = session.getSession()->drop(session.getSession(), uri.c_str(), config);
     LOGV2_DEBUG(22338, 1, "WT drop", "uri"_attr = uri, "ret"_attr = ret);
 
     if (ret == EBUSY || MONGO_unlikely(WTDropEBUSY.shouldFail())) {
@@ -4253,7 +4277,8 @@ Status WiredTigerKVEngine::autoCompact(OperationContext* opCtx, const AutoCompac
 
     WT_SESSION* s = WiredTigerRecoveryUnit::get(opCtx)->getSessionNoTxn()->getSession();
     int ret = s->compact(s, nullptr, config.str().c_str());
-    status = wtRCToStatus(ret, s, "WiredTigerKVEngine::autoCompact()");
+    status = wtRCToStatus(
+        ret, s, "Failed to configure auto compact, please double check it is not already enabled.");
     if (!status.isOK())
         LOGV2_ERROR(8704101,
                     "WiredTigerKVEngine::autoCompact() failed",

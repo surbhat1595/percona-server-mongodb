@@ -67,21 +67,6 @@
 
 namespace mongo {
 
-namespace {
-
-/**
- * Helper to check if all accumulated fields need the same document.
- */
-bool accsNeedSameDoc(const std::vector<AccumulationStatement>& accumulatedFields,
-                     AccumulatorDocumentsNeeded docNeeded) {
-    return std::all_of(accumulatedFields.begin(), accumulatedFields.end(), [&](auto&& accumulator) {
-        const auto& doc = accumulator.makeAccumulator()->documentsNeeded();
-        return doc == docNeeded;
-    });
-}
-
-}  // namespace
-
 DocumentSourceGroupBase::~DocumentSourceGroupBase() {
     const auto& stats = _groupProcessor.getStats();
     groupCounters.incrementGroupCounters(
@@ -225,8 +210,6 @@ DocumentSource::GetModPathsReturn DocumentSourceGroupBase::getModifiedPaths() co
     // We preserve none of the fields, but any fields referenced as part of the group key are
     // logically just renamed.
     StringMap<std::string> renames;
-    StringSet idFields;
-    std::vector<std::string> listIdFields;
     const auto& idFieldNames = _groupProcessor.getIdFieldNames();
     const auto& idExpressions = _groupProcessor.getIdExpressions();
     for (std::size_t i = 0; i < idExpressions.size(); ++i) {
@@ -235,32 +218,6 @@ DocumentSource::GetModPathsReturn DocumentSourceGroupBase::getModifiedPaths() co
         auto computedPaths = idExp->getComputedPaths(pathToPutResultOfExpression);
         for (auto&& rename : computedPaths.renames) {
             renames[rename.first] = rename.second;
-            idFields.insert(rename.second);
-            listIdFields.push_back(rename.second);
-        }
-    }
-
-    const auto& accumulatedFields = _groupProcessor.getAccumulationStatements();
-    for (auto&& accumulatedField : accumulatedFields) {
-        const auto& accumulationExpr = accumulatedField.expr;
-        if (accumulationExpr.groupMatchOptimizationEligible) {
-            const auto& expr = accumulationExpr.argument.get();
-            auto& pathToPutResultOfExpression = accumulatedField.fieldName;
-            auto fieldPath = dynamic_cast<ExpressionFieldPath*>(expr);
-            if (fieldPath && fieldPath->isROOT()) {
-                for (auto&& idField : listIdFields) {
-                    // renames[to] = from
-                    renames[pathToPutResultOfExpression + "." + idField] = idField;
-                }
-            } else {
-                auto computedPaths = expr->getComputedPaths(pathToPutResultOfExpression);
-                for (auto&& rename : computedPaths.renames) {
-                    if (idFields.contains(rename.second)) {
-                        // renames[to] = from
-                        renames[rename.first] = rename.second;
-                    }
-                }
-            }
         }
     }
 
@@ -411,18 +368,69 @@ bool DocumentSourceGroupBase::canRunInParallelBeforeWriteStage(
     return true;
 }
 
-bool DocumentSourceGroupBase::isEligibleForTransformOnFirstDocument(
-    GroupFromFirstDocumentTransformation::ExpectedInput& expectedInput,
-    std::string& groupId) const {
+namespace {
+
+/**
+ * Helper to check if all accumulated fields need the same first or last document from the input for
+ * the output. Also checks whether the sort pattern is same across all $top and $bottom. This
+ * returns {kFirstInputDocument, none} for no accumulators.
+ *
+ * If all accumulators need the same first or last doc, this returns a pair of:
+ * - The same AccumulatorDocumentsNeeded across all accumulators.
+ * - an optional SortPattern when the needed document is either kFirstOutputDocument or
+ *   kLastOutputDocument.
+ */
+using DocNeededAndSortPattern = std::pair<AccumulatorDocumentsNeeded, boost::optional<SortPattern>>;
+
+boost::optional<DocNeededAndSortPattern> allAccsNeedFirstOrLastDoc(
+    const std::vector<AccumulationStatement>& accumulatedFields) {
+    if (accumulatedFields.empty()) {
+        return DocNeededAndSortPattern{AccumulatorDocumentsNeeded::kFirstInputDocument,
+                                       boost::none};
+    }
+
+    auto it = accumulatedFields.begin();
+    // Unfortunately, the docs needed and sort pattern can be extracted only from 'AccumulatorState'
+    // object and so we need to create one using the factory.
+    const auto accState = it->makeAccumulator();
+    const auto& docNeeded = accState->documentsNeeded();
+
+    if (docNeeded == AccumulatorDocumentsNeeded::kAllDocuments) {
+        return boost::none;
+    }
+
+    boost::optional<SortPattern> sortPattern =
+        (docNeeded == AccumulatorDocumentsNeeded::kFirstOutputDocument ||
+         docNeeded == AccumulatorDocumentsNeeded::kLastOutputDocument)
+        ? getAccSortPattern(accState)
+        : static_cast<boost::optional<SortPattern>>(boost::none);
+    bool allAccsNeedSameDoc = std::all_of(++it, accumulatedFields.end(), [&](auto&& accumulator) {
+        const auto accState = accumulator.makeAccumulator();
+        const auto& doc = accState->documentsNeeded();
+        // To be eligible for DISTINCT_SCAN plan work, the sort pattern should be same across all
+        // $top and $bottoms.
+        return doc == docNeeded && (!sortPattern || *sortPattern == getAccSortPattern(accState));
+    });
+    if (!allAccsNeedSameDoc) {
+        return boost::none;
+    }
+
+    return DocNeededAndSortPattern{docNeeded, sortPattern};
+}
+
+}  // namespace
+
+auto DocumentSourceGroupBase::getRewriteGroupRequirements() const
+    -> boost::optional<RewriteGroupRequirements> {
     const auto& idExpressions = _groupProcessor.getIdExpressions();
     if (idExpressions.size() != 1) {
         // This transformation is only intended for $group stages that group on a single field.
-        return false;
+        return boost::none;
     }
 
     auto fieldPathExpr = dynamic_cast<ExpressionFieldPath*>(idExpressions.front().get());
     if (!fieldPathExpr || fieldPathExpr->isVariableReference()) {
-        return false;
+        return boost::none;
     }
 
     const auto fieldPath = fieldPathExpr->getFieldPath();
@@ -434,56 +442,69 @@ bool DocumentSourceGroupBase::isEligibleForTransformOnFirstDocument(
         tassert(5943200,
                 "Optimization attempted on group by always-dissimilar system variable",
                 fieldPath.getFieldName(0) == "CURRENT" || fieldPath.getFieldName(0) == "ROOT");
-        return false;
+        return boost::none;
     }
 
-    groupId = fieldPath.tail().fullPath();
-
-    // We do this transformation only if there are all $first, all $last, or no accumulators.
+    // We do this transformation only if there are all $first, all $last, all $top, all $bottom, or
+    // no accumulators.
     const auto& accumulatedFields = _groupProcessor.getAccumulationStatements();
-    if (accsNeedSameDoc(accumulatedFields, AccumulatorDocumentsNeeded::kFirstDocument)) {
-        expectedInput = GroupFromFirstDocumentTransformation::ExpectedInput::kFirstDocument;
-    } else if (accsNeedSameDoc(accumulatedFields, AccumulatorDocumentsNeeded::kLastDocument)) {
-        expectedInput = GroupFromFirstDocumentTransformation::ExpectedInput::kLastDocument;
-    } else {
-        return false;
+    auto docNeededAndSortPattern = allAccsNeedFirstOrLastDoc(accumulatedFields);
+    if (!docNeededAndSortPattern) {
+        return boost::none;
     }
 
-    return true;
+    auto [docNeeded, sortPattern] = *docNeededAndSortPattern;
+    auto groupId = fieldPath.tail().fullPath();
+    return RewriteGroupRequirements{docNeeded, groupId, sortPattern};
 }
 
-std::unique_ptr<GroupFromFirstDocumentTransformation>
+std::pair<boost::optional<SortPattern>, std::unique_ptr<GroupFromFirstDocumentTransformation>>
 DocumentSourceGroupBase::rewriteGroupAsTransformOnFirstDocument() const {
-    std::string groupId;
-    GroupFromFirstDocumentTransformation::ExpectedInput expectedInput;
-    if (!isEligibleForTransformOnFirstDocument(expectedInput, groupId)) {
-        return nullptr;
+    auto rewriteGroupRequirements = getRewriteGroupRequirements();
+    if (!rewriteGroupRequirements) {
+        return {boost::none, nullptr};
     }
 
-    std::vector<std::pair<std::string, boost::intrusive_ptr<Expression>>> fields;
+    auto [docsNeeded, groupId, sortPattern] = *rewriteGroupRequirements;
 
     boost::intrusive_ptr<Expression> idField;
     const auto& idFieldNames = _groupProcessor.getIdFieldNames();
     // The _id field can be specified either as a fieldpath (ex. _id: "$a") or as a singleton
     // object (ex. _id: {v: "$a"}).
     if (idFieldNames.empty()) {
-        idField = ExpressionFieldPath::deprecatedCreate(pExpCtx.get(), groupId);
+        idField = ExpressionFieldPath::createPathFromString(
+            pExpCtx.get(), groupId, pExpCtx->variablesParseState);
     } else {
         invariant(idFieldNames.size() == 1);
         idField = ExpressionObject::create(
             pExpCtx.get(), {{idFieldNames.front(), _groupProcessor.getIdExpressions().front()}});
     }
-    fields.emplace_back("_id", idField);
 
+    std::vector<std::pair<std::string, boost::intrusive_ptr<Expression>>> fields{
+        {std::pair{"_id", idField}}};
     for (auto&& accumulator : _groupProcessor.getAccumulationStatements()) {
-        fields.emplace_back(accumulator.fieldName, accumulator.expr.argument);
-
-        // Since we don't attempt this transformation for non-$first/$last accumulators,
-        // the initializer should always be trivial.
+        switch (docsNeeded) {
+            case AccumulatorDocumentsNeeded::kFirstInputDocument:
+            case AccumulatorDocumentsNeeded::kLastInputDocument:
+                fields.emplace_back(accumulator.fieldName, accumulator.expr.argument);
+                break;
+            case AccumulatorDocumentsNeeded::kFirstOutputDocument:
+            case AccumulatorDocumentsNeeded::kLastOutputDocument:
+                // We only want to add the 'ouput' portion of the accumulator expression since
+                // that's the only part that should be accumulated. We know 'output' is the first
+                // child of $top and $bottom accumulators since it is added first in
+                // AccumulatorTopBottomN<sense, single>::parseTopBottomN().
+                fields.emplace_back(accumulator.fieldName,
+                                    accumulator.expr.argument->getChildren()[0]);
+                break;
+            default:
+                return {boost::none, nullptr};
+        }
     }
 
-    return GroupFromFirstDocumentTransformation::create(
-        pExpCtx, groupId, getSourceName(), std::move(fields), expectedInput);
+    return {sortPattern,
+            GroupFromFirstDocumentTransformation::create(
+                pExpCtx, groupId, getSourceName(), std::move(fields), docsNeeded)};
 }
 
 boost::optional<DocumentSource::DistributedPlanLogic>

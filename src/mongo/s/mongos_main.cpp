@@ -413,6 +413,8 @@ void cleanupTask(const ShutdownTaskArgs& shutdownArgs) {
             mongosTopCoord->enterQuiesceModeAndWait(opCtx, quiesceTime);
         }
 
+        UserCacheInvalidator::stop(serviceContext);
+
         // Inform the TransportLayers to stop accepting new connections.
         if (auto tlm = serviceContext->getTransportLayerManager()) {
             TimeElapsedBuilderScopedTimer scopedTimer(
@@ -892,6 +894,9 @@ ExitCode runMongosServer(ServiceContext* serviceContext) {
     CommandInvocationHooks::set(serviceContext,
                                 std::make_unique<transport::IngressHandshakeMetricsCommandHooks>());
 
+    // Must happen before FTDC, because Periodic Metadata Collustion calls getClusterParameter
+    ClusterServerParameterRefresher::start(serviceContext, opCtx);
+
     {
         TimeElapsedBuilderScopedTimer scopedTimer(
             serviceContext->getFastClockSource(), "Start mongos FTDC", &startupTimeElapsedBuilder);
@@ -929,8 +934,6 @@ ExitCode runMongosServer(ServiceContext* serviceContext) {
     clusterCursorCleanupJob.go();
 
     UserCacheInvalidator::start(serviceContext, opCtx);
-
-    ClusterServerParameterRefresher::start(serviceContext, opCtx);
 
     if (audit::initializeSynchronizeJob) {
         TimeElapsedBuilderScopedTimer scopedTimer(serviceContext->getFastClockSource(),
@@ -1031,8 +1034,6 @@ std::unique_ptr<AuthzManagerExternalState> createAuthzManagerExternalStateMongos
 }
 
 ExitCode main(ServiceContext* serviceContext) {
-    serviceContext->setFastClockSource(FastClockSourceFactory::create(Milliseconds{10}));
-
     // We either have a setting where all processes are in localhost or none are
     const auto& configServers = mongosGlobalParams.configdbs.getServers();
     invariant(!configServers.empty());
@@ -1104,6 +1105,8 @@ ExitCode mongos_main(int argc, char* argv[]) {
         return ExitCode::abrupt;
     }
 
+    startSignalProcessingThread();
+
     try {
         setGlobalServiceContext(ServiceContext::make());
     } catch (...) {
@@ -1117,6 +1120,9 @@ ExitCode mongos_main(int argc, char* argv[]) {
     }
 
     const auto service = getGlobalServiceContext();
+    // This FastClockSourceFactory creates a background thread ClockSource. It must be set
+    // on ServiceContext before any other threads can get and use it.
+    service->setFastClockSource(FastClockSourceFactory::create(Milliseconds{10}));
 
     if (audit::setAuditInterface) {
         audit::setAuditInterface(service);
@@ -1148,8 +1154,6 @@ ExitCode mongos_main(int argc, char* argv[]) {
     try {
         if (!initialize_server_global_state::checkSocketPath())
             return ExitCode::abrupt;
-
-        startSignalProcessingThread();
 
         startAllocatorThread();
 

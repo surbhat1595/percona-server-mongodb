@@ -33,13 +33,13 @@
 #include "mongo/db/exec/sbe/vm/vm.h"
 #include "mongo/db/exec/sbe/vm/vm_printer.h"
 
+#include "mongo/db/exec/sbe/in_list.h"
 #include "mongo/db/exec/sbe/values/arith_common.h"
 #include "mongo/db/exec/sbe/values/block_interface.h"
 #include "mongo/db/exec/sbe/values/generic_compare.h"
 #include "mongo/db/exec/sbe/values/util.h"
 #include "mongo/db/exec/sbe/values/value.h"
 #include "mongo/db/exec/sbe/values/value_printer.h"
-#include "mongo/db/matcher/in_list_data.h"
 #include "mongo/logv2/log.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/represent_as.h"
@@ -328,7 +328,7 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::valueBlockMinMaxImpl(
 
     tassert(
         8137400, "Expected block and bitset to be the same size", block.count() == bitset.count());
-    tassert(8137401, "Expected bitset to be all bools", allBools(bitset.tags(), bitset.count()));
+    dassert(allBools(bitset.tags(), bitset.count()), "Expected bitset to be all bools");
 
     value::TypeTags accTag = value::TypeTags::Nothing;
     value::Value accVal = 0;
@@ -489,7 +489,7 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinValueBlockAggCou
 
     value::DeblockedTagVals bitset = bitsetBlock->extract();
 
-    tassert(8151800, "Expected bitset to be all bools", allBools(bitset.tags(), bitset.count()));
+    dassert(allBools(bitset.tags(), bitset.count()), "Expected bitset to be all bools");
 
     int64_t n = accTag == value::TypeTags::NumberInt64 ? value::bitcastTo<int64_t>(accVal) : 0;
 
@@ -535,7 +535,7 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinValueBlockAggSum
 
     tassert(
         8151801, "Expected block and bitset to be the same size", block.count() == bitset.count());
-    tassert(8151802, "Expected bitset to be all bools", allBools(bitset.tags(), bitset.count()));
+    dassert(allBools(bitset.tags(), bitset.count()), "Expected bitset to be all bools");
 
     value::TypeTags blockResTag = value::TypeTags::Nothing;
     value::Value blockResVal = 0;
@@ -677,10 +677,10 @@ size_t homogeneousTopBottomHelper(bool isAscending,
         // All values in the bitset were false, so we don't need to update the state.
         return bitsetVals.size();
     }
-    auto keyLess = HomogeneousSortPattern<Less, int64_t>(isAscending);
+    auto keyLess = HomogeneousSortPattern<Less, T>(isAscending);
     size_t bestIdx = firstPresent;
     for (size_t i = firstPresent; i < keyVals.size(); ++i) {
-        if (value::bitcastTo<bool>(bitsetVals[i]) && keyLess(keyVals[bestIdx], keyVals[i])) {
+        if (value::bitcastTo<bool>(bitsetVals[i]) && keyLess(keyVals[i], keyVals[bestIdx])) {
             bestIdx = i;
         }
     }
@@ -804,7 +804,7 @@ bool tryFullMergeArrFastPath(TopBottomSense sense,
 template <typename Less>
 bool tryArgMinMaxFastPath(TopBottomSense sense,
                           bool isAscending,
-                          const ByteCode::multiAccState& stateTuple,
+                          const ByteCode::MultiAccState& stateTuple,
                           value::ValueBlock* bitsetBlock,
                           value::ValueBlock* sortKeyBlock,
                           value::ValueBlock* valBlock,
@@ -855,9 +855,9 @@ bool tryArgMinMaxFastPath(TopBottomSense sense,
                         int memDelta = updateWorstPair(
                             mergeArr, worstArr, bestTag, bestVal, bestOutTag, bestOutVal, keyLess);
                         memUsage = updateAndCheckMemUsage(state, memUsage, memDelta, memLimit);
-
-                        return true;
                     }
+
+                    return true;
                 }
             }
         }
@@ -887,7 +887,7 @@ private:
 };
 
 template <typename Less>
-void combineBlockNativeAggTopBottomN(const ByteCode::multiAccState& stateTuple,
+void combineBlockNativeAggTopBottomN(const ByteCode::MultiAccState& stateTuple,
                                      std::vector<TopBottomSortKeyAndIdx> newArr,
                                      value::ValueBlock* valBlock,
                                      Less less) {
@@ -953,7 +953,7 @@ bool tryHomogeneousFastPath(TopBottomSense sense,
                             bool isAscending,
                             value::TypeTags stateTag,
                             value::Value stateVal,
-                            const ByteCode::multiAccState& stateTuple,
+                            const ByteCode::MultiAccState& stateTuple,
                             const std::span<const value::Value>& bitsetVals,
                             const value::DeblockedTagVals& sortKeys,
                             value::ValueBlock* valBlock,
@@ -1051,7 +1051,7 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::blockNativeAggTopBottom
             valBlockTag == value::TypeTags::valueBlock);
     auto* valBlock = value::getValueBlock(valBlockVal);
 
-    multiAccState stateTuple = getMultiAccState(stateTag, stateVal);
+    MultiAccState stateTuple = getMultiAccState(stateTag, stateVal);
     auto [state, mergeArr, startIdx, maxSize, memUsage, memLimit, isGroupAccum] = stateTuple;
     invariant(maxSize > 0);
 
@@ -1079,7 +1079,7 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::blockNativeAggTopBottom
     }
 
     auto bitset = bitsetBlock->extract();
-    tassert(8794903, "Expected bitset to be all bools", allBools(bitset.tags(), bitset.count()));
+    dassert(allBools(bitset.tags(), bitset.count()), "Expected bitset to be all bools");
     auto bitsetVals = bitset.valsSpan();
 
     auto sortKeys = sortKeyBlock->extract();
@@ -1292,7 +1292,7 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinValueBlockAggTop
 
     value::DeblockedTagVals bitset = bitsetBlock->extract();
 
-    tassert(8448711, "Expected bitset to be all bools", allBools(bitset.tags(), bitset.count()));
+    dassert(allBools(bitset.tags(), bitset.count()), "Expected bitset to be all bools");
 
     std::vector<value::DeblockedTagVals> keys;
     std::vector<value::DeblockedTagVals> values;
@@ -2196,9 +2196,8 @@ void ByteCode::valueBlockApplyLambda(const CodeFragment* code) {
         tassert(8123000,
                 "Mask and block have a different number of items",
                 extracted.count() == extractedMask.count());
-        tassert(8123001,
-                "Expected mask to be all bool values",
-                allBools(extractedMask.tags(), extractedMask.count()));
+        dassert(allBools(extractedMask.tags(), extractedMask.count()),
+                "Expected mask to be all bools");
 
         // Pre-fill with Nothing, and overwrite only the allowed indexes.
         std::vector<value::Value> valueOut(extracted.count());
@@ -2317,7 +2316,7 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinValueBlockNewFil
             countTag == value::TypeTags::NumberInt32);
 
     // Take ownership of the value, we are transferring it to the block.
-    auto [leftOwned, leftTag, leftVal] = moveFromStack(0);
+    auto [leftTag, leftVal] = moveOwnedFromStack(0);
     auto blockOut =
         std::make_unique<value::MonoBlock>(value::bitcastTo<int32_t>(countVal), leftTag, leftVal);
     return {true,
@@ -2474,7 +2473,7 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinCellFoldValues_P
     auto* cellBlock = value::bitcastTo<value::CellBlock*>(cellVal);
 
     const auto& positionInfo = cellBlock->filterPositionInfo();
-    tassert(7953901, "Only top-level cell values are supported", emptyPositionInfo(positionInfo));
+    uassert(7953901, "Only top-level cell values are supported", emptyPositionInfo(positionInfo));
     // Return the input unchanged.
     return moveFromStack(0);
 }
@@ -2506,7 +2505,7 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinValueBlockIsMemb
             valBlockTag == value::TypeTags::valueBlock);
     auto valueBlockView = value::getValueBlock(valBlockVal);
 
-    if (!value::isArray(arrTag_) && arrTag_ != value::TypeTags::inListData) {
+    if (!value::isArray(arrTag_) && arrTag_ != value::TypeTags::inList) {
         auto blockOut = std::make_unique<value::MonoBlock>(
             valueBlockView->count(), value::TypeTags::Nothing, 0);
         return {true,
@@ -2518,14 +2517,14 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinValueBlockIsMemb
     auto arrVal = arrVal_;
 
     auto res = [&]() {
-        if (arrTag == value::TypeTags::inListData) {
-            auto inListData = value::getInListDataView(arrVal);
+        if (arrTag == value::TypeTags::inList) {
+            auto inList = value::getInListView(arrVal);
 
             return valueBlockView->map(value::makeColumnOp<ColumnOpType::kNoFlags>(
                 [&](value::TypeTags tag, value::Value val) {
                     return std::pair{value::TypeTags::Boolean,
                                      value::bitcastFrom<bool>(tag != value::TypeTags::Nothing &&
-                                                              inListData->contains(tag, val))};
+                                                              inList->contains(tag, val))};
                 }));
         } else if (arrTag == value::TypeTags::ArraySet) {
             auto arrSet = value::getArraySetView(arrVal);
@@ -2611,13 +2610,16 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinValueBlockConver
             inputTag == value::TypeTags::valueBlock);
     auto* valueBlockIn = value::bitcastTo<value::ValueBlock*>(inputVal);
 
-    auto target = getFromStack(1);
+    auto [targetOwned, targetTag, targetVal] = getFromStack(1);
+    tassert(8907000, "Expected targetTag to be int32", targetTag == value::TypeTags::NumberInt32);
+    auto convertTag = static_cast<sbe::value::TypeTags>(value::bitcastTo<int32_t>(targetVal));
+
     // Numeric convert expects always a numeric type as target. However, it does not check for it
     // and throws if the value is not numeric. We let genericNumConvert do this check and we do not
     // make any checks here.
     const auto cmpOp = value::makeColumnOp<ColumnOpType::kNoFlags>(
         [&](value::TypeTags tag, value::Value val) -> std::pair<value::TypeTags, value::Value> {
-            auto [_, resTag, resVal] = value::genericNumConvert(tag, val, target.b);
+            auto [_, resTag, resVal] = value::genericNumConvert(tag, val, convertTag);
             return {resTag, resVal};
         });
 

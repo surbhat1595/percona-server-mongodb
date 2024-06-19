@@ -62,6 +62,7 @@
 #include "mongo/db/matcher/expression_array.h"
 #include "mongo/db/matcher/expression_expr.h"
 #include "mongo/db/matcher/expression_geo.h"
+#include "mongo/db/matcher/expression_internal_bucket_geo_within.h"
 #include "mongo/db/matcher/expression_leaf.h"
 #include "mongo/db/matcher/expression_path.h"
 #include "mongo/db/matcher/expression_text.h"
@@ -358,11 +359,11 @@ const char* encodeMatchType(MatchExpression::MatchType mt) {
  * - geometry type
  * - CRS (flat or spherical)
  */
-void encodeGeoMatchExpression(const GeoMatchExpression* tree, StringBuilder* keyBuilder) {
-    const GeoExpression& geoQuery = tree->getGeoExpression();
-
+void encodeGeoMatchExpression(const GeometryContainer& geo,
+                              GeoExpression::Predicate pred,
+                              StringBuilder* keyBuilder) {
     // Type of geo query.
-    switch (geoQuery.getPred()) {
+    switch (pred) {
         case GeoExpression::WITHIN:
             *keyBuilder << "wi";
             break;
@@ -376,20 +377,20 @@ void encodeGeoMatchExpression(const GeoMatchExpression* tree, StringBuilder* key
 
     // Geometry type.
     // Only one of the shared_ptrs in GeoContainer may be non-NULL.
-    *keyBuilder << geoQuery.getGeometry().getDebugType();
+    *keyBuilder << geo.getDebugType();
 
     // CRS (flat or spherical)
-    if (FLAT == geoQuery.getGeometry().getNativeCRS()) {
+    if (FLAT == geo.getNativeCRS()) {
         *keyBuilder << "fl";
-    } else if (SPHERE == geoQuery.getGeometry().getNativeCRS()) {
+    } else if (SPHERE == geo.getNativeCRS()) {
         *keyBuilder << "sp";
-    } else if (STRICT_SPHERE == geoQuery.getGeometry().getNativeCRS()) {
+    } else if (STRICT_SPHERE == geo.getNativeCRS()) {
         *keyBuilder << "ss";
     } else {
         LOGV2_ERROR(23849,
                     "Unknown CRS type in geometry",
-                    "crsType"_attr = (int)geoQuery.getGeometry().getNativeCRS(),
-                    "geometryType"_attr = geoQuery.getGeometry().getDebugType());
+                    "crsType"_attr = (int)geo.getNativeCRS(),
+                    "geometryType"_attr = geo.getDebugType());
         MONGO_UNREACHABLE;
     }
 }
@@ -512,23 +513,90 @@ void encodeKeyForMatch(const MatchExpression* tree, StringBuilder* keyBuilder) {
 
     encodeUserString(tree->path(), keyBuilder);
 
-    // GEO and GEO_NEAR require additional encoding.
-    if (MatchExpression::GEO == tree->matchType()) {
-        encodeGeoMatchExpression(static_cast<const GeoMatchExpression*>(tree), keyBuilder);
-    } else if (MatchExpression::GEO_NEAR == tree->matchType()) {
-        encodeGeoNearMatchExpression(static_cast<const GeoNearMatchExpression*>(tree), keyBuilder);
-    }
-
-    // We encode regular expression flags such that different options produce different shapes.
-    if (MatchExpression::REGEX == tree->matchType()) {
-        encodeRegexFlagsForMatch({static_cast<const RegexMatchExpression*>(tree)}, keyBuilder);
-    } else if (MatchExpression::MATCH_IN == tree->matchType()) {
-        const auto* inMatch = static_cast<const InMatchExpression*>(tree);
-        if (!inMatch->getRegexes().empty()) {
-            // Append '_re' to distinguish an $in without regexes from an $in with regexes.
-            encodeUserString("_re"_sd, keyBuilder);
-            encodeRegexFlagsForMatch(inMatch->getRegexes(), keyBuilder);
+    switch (tree->matchType()) {
+        // Geo operators require additional encoding.
+        case MatchExpression::GEO: {
+            auto geoTree = static_cast<const GeoMatchExpression*>(tree);
+            encodeGeoMatchExpression(geoTree->getGeoExpression().getGeometry(),
+                                     geoTree->getGeoExpression().getPred(),
+                                     keyBuilder);
+            break;
         }
+        case MatchExpression::GEO_NEAR:
+            encodeGeoNearMatchExpression(static_cast<const GeoNearMatchExpression*>(tree),
+                                         keyBuilder);
+            break;
+        case MatchExpression::INTERNAL_BUCKET_GEO_WITHIN: {
+            auto geoTree = static_cast<const InternalBucketGeoWithinMatchExpression*>(tree);
+            encodeGeoMatchExpression(geoTree->getGeoContainer(), GeoExpression::WITHIN, keyBuilder);
+            break;
+        }
+        case MatchExpression::REGEX:
+            // We encode regular expression flags such that different options produce different
+            // shapes.
+            encodeRegexFlagsForMatch({static_cast<const RegexMatchExpression*>(tree)}, keyBuilder);
+            break;
+        case MatchExpression::MATCH_IN: {
+            const auto* inMatch = static_cast<const InMatchExpression*>(tree);
+            if (!inMatch->getRegexes().empty()) {
+                // Append '_re' to distinguish an $in without regexes from an $in with regexes.
+                encodeUserString("_re"_sd, keyBuilder);
+                encodeRegexFlagsForMatch(inMatch->getRegexes(), keyBuilder);
+            }
+            break;
+        }
+        case MatchExpression::AND:
+        case MatchExpression::OR:
+        case MatchExpression::ELEM_MATCH_OBJECT:
+        case MatchExpression::ELEM_MATCH_VALUE:
+        case MatchExpression::SIZE:
+        case MatchExpression::EQ:
+        case MatchExpression::LTE:
+        case MatchExpression::LT:
+        case MatchExpression::GT:
+        case MatchExpression::GTE:
+        case MatchExpression::MOD:
+        case MatchExpression::EXISTS:
+        case MatchExpression::BITS_ALL_SET:
+        case MatchExpression::BITS_ALL_CLEAR:
+        case MatchExpression::BITS_ANY_SET:
+        case MatchExpression::BITS_ANY_CLEAR:
+        case MatchExpression::NOT:
+        case MatchExpression::NOR:
+        case MatchExpression::TYPE_OPERATOR:
+        case MatchExpression::WHERE:
+        case MatchExpression::EXPRESSION:
+        case MatchExpression::ALWAYS_FALSE:
+        case MatchExpression::ALWAYS_TRUE:
+        case MatchExpression::TEXT:
+        case MatchExpression::INTERNAL_2D_POINT_IN_ANNULUS:
+        case MatchExpression::INTERNAL_EXPR_EQ:
+        case MatchExpression::INTERNAL_EXPR_GT:
+        case MatchExpression::INTERNAL_EXPR_GTE:
+        case MatchExpression::INTERNAL_EXPR_LT:
+        case MatchExpression::INTERNAL_EXPR_LTE:
+        case MatchExpression::INTERNAL_EQ_HASHED_KEY:
+        case MatchExpression::INTERNAL_SCHEMA_ALLOWED_PROPERTIES:
+        case MatchExpression::INTERNAL_SCHEMA_ALL_ELEM_MATCH_FROM_INDEX:
+        case MatchExpression::INTERNAL_SCHEMA_BIN_DATA_ENCRYPTED_TYPE:
+        case MatchExpression::INTERNAL_SCHEMA_BIN_DATA_FLE2_ENCRYPTED_TYPE:
+        case MatchExpression::INTERNAL_SCHEMA_BIN_DATA_SUBTYPE:
+        case MatchExpression::INTERNAL_SCHEMA_COND:
+        case MatchExpression::INTERNAL_SCHEMA_EQ:
+        case MatchExpression::INTERNAL_SCHEMA_FMOD:
+        case MatchExpression::INTERNAL_SCHEMA_MATCH_ARRAY_INDEX:
+        case MatchExpression::INTERNAL_SCHEMA_MAX_ITEMS:
+        case MatchExpression::INTERNAL_SCHEMA_MAX_LENGTH:
+        case MatchExpression::INTERNAL_SCHEMA_MAX_PROPERTIES:
+        case MatchExpression::INTERNAL_SCHEMA_MIN_ITEMS:
+        case MatchExpression::INTERNAL_SCHEMA_MIN_LENGTH:
+        case MatchExpression::INTERNAL_SCHEMA_MIN_PROPERTIES:
+        case MatchExpression::INTERNAL_SCHEMA_OBJECT_MATCH:
+        case MatchExpression::INTERNAL_SCHEMA_ROOT_DOC_EQ:
+        case MatchExpression::INTERNAL_SCHEMA_TYPE:
+        case MatchExpression::INTERNAL_SCHEMA_UNIQUE_ITEMS:
+        case MatchExpression::INTERNAL_SCHEMA_XOR:
+            break;
     }
 
     // If the query predicate is minKey or maxKey it can't use the same plan as other GT/LT
@@ -737,7 +805,7 @@ void encodeFindCommandRequest(const CanonicalQuery& cq, BufBuilder* bufBuilder) 
     if (const auto readConcern = findCommand.getReadConcern()) {
         isAvailableReadConcern =
             readConcern->getField(repl::ReadConcernArgs::kLevelFieldName).valueStringDataSafe() ==
-            repl::readConcernLevels::kAvailableName;
+            repl::readConcernLevels::toString(repl::ReadConcernLevel::kAvailableReadConcern);
     }
     bufBuilder->appendChar(isAvailableReadConcern ? 't' : 'f');
 }
@@ -755,8 +823,12 @@ public:
     explicit MatchExpressionSbePlanCacheKeySerializationVisitor(
         const boost::intrusive_ptr<ExpressionContext>& expCtx,
         BufBuilder* builder,
-        bool encodeParameterTypes)
-        : _expCtx(expCtx), _builder(builder), _encodeParameterTypes(encodeParameterTypes) {}
+        bool encodeParameterTypes,
+        bool hasSort)
+        : _expCtx(expCtx),
+          _builder(builder),
+          _encodeParameterTypes(encodeParameterTypes),
+          _hasSort(hasSort) {}
 
     void visit(const BitsAllClearMatchExpression* expr) final {
         encodeBitTestExpression(expr);
@@ -800,11 +872,11 @@ public:
 
         // Encode the number of unique $in values as part of the plan cache key. If the query is
         // optimized by exploding for sort, the number of unique elements in $in determines how many
-        // merge branches we get in the query plan.
-        if (expr->getInputParamId()) {
+        // merge branches we get in the query plan. If there is no sort, this is not necessary.
+        if (expr->getInputParamId() && _hasSort) {
             size_t maxScansToExplode =
                 _expCtx->getQueryKnobConfiguration().getMaxScansToExplodeForOp();
-            // Assume that $in have n elements.
+            // Assume that $in has n elements.
             // If n is less than or equal to maxScansToExplode, then it is possible that explode for
             // sort optimization will be used, so we need to add n to plan cache key.
             // If n is greater than maxScansToExplode, then we can't explode it for sort. So we can
@@ -1108,6 +1180,12 @@ private:
     BufBuilder* const _builder;
     // Whether to encode the type of query parameter into the cache key.
     bool _encodeParameterTypes{false};
+    // Whether there is a sort absorbed by the Canonical query. Note: '_hasSort' is true only when
+    // there is a sort that can be used for explode for sort optimization. For a $match stage,
+    // '_hasSort' should be false since $match does not perform index selection. In cases where a
+    // $sort is not absorbed by the canonical query '_hasSort' should be false since we only perform
+    // explode for sort using the sort in canonical query.
+    bool _hasSort;
 };
 
 /**
@@ -1122,8 +1200,9 @@ public:
     explicit MatchExpressionSbePlanCacheKeySerializationWalker(
         const boost::intrusive_ptr<ExpressionContext>& expCtx,
         BufBuilder* builder,
-        bool encodeParameterTypes)
-        : _builder{builder}, _visitor{expCtx, _builder, encodeParameterTypes} {
+        bool encodeParameterTypes,
+        bool hasSort)
+        : _builder{builder}, _visitor{expCtx, _builder, encodeParameterTypes, hasSort} {
         invariant(_builder);
     }
 
@@ -1163,8 +1242,10 @@ private:
 void encodeKeyForAutoParameterizedMatchSBE(const boost::intrusive_ptr<ExpressionContext>& expCtx,
                                            MatchExpression* matchExpr,
                                            BufBuilder* builder,
-                                           bool encodeParameterTypes) {
-    MatchExpressionSbePlanCacheKeySerializationWalker walker{expCtx, builder, encodeParameterTypes};
+                                           bool encodeParameterTypes,
+                                           bool hasSort) {
+    MatchExpressionSbePlanCacheKeySerializationWalker walker{
+        expCtx, builder, encodeParameterTypes, hasSort};
     tree_walker::walk<true, MatchExpression>(matchExpr, &walker);
 }
 
@@ -1190,7 +1271,13 @@ void encodePipeline(const boost::intrusive_ptr<ExpressionContext>& expCtx,
             const bool encodeParameterTypes = optimizer == Optimizer::kBonsai;
             // Match expressions are parameterized so need to be encoded differently.
             encodeKeyForAutoParameterizedMatchSBE(
-                expCtx, matchStage->getMatchExpression(), bufBuilder, encodeParameterTypes);
+                expCtx,
+                matchStage->getMatchExpression(),
+                bufBuilder,
+                encodeParameterTypes,
+                // We do not use explode for sort optimization for a $match stage, since it is not
+                // a part of index selection.
+                false /*hasSort*/);
         } else if (!search_helpers::encodeSearchForSbeCache(expCtx, documentSource, bufBuilder)) {
             encodeKeyForPipelineStage(documentSource, serializedArray, bufBuilder);
         }
@@ -1220,6 +1307,40 @@ CanonicalQuery::QueryShapeString encodeClassic(const CanonicalQuery& cq) {
     const bool apiStrict =
         cq.getOpCtx() && APIParameters::get(cq.getOpCtx()).getAPIStrict().value_or(false);
     keyBuilder << (apiStrict ? "t" : "f");
+
+
+    // Encode a flag with three possible values:
+    // 1 ('c'): The cache entry is intended to use the classic code path completely. In this case
+    //            the entry stores 'works.'
+    // 2 ('s'): The cache entry was planned with the classic runtime planners, and we intend
+    //            to run it in SBE. In this case the entry stores 'reads.'
+    // 3 ('o'): The cache entry is used for sub-planning using the classic SubPlanner
+    //            and we intend to run it in SBE. In this case the entry stores 'works' but
+    //            since replanning doesn't happen for queries generated from subplanning,
+    //            the value has no meaning. TODO SERVER-90957: Update these entries to store a
+    //            placeholder instead.
+    //
+    // The third case is treated specially because the classic sub-planner stores and reads
+    // cache entries that cannot be executed with SBE. We use this extra flag to avoid the
+    // possibility of the sub planner writing a cache entry for a branch of $or which is then used
+    // by an independent query that doesn't subplan.
+    //
+    // For example, if the user runs an SBE-compatible query {$or: [{a:1,b:1}, {c:1,d:1}]} and a
+    // cache entry is written for each branch, we do NOT want thos cache entries to be re-used for
+    // a query {a:1,b:1} since the second query would expect the cache entry to store a "reads"
+    // value that can be used with SBE's cache recovery path.
+    //
+    // By incorporating 'forSubplanner' we eliminate this possibility.
+
+    if (cq.isSbeCompatible()) {
+        if (cq.forSubPlanner()) {
+            keyBuilder << "o";  // Case 3: 'o' for "OR."
+        } else {
+            keyBuilder << "s";  // Case 2: 's' for "SBE."
+        }
+    } else {
+        keyBuilder << "c";  // Case 1: 'c' for "classic."
+    }
 
     return keyBuilder.str();
 }
@@ -1255,8 +1376,11 @@ std::string encodeSBE(const CanonicalQuery& cq, const Optimizer optimizer) {
     // Only encode parameter types in the MatchExpression if this key is being generated by
     // Bonsai.
     const bool encodeParameterTypes = optimizer == Optimizer::kBonsai;
-    encodeKeyForAutoParameterizedMatchSBE(
-        cq.getExpCtx(), cq.getPrimaryMatchExpression(), &bufBuilder, encodeParameterTypes);
+    encodeKeyForAutoParameterizedMatchSBE(cq.getExpCtx(),
+                                          cq.getPrimaryMatchExpression(),
+                                          &bufBuilder,
+                                          encodeParameterTypes,
+                                          !sort.isEmpty());
     bufBuilder.appendBuf(proj.objdata(), proj.objsize());
     bufBuilder.appendStr(strBuilderEncoded, false /* includeEndingNull */);
     bufBuilder.appendChar(kEncodeSectionDelimiter);

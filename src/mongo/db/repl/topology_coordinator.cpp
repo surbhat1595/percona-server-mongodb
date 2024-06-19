@@ -159,7 +159,7 @@ bool _hasOnlyAuthErrorUpHeartbeats(const std::vector<MemberData>& hbdata, const 
 }
 
 void appendOpTime(BSONObjBuilder* bob, const char* elemName, const OpTime& opTime) {
-    opTime.append(bob, elemName);
+    opTime.append(elemName, bob);
 }
 }  // namespace
 
@@ -425,7 +425,7 @@ OpTime TopologyCoordinator::_getOldestSyncOpTime() const {
     // Find primary's oplog time. We will reject sync candidates that are more than
     // _options.maxSyncSourceLagSecs seconds behind this optime.
     if (_currentPrimaryIndex != -1) {
-        OpTime primaryOpTime = _memberData.at(_currentPrimaryIndex).getHeartbeatWrittenOpTime();
+        OpTime primaryOpTime = _memberData.at(_currentPrimaryIndex).getHeartbeatAppliedOpTime();
 
         // Check if primaryOpTime is still close to 0 because we haven't received
         // our first heartbeat from a new primary yet.
@@ -500,12 +500,12 @@ bool TopologyCoordinator::_isEligibleSyncSource(int candidateIndex,
         // Candidates cannot be excessively behind, if we are checking for staleness.
         if (shouldCheckStaleness) {
             const auto oldestSyncOpTime = _getOldestSyncOpTime();
-            if (memberData.getHeartbeatWrittenOpTime() < oldestSyncOpTime) {
+            if (memberData.getHeartbeatAppliedOpTime() < oldestSyncOpTime) {
                 LOGV2_INFO(3873110,
                            "Cannot select sync source because it is too far behind",
                            "syncSourceCandidate"_attr = syncSourceCandidate,
-                           "syncSourceCandidateLastWrittenOpTime"_attr =
-                               memberData.getHeartbeatWrittenOpTime(),
+                           "syncSourceCandidateOpTime"_attr =
+                               memberData.getHeartbeatAppliedOpTime(),
                            "oldestAcceptableOpTime"_attr = oldestSyncOpTime);
                 return false;
             }
@@ -531,12 +531,12 @@ bool TopologyCoordinator::_isEligibleSyncSource(int candidateIndex,
         }
     }
     // Only select a candidate that is ahead of me, if we are checking for staleness.
-    if (shouldCheckStaleness && memberData.getHeartbeatWrittenOpTime() <= lastOpTimeFetched) {
+    if (shouldCheckStaleness && memberData.getHeartbeatAppliedOpTime() <= lastOpTimeFetched) {
         LOGV2_INFO(3873113,
                    "Cannot select sync source which is not ahead of me",
                    "syncSourceCandidate"_attr = syncSourceCandidate,
-                   "syncSourceCandidateLastWrittenOpTime"_attr =
-                       memberData.getHeartbeatWrittenOpTime().toBSON(),
+                   "syncSourceCandidateLastAppliedOpTime"_attr =
+                       memberData.getHeartbeatAppliedOpTime().toBSON(),
                    "lastOpTimeFetched"_attr = lastOpTimeFetched.toBSON());
         return false;
     }
@@ -811,14 +811,14 @@ void TopologyCoordinator::prepareSyncFromResponse(const HostAndPort& target,
                    str::stream() << "I cannot reach the requested member: " << target.toString());
         return;
     }
-    const OpTime lastOpWritten = getMyLastWrittenOpTime();
-    if (hbdata.getHeartbeatWrittenOpTime().getSecs() + 10 < lastOpWritten.getSecs()) {
+    const OpTime lastOpApplied = getMyLastAppliedOpTime();
+    if (hbdata.getHeartbeatAppliedOpTime().getSecs() + 10 < lastOpApplied.getSecs()) {
         LOGV2_WARNING(
             21837,
             "Attempting to sync from sync source, but it is more than 10 seconds behind us",
             "syncSource"_attr = target,
-            "syncSourceHeartbeatWrittenOpTime"_attr = hbdata.getHeartbeatWrittenOpTime().getSecs(),
-            "lastOpWritten"_attr = lastOpWritten.getSecs());
+            "syncSourceHeartbeatAppliedOpTime"_attr = hbdata.getHeartbeatAppliedOpTime().getSecs(),
+            "lastOpApplied"_attr = lastOpApplied.getSecs());
         response->append("warning",
                          str::stream() << "requested member \"" << target.toString()
                                        << "\" is more than 10 seconds behind us");
@@ -2132,7 +2132,9 @@ void TopologyCoordinator::prepareStatusResponse(const ReplSetStatusArgs& rsStatu
     }
 
     if (_rsConfig.getConfigServer_deprecated() ||
-        serverGlobalParams.clusterRole.has(ClusterRole::ConfigServer)) {
+        (gFeatureFlagAllMongodsAreSharded.isEnabledUseLatestFCVWhenUninitialized(
+             serverGlobalParams.featureCompatibility.acquireFCVSnapshot()) &&
+         serverGlobalParams.clusterRole.has(ClusterRole::ConfigServer))) {
         response->append("configsvr", true);
     }
 
@@ -2146,12 +2148,12 @@ void TopologyCoordinator::prepareStatusResponse(const ReplSetStatusArgs& rsStatu
 
     // New optimes, to hold them all.
     BSONObjBuilder optimes;
-    _lastCommittedOpTimeAndWallTime.opTime.append(&optimes, "lastCommittedOpTime");
+    _lastCommittedOpTimeAndWallTime.opTime.append("lastCommittedOpTime", &optimes);
 
     optimes.appendDate("lastCommittedWallTime", _lastCommittedOpTimeAndWallTime.wallTime);
 
     if (!rsStatusArgs.readConcernMajorityOpTime.isNull()) {
-        rsStatusArgs.readConcernMajorityOpTime.append(&optimes, "readConcernMajorityOpTime");
+        rsStatusArgs.readConcernMajorityOpTime.append("readConcernMajorityOpTime", &optimes);
     }
 
     appendOpTime(&optimes, "appliedOpTime", lastOpApplied);
@@ -2211,16 +2213,16 @@ StatusWith<BSONObj> TopologyCoordinator::prepareReplSetUpdatePositionCommand(
         }
 
         BSONObjBuilder entry(arrayBuilder.subobjStart());
-        memberData.getLastWrittenOpTime().append(&entry,
-                                                 UpdatePositionArgs::kWrittenOpTimeFieldName);
+        memberData.getLastWrittenOpTime().append(UpdatePositionArgs::kWrittenOpTimeFieldName,
+                                                 &entry);
         entry.appendDate(UpdatePositionArgs::kWrittenWallTimeFieldName,
                          memberData.getLastWrittenWallTime());
-        memberData.getLastAppliedOpTime().append(&entry,
-                                                 UpdatePositionArgs::kAppliedOpTimeFieldName);
+        memberData.getLastAppliedOpTime().append(UpdatePositionArgs::kAppliedOpTimeFieldName,
+                                                 &entry);
         entry.appendDate(UpdatePositionArgs::kAppliedWallTimeFieldName,
                          memberData.getLastAppliedWallTime());
-        memberData.getLastDurableOpTime().append(&entry,
-                                                 UpdatePositionArgs::kDurableOpTimeFieldName);
+        memberData.getLastDurableOpTime().append(UpdatePositionArgs::kDurableOpTimeFieldName,
+                                                 &entry);
         entry.appendDate(UpdatePositionArgs::kDurableWallTimeFieldName,
                          memberData.getLastDurableWallTime());
         entry.append(UpdatePositionArgs::kMemberIdFieldName, memberData.getMemberId().getData());
@@ -3167,8 +3169,8 @@ bool TopologyCoordinator::shouldChangeSyncSource(const HostAndPort& currentSourc
     }
 
     OpTime currentSourceOpTime =
-        std::max(oqMetadata.getLastOpWritten(),
-                 _memberData.at(currentSourceIndex).getHeartbeatWrittenOpTime());
+        std::max(oqMetadata.getLastOpApplied(),
+                 _memberData.at(currentSourceIndex).getHeartbeatAppliedOpTime());
 
     fassert(4612000, !currentSourceOpTime.isNull());
 
@@ -3341,7 +3343,7 @@ bool TopologyCoordinator::_shouldChangeSyncSourceDueToLag(const HostAndPort& cur
 
         for (size_t i = 0; i < _memberData.size(); i++) {
             const auto& member = _memberData[i];
-            if (currentSourceLagThresholdSecs < member.getHeartbeatWrittenOpTime().getSecs() &&
+            if (currentSourceLagThresholdSecs < member.getHeartbeatAppliedOpTime().getSecs() &&
                 _isEligibleSyncSource(i,
                                       now,
                                       lastOpTimeFetched,
@@ -3358,8 +3360,8 @@ bool TopologyCoordinator::_shouldChangeSyncSourceDueToLag(const HostAndPort& cur
                       "syncSourceOpTime"_attr = currentSourceOpTime.toString(),
                       "maxSyncSourceLagSecs"_attr = _options.maxSyncSourceLagSecs,
                       "otherMember"_attr = member.getHostAndPort().toString(),
-                      "otherMemberHearbeatWrittenOpTime"_attr =
-                          member.getHeartbeatWrittenOpTime().toString());
+                      "otherMemberHearbeatAppliedOpTime"_attr =
+                          member.getHeartbeatAppliedOpTime().toString());
                 return true;
             }
         }

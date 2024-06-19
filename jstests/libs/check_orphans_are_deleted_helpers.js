@@ -20,7 +20,7 @@ export var CheckOrphansAreDeletedHelpers = (function() {
                     return 'Timed out waiting for ' + coll.getFullName() + ' to be empty @ ' +
                         shardId + ', last known contents: ' + tojson(docs);
                 },
-                5 * 60 * 1000,
+                10 * 60 * 1000,
                 1000);
         };
 

@@ -32,6 +32,15 @@
 
 namespace mongo {
 namespace coordinate_multi_update_util {
+
+class PauseMigrationsDuringMultiUpdatesEnablement {
+public:
+    bool isEnabled();
+
+private:
+    boost::optional<bool> _enabled;
+};
+
 int getWriteOpIndex(const TargetedBatchMap& childBatches);
 
 BatchedCommandResponse executeCoordinateMultiUpdate(OperationContext* opCtx,

@@ -31,7 +31,10 @@
  *   does_not_support_stepdowns,
  *   # "Explain of a resolved view must be executed by mongos"
  *   directly_against_shardsvrs_incompatible,
- *   tenant_migration_incompatible
+ *   tenant_migration_incompatible,
+ *   # TODO SERVER-89764 a concurrent moveCollection during insertion can cause the bucket
+ *   # collection to insert more documents then expected by the test.
+ *   assumes_balancer_off,
  * ]
  *
  */
@@ -149,13 +152,6 @@ const casesNoLastpointOptimization = [
         $group: {
             _id: "$m",
             acc1: {$bottom: {sortBy: {t: 1}, output: ["$x"]}},
-            acc2: {$bottom: {sortBy: {t: 1}, output: ["$y"]}},
-        }
-    }],
-    [{
-        $group: {
-            _id: "$m",
-            acc1: {$bottom: {sortBy: {t: 1}, output: ["$x"]}},
             acc2: {$top: {sortBy: {t: -1}, output: ["$y"]}},
         }
     }],
@@ -189,6 +185,14 @@ const casesNoLastpointOptimization = [
     [
         {$addFields: {mm: {$add: [1, "$m"]}}},
         {$group: {_id: "$mm", acc: {$bottom: {sortBy: {t: 1}, output: ["$x"]}}}}
+    ],
+
+    // Fields computed from 'metaField' cannot be used in the $group stage. Pushing down the
+    // computed fields 'mm' would disable the last point optimization, as the optimization relies
+    // that the 'control' block summaries which may have been invlidated by the $addFields pushdown.
+    [
+        {$addFields: {mm: {$add: [42, "$m"]}}},
+        {$group: {_id: "$m", acc: {$bottom: {sortBy: {t: 1}, output: ["$x", "$mm"]}}}}
     ],
 ];
 
@@ -318,16 +322,7 @@ const casesLastpointOptimization = [
             {$group: {_id: "$m", acc: {$bottomN: {n: 1, sortBy: {t: 1}, output: ["$x"]}}}}
         ],
         expectedResult: [{_id: 1, acc: [[lpx1]]}]
-    },
-
-    // Fields computed from 'metaField' can be used in the acc.
-    {
-        pipeline: [
-            {$addFields: {mm: {$add: [42, "$m"]}}},
-            {$group: {_id: "$m", acc: {$bottom: {sortBy: {t: 1}, output: ["$x", "$mm"]}}}}
-        ],
-        expectedResult: [{_id: 1, acc: [lpx1, 1 + 42]}, {_id: 2, acc: [lpx2, 2 + 42]}]
-    },
+    }
 ];
 
 // When there is a suitable index, DISTINCT_SCAN optimization should kick in. We only sanity test

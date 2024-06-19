@@ -1268,7 +1268,7 @@ static stdx::unordered_map<std::string, InstrFn> kInstrFunctions = {
     {"isNull", InstrFn{1, generator<1, &vm::CodeFragment::appendIsNull>, false}},
     {"isObject", InstrFn{1, generator<1, &vm::CodeFragment::appendIsObject>, false}},
     {"isArray", InstrFn{1, generator<1, &vm::CodeFragment::appendIsArray>, false}},
-    {"isInListData", InstrFn{1, generator<1, &vm::CodeFragment::appendIsInListData>, false}},
+    {"isInList", InstrFn{1, generator<1, &vm::CodeFragment::appendIsInList>, false}},
     {"isString", InstrFn{1, generator<1, &vm::CodeFragment::appendIsString>, false}},
     {"isBinData", InstrFn{1, generator<1, &vm::CodeFragment::appendIsBinData>, false}},
     {"isNaN", InstrFn{1, generator<1, &vm::CodeFragment::appendIsNaN>, false}},
@@ -1277,6 +1277,7 @@ static stdx::unordered_map<std::string, InstrFn> kInstrFunctions = {
     {"isMinKey", InstrFn{1, generator<1, &vm::CodeFragment::appendIsMinKey>, false}},
     {"isMaxKey", InstrFn{1, generator<1, &vm::CodeFragment::appendIsMaxKey>, false}},
     {"isTimestamp", InstrFn{1, generator<1, &vm::CodeFragment::appendIsTimestamp>, false}},
+    {"isKeyString", InstrFn{1, generator<1, &vm::CodeFragment::appendIsKeyString>, false}},
     {"valueBlockApplyLambda",
      InstrFn{3, generatorLegacy<&vm::CodeFragment::appendValueBlockApplyLambda>, false}},
 };

@@ -44,13 +44,28 @@
 
 namespace mongo {
 
+namespace transaction_request_sender_details {
 namespace {
+void processReplyMetadata(OperationContext* opCtx,
+                          const ShardId& shardId,
+                          const BSONObj& responseBson,
+                          bool forAsyncGetMore = false) {
+    auto txnRouter = TransactionRouter::get(opCtx);
+    if (!txnRouter) {
+        return;
+    }
+
+    txnRouter.processParticipantResponse(opCtx, shardId, responseBson, forAsyncGetMore);
+}
+}  // namespace
 
 std::vector<AsyncRequestsSender::Request> attachTxnDetails(
-    OperationContext* opCtx,
-    const std::vector<AsyncRequestsSender::Request>& requests,
-    bool activeTxnParticipantAddParticipants) {
+    OperationContext* opCtx, const std::vector<AsyncRequestsSender::Request>& requests) {
+    bool activeTxnParticipantAddParticipants =
+        opCtx->isActiveTransactionParticipant() && opCtx->inMultiDocumentTransaction();
+
     auto txnRouter = TransactionRouter::get(opCtx);
+
     if (!txnRouter) {
         return requests;
     }
@@ -74,21 +89,24 @@ std::vector<AsyncRequestsSender::Request> attachTxnDetails(
     return newRequests;
 }
 
-void processReplyMetadata(OperationContext* opCtx, const AsyncRequestsSender::Response& response) {
-    auto txnRouter = TransactionRouter::get(opCtx);
-    if (!txnRouter) {
-        return;
-    }
-
+void processReplyMetadata(OperationContext* opCtx,
+                          const AsyncRequestsSender::Response& response,
+                          bool forAsyncGetMore) {
     if (!response.swResponse.isOK()) {
         return;
     }
 
-    txnRouter.processParticipantResponse(
-        opCtx, response.shardId, response.swResponse.getValue().data);
+    processReplyMetadata(
+        opCtx, response.shardId, response.swResponse.getValue().data, forAsyncGetMore);
 }
 
-}  // unnamed namespace
+void processReplyMetadataForAsyncGetMore(OperationContext* opCtx,
+                                         const ShardId& shardId,
+                                         const BSONObj& responseBson) {
+    processReplyMetadata(opCtx, shardId, responseBson, true /* forAsyncGetMore */);
+}
+
+}  // namespace transaction_request_sender_details
 
 MultiStatementTransactionRequestsSender::MultiStatementTransactionRequestsSender(
     OperationContext* opCtx,
@@ -103,10 +121,7 @@ MultiStatementTransactionRequestsSender::MultiStatementTransactionRequestsSender
           opCtx,
           std::move(executor),
           dbName,
-          attachTxnDetails(
-              opCtx,
-              requests,
-              (opCtx->isActiveTransactionParticipant() && opCtx->inMultiDocumentTransaction())),
+          transaction_request_sender_details::attachTxnDetails(opCtx, requests),
           readPreference,
           retryPolicy,
           ResourceYielderFactory::get(*opCtx->getService()).make(opCtx, "request-sender"),
@@ -126,9 +141,9 @@ bool MultiStatementTransactionRequestsSender::done() {
     return _ars->done();
 }
 
-AsyncRequestsSender::Response MultiStatementTransactionRequestsSender::next() {
+AsyncRequestsSender::Response MultiStatementTransactionRequestsSender::next(bool forMergeCursors) {
     auto response = _ars->next();
-    processReplyMetadata(_opCtx, response);
+    transaction_request_sender_details::processReplyMetadata(_opCtx, response, forMergeCursors);
     return response;
 }
 

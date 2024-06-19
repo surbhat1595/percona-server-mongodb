@@ -5,8 +5,20 @@
 // To install trusted-ca.pem for local testing on OSX, invoke the following at a console:
 //   security add-trusted-cert -d jstests/libs/trusted-ca.pem
 
+import {getPython3Binary} from "jstests/libs/python.js"
+
 const HOST_TYPE = getBuildInfo().buildEnvironment.target_os;
+jsTest.log("HOST_TYPE = " + HOST_TYPE);
+
+if (HOST_TYPE == "macOS") {
+    // Ensure trusted-ca.pem is properly installed on MacOS hosts.
+    // (MacOS is the only OS where it is installed outside of this test)
+    let exitCode = runProgram("security", "verify-cert", "-c", "./jstests/libs/trusted-client.pem");
+    assert.eq(0, exitCode, 'Check for proper installation of Trusted CA on MacOS host');
+}
 if (HOST_TYPE == "windows") {
+    assert.eq(0, runProgram(getPython3Binary(), "jstests/ssl_linear/windows_castore_cleanup.py"));
+
     // OpenSSL backed imports Root CA and intermediate CA
     runProgram("certutil.exe", "-addstore", "-user", "-f", "CA", "jstests\\libs\\trusted-ca.pem");
 
@@ -14,6 +26,7 @@ if (HOST_TYPE == "windows") {
     // Current User.
     runProgram("certutil.exe", "-addstore", "-f", "Root", "jstests\\libs\\trusted-ca.pem");
 }
+
 try {
     const x509Options = {
         tlsMode: 'requireTLS',

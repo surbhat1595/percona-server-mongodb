@@ -82,8 +82,8 @@ public:
                 const auto cri = uassertStatusOK(
                     Grid::get(opCtx)->catalogCache()->getCollectionRoutingInfoWithRefresh(opCtx,
                                                                                           nss));
-                uassert(ErrorCodes::IllegalOperation,
-                        "You can't convertToCapped a sharded collection",
+                uassert(ErrorCodes::NamespaceCannotBeSharded,
+                        "Can't convert a sharded collection to a capped collection",
                         !cri.cm.isSharded());
             }
 

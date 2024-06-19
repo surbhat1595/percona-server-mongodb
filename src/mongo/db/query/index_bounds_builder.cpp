@@ -664,7 +664,16 @@ void IndexBoundsBuilder::_translatePredicate(const MatchExpression* expr,
         // There is no need to sort intervals or merge overlapping intervals here since the output
         // is from one element.
 
-        translateEquality(node, node->getData(), nullptr, index, isHashed, oilOut, tightnessOut);
+        // Passing a "holder" for the BOSNElement (node->getData()) here allows us to skip
+        // creating a new BSON to wrap the element in translateEquality(). Passing unowned BSON as
+        // the "holder" here is acceptable, as long as the BSON lives for as long as the query plan.
+        translateEquality(node,
+                          node->getData(),
+                          node->getOwnedBackingBSON(),
+                          index,
+                          isHashed,
+                          oilOut,
+                          tightnessOut);
         if (ietBuilder != nullptr) {
             switch (expr->matchType()) {
                 case MatchExpression::EQ:
@@ -1091,28 +1100,36 @@ void IndexBoundsBuilder::_translatePredicate(const MatchExpression* expr,
         const bool entireNullIntervalMatchesPredicate =
             detectIfEntireNullIntervalMatchesPredicate(ime, index);
 
-        // Ensure that we own the BSON buffer containing the $in array. This will allow us to create
-        // Interval objects which point to this BSON without having to make copies just to strip out
-        // the field name as is usually done in IndexBoundsBuilder::translateEquality.
-        // If the InList has already been prepared, as will be the case if we reach this codepath
-        // from IntervalEvalutionTree evaluation (SBE plan was retrieved from the cache and
-        // parameters are being bound), then we cannot make a copy of the BSON buffer. In this case,
-        // we clone() the InList, which will share the underlying BSON but the copy will not be in
-        // the prepared state, allowing us to make a copy of the BSON.
-        auto inList = ime->getInList();
-        if (!inList->isBSONOwned()) {
-            if (inList->isPrepared()) {
-                inList = inList->clone();
-            }
-            inList->makeBSONOwned();
+        // Ensure that we own the BSON buffer containing the $in array.
+        std::unique_ptr<MatchExpression> clonedME;
+
+        if (!ime->isBSONOwned()) {
+            // If the InMatchExpression doesn't own its BSON storage, then we need to make a copy
+            // of the InMatchExpression so that we can call makeBSONOwned().
+            clonedME = ime->clone();
+            auto clonedInMatchExpr = static_cast<InMatchExpression*>(clonedME.get());
+
+            clonedInMatchExpr->makeBSONOwned();
+
+            ime = clonedInMatchExpr;
         }
 
+        invariant(ime->isBSONOwned());
+
+        // Because we own the BSON buffer for the $in array, this allows us to create Interval
+        // objects which point directly to this BSON (without having to make copies just to strip
+        // out the field name as is usually done in IndexBoundsBuilder::translateEquality()).
         for (auto&& equality : ime->getEqualities()) {
             // First, we generate the bounds the same way that we would do for an individual
             // equality. This will set tightness to the value it should be if this equality is being
             // considered in isolation.
-            IndexBoundsBuilder::translateEquality(
-                ime, equality, &inList->getOwnedBSONStorage(), index, isHashed, oilOut, &tightness);
+            IndexBoundsBuilder::translateEquality(ime,
+                                                  equality,
+                                                  boost::make_optional(ime->getOwnedBSONStorage()),
+                                                  index,
+                                                  isHashed,
+                                                  oilOut,
+                                                  &tightness);
 
             if (entireNullIntervalMatchesPredicate && BSONType::jstNULL == equality.type()) {
                 // We may have a covered null query. In this case, we update null interval
@@ -1390,7 +1407,7 @@ void IndexBoundsBuilder::translateRegex(const RegexMatchExpression* rme,
 // static
 void IndexBoundsBuilder::translateEquality(const PathMatchExpression* matchExpr,
                                            const BSONElement& data,
-                                           const BSONObj* holder,
+                                           boost::optional<BSONObj> holder,
                                            const IndexEntry& index,
                                            bool isHashed,
                                            OrderedIntervalList* oil,
@@ -1403,7 +1420,7 @@ void IndexBoundsBuilder::translateEquality(const PathMatchExpression* matchExpr,
     if (BSONType::Array != data.type()) {
         // Reuse the BSON from the parse tree if possible to avoid allocating a BSONObj.
         // A hashed index or collation means we have to create a copy to construct the bounds.
-        if (!isHashed && index.collator == nullptr && holder != nullptr) {
+        if (!isHashed && index.collator == nullptr && holder.has_value()) {
             oil->intervals.emplace_back(*holder, data, true, data, true);
             *tightnessOut = IndexBoundsBuilder::EXACT;
             return;
@@ -1445,7 +1462,12 @@ void IndexBoundsBuilder::translateEquality(const PathMatchExpression* matchExpr,
     // {a: [1, 2, 3]} will match documents like {a: [[1, 2, 3], 4, 5]}.
 
     // Case 3.
-    oil->intervals.push_back(makePointInterval(objFromElement(data, index.collator)));
+    // Reuse the BSON from the parse tree if possible to avoid allocating a BSONObj.
+    if (!index.collator && holder.has_value()) {
+        oil->intervals.emplace_back(*holder, data, true, data, true);
+    } else {
+        oil->intervals.push_back(makePointInterval(objFromElement(data, index.collator)));
+    }
 
     if (data.Obj().isEmpty()) {
         // Case 2.
@@ -1454,8 +1476,13 @@ void IndexBoundsBuilder::translateEquality(const PathMatchExpression* matchExpr,
         oil->intervals.push_back(makePointInterval(undefinedBob.obj()));
     } else {
         // Case 1.
+        // Reuse the BSON from the parse tree if possible to avoid allocating a BSONObj.
         BSONElement firstEl = data.Obj().firstElement();
-        oil->intervals.push_back(makePointInterval(objFromElement(firstEl, index.collator)));
+        if (!index.collator && holder.has_value()) {
+            oil->intervals.emplace_back(*holder, firstEl, true, firstEl, true);
+        } else {
+            oil->intervals.push_back(makePointInterval(objFromElement(firstEl, index.collator)));
+        }
     }
 
     std::sort(oil->intervals.begin(), oil->intervals.end(), IntervalComparison);

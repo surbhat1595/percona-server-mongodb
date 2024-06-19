@@ -30,6 +30,7 @@
 #pragma once
 
 #include "mongo/db/s/convert_to_capped_coordinator_document_gen.h"
+#include "mongo/db/s/participant_block_gen.h"
 #include "mongo/db/s/sharding_ddl_coordinator.h"
 
 namespace mongo {
@@ -44,6 +45,7 @@ public:
     ConvertToCappedCoordinator(ShardingDDLCoordinatorService* service,
                                const BSONObj& initialStateDoc)
         : RecoverableShardingDDLCoordinator(service, "ConvertToCappedCoordinator", initialStateDoc),
+          _request(_doc.getShardsvrConvertToCappedRequest()),
           _critSecReason(BSON("convertToCapped" << NamespaceStringUtil::serialize(
                                   nss(), SerializationContext::stateDefault()))){};
 
@@ -51,21 +53,25 @@ public:
         const auto otherDoc = ConvertToCappedCoordinatorDocument::parse(
             IDLParserContext("ConvertToCappedCoordinatorDocument"), doc);
 
+        const auto& selfReq = _request.toBSON();
+        const auto& otherReq = otherDoc.getShardsvrConvertToCappedRequest().toBSON();
+
         uassert(ErrorCodes::ConflictingOperationInProgress,
                 str::stream() << "Another convertToCapped is already running for the same "
                                  "namespace with size set to "
-                              << _doc.getSize(),
-                SimpleBSONObjComparator::kInstance.evaluate(
-                    _doc.getShardsvrConvertToCappedRequest().toBSON() ==
-                    otherDoc.getShardsvrConvertToCappedRequest().toBSON()));
+                              << _request.getSize(),
+                SimpleBSONObjComparator::kInstance.evaluate(selfReq == otherReq));
     };
 
     void appendCommandInfo(BSONObjBuilder* cmdInfoBuilder) const override {
         cmdInfoBuilder->append(
             "convertToCapped",
             NamespaceStringUtil::serialize(nss(), SerializationContext::stateDefault()));
-        cmdInfoBuilder->appendElements(_doc.getShardsvrConvertToCappedRequest().toBSON());
+        cmdInfoBuilder->appendElements(_request.toBSON());
     };
+
+protected:
+    logv2::DynamicAttributes getCoordinatorLogAttrs() const override;
 
 private:
     StringData serializePhase(const Phase& phase) const override {
@@ -82,6 +88,24 @@ private:
                                   const CancellationToken& token) noexcept override;
 
     void _checkPreconditions(OperationContext* opCtx);
+
+    void _enterCriticalSectionOnDataShard(
+        OperationContext* opCtx,
+        const std::shared_ptr<executor::ScopedTaskExecutor>& executor,
+        const CancellationToken& token,
+        CriticalSectionBlockTypeEnum blockType);
+
+    void _exitCriticalSectionOnDataShard(
+        OperationContext* opCtx,
+        const std::shared_ptr<executor::ScopedTaskExecutor>& executor,
+        const CancellationToken& token);
+
+    void _performNoopRetryableWriteOnParticipantShardsAndConfigsvr(
+        OperationContext* opCtx,
+        const OperationSessionInfo& osi,
+        const std::shared_ptr<executor::TaskExecutor>& executor);
+
+    const mongo::ShardsvrConvertToCappedRequest _request;
 
     const BSONObj _critSecReason;
 };

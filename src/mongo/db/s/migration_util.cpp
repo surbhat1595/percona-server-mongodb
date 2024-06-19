@@ -397,8 +397,8 @@ void notifyChangeStreamsOnRecipientFirstChunk(OperationContext* opCtx,
     auto const serviceContext = opCtx->getClient()->getServiceContext();
 
     // TODO (SERVER-71444): Fix to be interruptible or document exception.
-    UninterruptibleLockGuard noInterrupt(shard_role_details::getLocker(opCtx));  // NOLINT.
-    AutoGetOplogFastPath oplogWrite(opCtx, OplogAccessMode::kWrite);
+    UninterruptibleLockGuard noInterrupt(opCtx);  // NOLINT.
+    AutoGetOplog oplogWrite(opCtx, OplogAccessMode::kWrite);
     writeConflictRetry(opCtx, "migrateChunkToNewShard", NamespaceString::kRsOplogNamespace, [&] {
         WriteUnitOfWork uow(opCtx);
         serviceContext->getOpObserver()->onInternalOpMessage(opCtx,
@@ -432,8 +432,8 @@ void notifyChangeStreamsOnDonorLastChunk(OperationContext* opCtx,
     auto const serviceContext = opCtx->getClient()->getServiceContext();
 
     // TODO (SERVER-71444): Fix to be interruptible or document exception.
-    UninterruptibleLockGuard noInterrupt(shard_role_details::getLocker(opCtx));  // NOLINT.
-    AutoGetOplogFastPath oplogWrite(opCtx, OplogAccessMode::kWrite);
+    UninterruptibleLockGuard noInterrupt(opCtx);  // NOLINT.
+    AutoGetOplog oplogWrite(opCtx, OplogAccessMode::kWrite);
     writeConflictRetry(opCtx, "migrateLastChunkFromShard", NamespaceString::kRsOplogNamespace, [&] {
         WriteUnitOfWork uow(opCtx);
         serviceContext->getOpObserver()->onInternalOpMessage(opCtx,

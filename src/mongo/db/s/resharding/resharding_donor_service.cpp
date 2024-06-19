@@ -65,6 +65,7 @@
 #include "mongo/db/repl/read_concern_args.h"
 #include "mongo/db/repl/repl_client_info.h"
 #include "mongo/db/repl/wait_for_majority_service.h"
+#include "mongo/db/s/collection_sharding_runtime.h"
 #include "mongo/db/s/resharding/coordinator_document_gen.h"
 #include "mongo/db/s/resharding/resharding_change_event_o2_field_gen.h"
 #include "mongo/db/s/resharding/resharding_data_copy_util.h"
@@ -72,6 +73,7 @@
 #include "mongo/db/s/resharding/resharding_future_util.h"
 #include "mongo/db/s/resharding/resharding_server_parameters_gen.h"
 #include "mongo/db/s/resharding/resharding_util.h"
+#include "mongo/db/s/shard_filtering_metadata_refresh.h"
 #include "mongo/db/s/sharding_index_catalog_ddl_util.h"
 #include "mongo/db/s/sharding_recovery_service.h"
 #include "mongo/db/server_options.h"
@@ -142,7 +144,7 @@ Timestamp generateMinFetchTimestamp(OperationContext* opCtx, const NamespaceStri
             AutoGetDb db(opCtx, sourceNss.dbName(), MODE_IX);
             Lock::CollectionLock collLock(opCtx, sourceNss, MODE_S);
 
-            AutoGetOplogFastPath oplogWrite(opCtx, OplogAccessMode::kWrite);
+            AutoGetOplog oplogWrite(opCtx, OplogAccessMode::kWrite);
 
             const std::string msg = str::stream()
                 << "All future oplog entries on the namespace " << sourceNss.toStringForErrorMsg()
@@ -178,6 +180,17 @@ void ensureFulfilledPromise(WithLock lk, SharedPromise<void>& sp, Status error) 
     if (!sp.getFuture().isReady()) {
         sp.setError(error);
     }
+}
+
+/**
+ * Returns whether it is possible for the donor to be in 'state' when resharding will indefinitely
+ * abort.
+ */
+bool inPotentialAbortScenario(const DonorStateEnum& state) {
+    // Regardless of whether resharding will abort or commit, the donor will eventually reach state
+    // kDone. Additionally, if the donor is in state kError, it is guaranteed that the coordinator
+    // will eventually begin the abort process.
+    return state == DonorStateEnum::kError || state == DonorStateEnum::kDone;
 }
 
 class ExternalStateImpl : public ReshardingDonorService::DonorStateMachineExternalState {
@@ -220,12 +233,9 @@ public:
         }
     }
 
-    void clearFilteringMetadata(OperationContext* opCtx,
-                                const NamespaceString& sourceNss,
-                                const NamespaceString& tempReshardingNss) override {
-        stdx::unordered_set<NamespaceString> namespacesToRefresh{sourceNss, tempReshardingNss};
-        resharding::clearFilteringMetadata(
-            opCtx, namespacesToRefresh, true /* scheduleAsyncRefresh */);
+    void refreshCollectionPlacementInfo(OperationContext* opCtx,
+                                        const NamespaceString& sourceNss) override {
+        onCollectionPlacementVersionMismatch(opCtx, sourceNss, boost::none);
     }
 };
 
@@ -421,8 +431,16 @@ ExecutorFuture<void> ReshardingDonorService::DonorStateMachine::_finishReshardin
 
                {
                    auto opCtx = _cancelableOpCtxFactory->makeOperationContext(&cc());
-                   _externalState->clearFilteringMetadata(
-                       opCtx.get(), _metadata.getSourceNss(), _metadata.getTempReshardingNss());
+                   std::initializer_list<NamespaceString> namespacesToRefresh{
+                       _metadata.getSourceNss(), _metadata.getTempReshardingNss()};
+
+                   // Clear filtering metadata for the source and temp resharding nss.
+                   for (const auto& nss : namespacesToRefresh) {
+                       AutoGetCollection autoColl(opCtx.get(), nss, MODE_IX);
+                       CollectionShardingRuntime::assertCollectionLockedAndAcquireExclusive(
+                           opCtx.get(), nss)
+                           ->clearFilteringMetadata(opCtx.get());
+                   }
 
                    ShardingRecoveryService::get(opCtx.get())
                        ->releaseRecoverableCriticalSection(
@@ -433,6 +451,13 @@ ExecutorFuture<void> ReshardingDonorService::DonorStateMachine::_finishReshardin
 
                    _metrics->setEndFor(ReshardingMetrics::TimedPhase::kCriticalSection,
                                        getCurrentTime());
+
+                   // We force a refresh to make sure that the placement information is updated in
+                   // cache after abort decision before the donor state document is deleted.
+                   for (const auto& nss : namespacesToRefresh) {
+                       _externalState->refreshCollectionPlacementInfo(opCtx.get(), nss);
+                       _externalState->waitForCollectionFlush(opCtx.get(), nss);
+                   }
                }
 
                auto opCtx = _cancelableOpCtxFactory->makeOperationContext(&cc());
@@ -459,11 +484,11 @@ Status ReshardingDonorService::DonorStateMachine::_runMandatoryCleanup(
     Status status, const CancellationToken& stepdownToken) {
     _metrics->onStateTransition(_donorCtx.getState(), boost::none);
 
-    // Destroy metrics early so it's lifetime will not be tied to the lifetime of this state
-    // machine. This is because we have future callbacks copy shared pointers to this state machine
-    // that causes it to live longer than expected and potentially overlap with a newer instance
-    // when stepping up.
-    _metrics.reset();
+    // Unregister metrics early so the cumulative metrics do not continue to track these
+    // metrics for the lifetime of this state machine. We have future callbacks copy shared pointers
+    // to this state machine that causes it to live longer than expected, and can potentially
+    // overlap with a newer instance when stepping up.
+    _metrics->deregisterMetrics();
 
     if (!status.isOK()) {
         // If the stepdownToken was triggered, it takes priority in order to make sure that
@@ -591,14 +616,15 @@ SharedSemiFuture<void> ReshardingDonorService::DonorStateMachine::awaitCriticalS
 
 void ReshardingDonorService::DonorStateMachine::
     _onPreparingToDonateCalculateTimestampThenTransitionToDonatingInitialData() {
-    if (_donorCtx.getState() > DonorStateEnum::kPreparingToDonate &&
-        _donorCtx.getState() != DonorStateEnum::kError) {
-        // The invariants won't hold if an unrecoverable error is encountered before the donor
-        // makes enough progress to transition to kDonatingInitialData and then a failover
-        // occurs.
-        invariant(_donorCtx.getMinFetchTimestamp());
-        invariant(_donorCtx.getBytesToClone());
-        invariant(_donorCtx.getDocumentsToClone());
+    if (_donorCtx.getState() > DonorStateEnum::kPreparingToDonate) {
+        if (!inPotentialAbortScenario(_donorCtx.getState())) {
+            // The invariants won't hold if an unrecoverable error is encountered before the donor
+            // makes enough progress to transition to kDonatingInitialData and then a failover
+            // occurs.
+            invariant(_donorCtx.getMinFetchTimestamp());
+            invariant(_donorCtx.getBytesToClone());
+            invariant(_donorCtx.getDocumentsToClone());
+        }
         return;
     }
 
@@ -670,7 +696,7 @@ void ReshardingDonorService::DonorStateMachine::
         auto oplog = generateOplogEntry();
         writeConflictRetry(
             rawOpCtx, "ReshardingBeginOplog", NamespaceString::kRsOplogNamespace, [&] {
-                AutoGetOplogFastPath oplogWrite(rawOpCtx, OplogAccessMode::kWrite);
+                AutoGetOplog oplogWrite(rawOpCtx, OplogAccessMode::kWrite);
                 WriteUnitOfWork wunit(rawOpCtx);
                 const auto& oplogOpTime = repl::logOp(rawOpCtx, &oplog);
                 uassert(5052101,
@@ -799,7 +825,7 @@ void ReshardingDonorService::DonorStateMachine::
                     "ReshardingBlockWritesOplog",
                     NamespaceString::kRsOplogNamespace,
                     [&] {
-                        AutoGetOplogFastPath oplogWrite(rawOpCtx, OplogAccessMode::kWrite);
+                        AutoGetOplog oplogWrite(rawOpCtx, OplogAccessMode::kWrite);
                         WriteUnitOfWork wunit(rawOpCtx);
                         const auto& oplogOpTime = repl::logOp(rawOpCtx, &oplog);
                         uassert(5279507,
@@ -891,7 +917,7 @@ void ReshardingDonorService::DonorStateMachine::_dropOriginalCollectionThenTrans
 
 void ReshardingDonorService::DonorStateMachine::_transitionState(DonorStateEnum newState) {
     invariant(newState != DonorStateEnum::kDonatingInitialData &&
-              newState != DonorStateEnum::kError);
+              newState != DonorStateEnum::kError && newState != DonorStateEnum::kDone);
 
     auto newDonorCtx = _donorCtx;
     newDonorCtx.setState(newState);
@@ -902,6 +928,10 @@ void ReshardingDonorService::DonorStateMachine::_transitionState(DonorShardConte
     // For logging purposes.
     auto oldState = _donorCtx.getState();
     auto newState = newDonorCtx.getState();
+
+    // The donor state machine enters the kError state on unrecoverable errors and so we don't
+    // expect it to ever transition from kError except to kDone.
+    invariant(oldState != DonorStateEnum::kError || newState == DonorStateEnum::kDone);
 
     _updateDonorDocument(std::move(newDonorCtx));
 

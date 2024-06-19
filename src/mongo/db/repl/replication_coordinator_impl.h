@@ -278,10 +278,14 @@ public:
 
     Status setFollowerModeRollback(OperationContext* opCtx) override;
 
-    ApplierState getApplierState() override;
+    OplogSyncState getOplogSyncState() override;
 
-    void signalDrainComplete(OperationContext* opCtx,
-                             long long termWhenBufferIsEmpty) noexcept override;
+    void signalWriterDrainComplete(OperationContext* opCtx,
+                                   long long termWhenExhausted) noexcept override;
+
+    void signalApplierDrainComplete(OperationContext* opCtx,
+                                    long long termWhenExhausted) noexcept override;
+
 
     void signalUpstreamUpdater() override;
 
@@ -294,6 +298,7 @@ public:
     void appendSecondaryInfoData(BSONObjBuilder* result) override;
 
     ReplSetConfig getConfig() const override;
+    ReplSetConfig getConfig(WithLock) const;
 
     ConnectionString getConfigConnectionString() const override;
 
@@ -594,6 +599,11 @@ public:
     void cancelElection_forTest();
 
     /**
+     * Runs the repl set initiate internal function.
+     */
+    Status runReplSetInitiate_forTest(const BSONObj& configObj, BSONObjBuilder* resultObj);
+
+    /**
      * Implementation of an interface used to synchronize changes to custom write concern tags in
      * the config and custom default write concern settings.
      * See base class fore more information.
@@ -664,6 +674,29 @@ public:
     bool isRetryableWrite(OperationContext* opCtx) const override;
 
     boost::optional<UUID> getInitialSyncId(OperationContext* opCtx) override;
+
+    class SharedReplSetConfig {
+    public:
+        struct Lease {
+            uint64_t version = 0;
+            std::shared_ptr<ReplSetConfig> config;
+        };
+
+        SharedReplSetConfig();
+        Lease renew() const;
+        bool isStale(const Lease& lease) const;
+        ReplSetConfig& getConfig() const;
+        // This must be called while holding a lock on the
+        // ReplicationCoordinatorImpl _mutex. Unlike getConfig(), it does not
+        // provide any locking of its own.
+        ReplSetConfig& getConfig(WithLock lk) const;
+        void setConfig(std::shared_ptr<ReplSetConfig> newConfig);
+
+    private:
+        mutable WriteRarelyRWMutex _rwMutex;
+        Atomic<uint64_t> _version;
+        std::shared_ptr<ReplSetConfig> _current;
+    };
 
 private:
     using CallbackFn = executor::TaskExecutor::CallbackFn;
@@ -835,6 +868,8 @@ private:
     struct Waiter {
         Promise<void> promise;
         boost::optional<WriteConcernOptions> writeConcern;
+        // A flag to mark this waiter abandoned which allows early clean-up for the waiter.
+        AtomicWord<bool> givenUp{false};
         explicit Waiter(Promise<void> p, boost::optional<WriteConcernOptions> w = boost::none)
             : promise(std::move(p)), writeConcern(w) {}
     };
@@ -849,14 +884,16 @@ private:
         // Adds waiter into the list.
         void add_inlock(const OpTime& opTime, SharedWaiterHandle waiter);
         // Adds a waiter into the list and returns the future of the waiter's promise.
-        SharedSemiFuture<void> add_inlock(const OpTime& opTime,
-                                          boost::optional<WriteConcernOptions> w = boost::none);
+        std::pair<SharedSemiFuture<void>, SharedWaiterHandle> add_inlock(
+            const OpTime& opTime, boost::optional<WriteConcernOptions> w = boost::none);
         // Returns whether waiter is found and removed.
         bool remove_inlock(SharedWaiterHandle waiter);
         // Signals all waiters whose opTime is <= the given opTime (if any) that satisfy the
         // condition in func.
         template <typename Func>
-        void setValueIf_inlock(Func&& func, boost::optional<OpTime> opTime = boost::none);
+        void setValueIf_inlock(WithLock lk,
+                               Func&& func,
+                               boost::optional<OpTime> opTime = boost::none);
         // Signals all waiters from the list and fulfills promises with OK status.
         void setValueAll_inlock();
         // Signals all waiters from the list and fulfills promises with Error status.
@@ -901,7 +938,7 @@ private:
     public:
         CatchupState(ReplicationCoordinatorImpl* repl) : _repl(repl) {}
         // start() can only be called once.
-        void start_inlock();
+        void start_inlock(WithLock lk);
         // Reset the state itself to destruct the state.
         void abort_inlock(PrimaryCatchUpConclusionReason reason);
         // Heartbeat calls this function to update the target optime.
@@ -1086,7 +1123,7 @@ private:
     /**
      * Returns the _writeConcernMajorityJournalDefault of our current _rsConfig.
      */
-    bool getWriteConcernMajorityShouldJournal_inlock() const;
+    bool getWriteConcernMajorityShouldJournal_inlock(WithLock lk) const;
 
     /**
      * Returns the write concerns used by oplog commitment check and config replication check.
@@ -1138,9 +1175,8 @@ private:
      * Helper method for awaitReplication to register a waiter in _replicationWaiterList with the
      * given opTime and writeConcern. Called while holding _mutex.
      */
-    SharedSemiFuture<void> _startWaitingForReplication(WithLock lock,
-                                                       const OpTime& opTime,
-                                                       const WriteConcernOptions& writeConcern);
+    std::pair<SharedSemiFuture<void>, SharedWaiterHandle> _startWaitingForReplication(
+        WithLock lock, const OpTime& opTime, const WriteConcernOptions& writeConcern);
 
     /**
      * Returns an object with all of the information this node knows about the replica set's
@@ -1154,7 +1190,8 @@ private:
      * If the writeConcern is 'majority', also waits for _currentCommittedSnapshot to be newer than
      * minSnapshot.
      */
-    bool _doneWaitingForReplication_inlock(const OpTime& opTime,
+    bool _doneWaitingForReplication_inlock(WithLock lk,
+                                           const OpTime& opTime,
                                            const WriteConcernOptions& writeConcern);
 
     /**
@@ -1172,12 +1209,13 @@ private:
         const ReplSetTagPattern& tagPattern,
         const std::vector<mongo::HostAndPort>& members) const;
 
-    Status _checkIfWriteConcernCanBeSatisfied_inlock(const WriteConcernOptions& writeConcern) const;
+    Status _checkIfWriteConcernCanBeSatisfied_inlock(WithLock lk,
+                                                     const WriteConcernOptions& writeConcern) const;
 
     Status _checkIfCommitQuorumCanBeSatisfied(WithLock,
                                               const CommitQuorumOptions& commitQuorum) const;
 
-    int _getMyId_inlock() const;
+    int _getMyId_inlock(WithLock lk) const;
 
     OpTime _getMyLastWrittenOpTime_inlock() const;
     OpTimeAndWallTime _getMyLastWrittenOpTimeAndWallTime_inlock() const;
@@ -1264,19 +1302,19 @@ private:
      * Return a randomized offset amount that is scaled in proportion to the size of the
      * _electionTimeoutPeriod. Used to add randomization to an election timeout.
      */
-    Milliseconds _getRandomizedElectionOffset_inlock();
+    Milliseconds _getRandomizedElectionOffset_inlock(WithLock lk);
 
     /*
      * Return the upper bound of the offset amount returned by _getRandomizedElectionOffset
      * This is actually off by one, that is, the election offset is in the half-open range
      * [0, electionOffsetUpperBound)
      */
-    long long _getElectionOffsetUpperBound_inlock();
+    long long _getElectionOffsetUpperBound_inlock(WithLock lk);
 
     /**
      * Starts a heartbeat for each member in the current config.  Called while holding _mutex.
      */
-    void _startHeartbeats_inlock();
+    void _startHeartbeats_inlock(WithLock lk);
 
     /**
      * Cancels all heartbeats.  Called while holding replCoord _mutex.
@@ -1351,7 +1389,13 @@ private:
     void _initialSyncerCompletionFunction(const StatusWith<OpTimeAndWallTime>& opTimeStatus);
 
     /**
-     * Finishes the work of processReplSetInitiate() in the event of a successful quorum check.
+     * Function that executes a replSetInitiate command. This function should be run in an internal
+     * thread so that it cannot be interrupted upon state transition.
+     */
+    Status _runReplSetInitiate(const BSONObj& configObj, BSONObjBuilder* resultObj);
+
+    /**
+     * Finishes the work of _runReplSetInitiate() in the event of a successful quorum check.
      */
     void _finishReplSetInitiate(OperationContext* opCtx,
                                 const ReplSetConfig& newConfig,
@@ -1569,7 +1613,9 @@ private:
      * due to stepdown, otherwise the returned EventHandle is invalid.
      */
     EventHandle _updateTerm_inlock(
-        long long term, TopologyCoordinator::UpdateTermResult* updateTermResult = nullptr);
+        WithLock lk,
+        long long term,
+        TopologyCoordinator::UpdateTermResult* updateTermResult = nullptr);
 
     /**
      * Callback that processes the ReplSetMetadata returned from a command run against another
@@ -1580,7 +1626,8 @@ private:
      *
      * Returns the finish event which is invalid if the process has already finished.
      */
-    EventHandle _processReplSetMetadata_inlock(const rpc::ReplSetMetadata& replMetadata);
+    EventHandle _processReplSetMetadata_inlock(WithLock lk,
+                                               const rpc::ReplSetMetadata& replMetadata);
 
     /**
      * Blesses a snapshot to be used for new committed reads.
@@ -1610,7 +1657,7 @@ private:
      * If reschedule is true, will recompute the liveness update even if a timeout is
      * already pending.
      */
-    void _scheduleNextLivenessUpdate_inlock(bool reschedule);
+    void _scheduleNextLivenessUpdate_inlock(WithLock lk, bool reschedule);
 
     /**
      * Callback which marks downed nodes as down, triggers a stepdown if a majority of nodes are no
@@ -1623,7 +1670,7 @@ private:
      * schedule a new one.
      * Returns immediately otherwise.
      */
-    void _rescheduleLivenessUpdate_inlock(int updatedMemberId);
+    void _rescheduleLivenessUpdate_inlock(WithLock lk, int updatedMemberId);
 
     /**
      * Cancels all outstanding _priorityTakeover callbacks.
@@ -1639,7 +1686,7 @@ private:
      * Cancels the current _handleElectionTimeout callback and reschedules a new callback.
      * Returns immediately otherwise.
      */
-    void _cancelAndRescheduleElectionTimeout_inlock();
+    void _cancelAndRescheduleElectionTimeout_inlock(WithLock lk);
 
     /**
      * Callback which starts an election if this node is electable and using protocolVersion 1.
@@ -1848,7 +1895,7 @@ private:
     // Current ReplicaSet state.
     MemberState _memberState;  // (M)
 
-    ReplicationCoordinator::ApplierState _applierState = ApplierState::Running;  // (M)
+    ReplicationCoordinator::OplogSyncState _oplogSyncState = OplogSyncState::Running;  // (M)
 
     // Used to signal threads waiting for changes to _rsConfigState.
     stdx::condition_variable _rsConfigStateChange;  // (M)
@@ -1858,9 +1905,10 @@ private:
     // ConfigState for details.
     ConfigState _rsConfigState;  // (M)
 
-    // The current ReplicaSet configuration object, including the information about tag groups
-    // that is used to satisfy write concern requests with named gle modes.
-    ReplSetConfig _rsConfig;  // (M)
+    // An instance for getting a lease on the current ReplicaSet
+    // configuration object, including the information about tag groups that is
+    // used to satisfy write concern requests with named gle modes.
+    SharedReplSetConfig _rsConfig;  // (S)
 
     // This member's index position in the current config.
     int _selfIndex;  // (M)

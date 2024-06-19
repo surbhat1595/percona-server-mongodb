@@ -89,13 +89,13 @@ struct RemoveShardProgress {
     /**
      * Used to indicate to the caller of the removeShard method whether draining of chunks for
      * a particular shard has started, is ongoing, or has been completed. When removing a catalog
-     * shard, there is a new state when waiting for range deletions of all moved away chunks.
-     * Removing other shards will skip this state.
+     * shard, there is a new state when waiting for range deletions of all moved away chunks and any
+     * in progress drops of user collections. Removing other shards will skip this state.
      */
     enum DrainingShardStatus {
         STARTED,
         ONGOING,
-        PENDING_RANGE_DELETIONS,
+        PENDING_DATA_CLEANUP,
         COMPLETED,
     };
 
@@ -104,14 +104,15 @@ struct RemoveShardProgress {
      * jumbo chunks and databases within the shard
      */
     struct DrainingShardUsage {
-        const long long totalChunks;
-        const long long databases;
-        const long long jumboChunks;
+        long long totalChunks;
+        long long databases;
+        long long jumboChunks;
     };
 
     DrainingShardStatus status;
     boost::optional<DrainingShardUsage> remainingCounts;
     boost::optional<long long> pendingRangeDeletions;
+    boost::optional<NamespaceString> firstNonEmptyCollection;
 };
 
 /**
@@ -663,6 +664,12 @@ public:
      */
     Status upgradeDowngradeConfigSettings(OperationContext* opCtx);
 
+    /**
+     * Schedules an asynchronous unset of the addOrRemoveShardInProgress cluster parameter, in case
+     * a previous addShard/removeShard left it enabled after a failure or crash.
+     */
+    void scheduleAsyncUnblockDDLCoordinators(OperationContext* opCtx);
+
 private:
     /**
      * Performs the necessary checks for version compatibility and creates a new config.version
@@ -918,6 +925,21 @@ private:
                                                                    OperationContext* opCtx);
     Status _updateClusterCardinalityParameterAfterRemoveShardIfNeeded(const Lock::ExclusiveLock&,
                                                                       OperationContext* opCtx);
+    /*
+     * Commits the new database metadata for a createDatabase operation.
+     *
+     * Throws ShardNotFound if the proposed 'primaryShard' is found to not exist or be draining.
+     * This check (and the actual) commit, is done under the _kShardMembershipLock to ensure
+     * synchronization with removeShard operations.
+     */
+    DatabaseType _commitCreateDatabase(OperationContext* opCtx,
+                                       const DatabaseName& dbName,
+                                       const ShardId& primaryShard);
+
+    /**
+     * Performs a noop write locally on the current process and waits for all nodes to replicate it.
+     */
+    void _performLocalNoopWriteWithWAllWriteConcern(OperationContext* opCtx, StringData msg);
 
     // The owning service context
     ServiceContext* const _serviceContext;
@@ -953,8 +975,13 @@ private:
     // _kZoneOpLock
 
     /**
-     * Lock that guards changes to the set of shards in the cluster (ie addShard and removeShard
-     * requests).
+     * Lock that is held for the entire duration of an add/remove shard operation so that only one
+     * command can execute at a given time.
+     */
+    Lock::ResourceMutex _kAddRemoveShardLock;
+
+    /**
+     * Lock that is held in exclusive mode during the commit phase of an add/remove shard operation.
      */
     Lock::ResourceMutex _kShardMembershipLock;
 

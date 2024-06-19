@@ -32,7 +32,6 @@
 #include <boost/move/utility_core.hpp>
 #include <boost/optional/optional.hpp>
 #include <functional>
-#include <limits>
 #include <string>
 #include <vector>
 
@@ -40,7 +39,6 @@
 #include "mongo/db/concurrency/cond_var_lock_grant_notification.h"
 #include "mongo/db/concurrency/fast_map_noalloc.h"
 #include "mongo/db/concurrency/flow_control_ticketholder.h"
-#include "mongo/db/concurrency/lock_manager.h"
 #include "mongo/db/concurrency/lock_manager_defs.h"
 #include "mongo/db/concurrency/lock_stats.h"
 #include "mongo/db/database_name.h"
@@ -48,7 +46,6 @@
 #include "mongo/db/service_context.h"
 #include "mongo/platform/atomic_word.h"
 #include "mongo/stdx/thread.h"
-#include "mongo/util/assert_util.h"
 #include "mongo/util/concurrency/admission_context.h"
 #include "mongo/util/concurrency/spin_lock.h"
 #include "mongo/util/concurrency/ticketholder.h"
@@ -57,6 +54,7 @@
 
 namespace mongo {
 
+class LockManager;
 class OperationContext;
 namespace admission {
 class TicketHolderManager;
@@ -100,6 +98,15 @@ public:
 
     std::string getDebugInfo() const;
     void setDebugInfo(std::string info);
+
+    /**
+     * Returns the cumulative lock stats accrued so far. The returned stats are not a snapshot
+     * but a reference to AtomicLockStats, meaning that they can change at any time after they are
+     * returned.
+     */
+    const AtomicLockStats& stats() const {
+        return _stats;
+    }
 
     /**
      * State for reporting the number of active and queued reader and writer clients.
@@ -509,13 +516,6 @@ public:
     void setGlobalLockTakenInMode(LockMode mode);
 
     /**
-     * Returns true if uninterruptible locks were requested for the Locker.
-     */
-    bool uninterruptibleLocksRequested() const {
-        return _uninterruptibleLocksRequested > 0;
-    }
-
-    /**
      * Pending means we are currently trying to get a lock.
      */
     bool hasLockPending() const {
@@ -737,20 +737,6 @@ protected:
     // db.currentOp. Complementary to the per-instance locking statistics.
     AtomicLockStats _stats;
 
-    /**
-     * The number of callers that are guarding from lock interruptions.
-     * When 0, all lock acquisitions are interruptible. When positive, no lock acquisitions are
-     * interruptible or can time out.
-     */
-    int _uninterruptibleLocksRequested = 0;
-
-    /**
-     * The number of callers that are guarding against uninterruptible lock requests. An int,
-     * instead of a boolean, to support multiple simultaneous requests. When > 0, ensures that
-     * _uninterruptibleLocksRequested above is _not_ used.
-     */
-    int _keepInterruptibleRequests = 0;
-
     // If set to true, this opts out of a fatal assertion where operations which are holding open an
     // oplog hole cannot try to acquire subsequent locks.
     bool _shouldAllowLockAcquisitionOnTimestampedUnitOfWork = false;
@@ -799,75 +785,6 @@ protected:
     // If isValid(), the ResourceId of the resource currently waiting for the lock. If not valid,
     // there is no resource currently waiting.
     ResourceId _waitingResource;
-};
-
-/**
- * This class prevents lock acquisitions from being interrupted when it is in scope.
- * The default behavior of acquisitions depends on the type of lock that is being requested.
- * Use this in the unlikely case that waiting for a lock can't be interrupted.
- *
- * Lock acquisitions can still return LOCK_TIMEOUT, just not if the parent operation
- * context is killed first.
- *
- * It is possible that multiple callers are requesting uninterruptible behavior, so the guard
- * increments a counter on the Locker class to indicate how may guards are active.
- */
-class UninterruptibleLockGuard {
-public:
-    /**
-     * Accepts a Locker, and increments the _uninterruptibleLocksRequested. Decrements the
-     * counter when destoyed.
-     */
-    explicit UninterruptibleLockGuard(Locker* locker) : _locker(locker) {
-        invariant(_locker);
-        invariant(_locker->_keepInterruptibleRequests == 0);
-        invariant(_locker->_uninterruptibleLocksRequested >= 0);
-        invariant(_locker->_uninterruptibleLocksRequested < std::numeric_limits<int>::max());
-        _locker->_uninterruptibleLocksRequested += 1;
-    }
-
-    UninterruptibleLockGuard(const UninterruptibleLockGuard& other) = delete;
-    UninterruptibleLockGuard& operator=(const UninterruptibleLockGuard&) = delete;
-
-    ~UninterruptibleLockGuard() {
-        invariant(_locker->_uninterruptibleLocksRequested > 0);
-        _locker->_uninterruptibleLocksRequested -= 1;
-    }
-
-private:
-    Locker* const _locker;
-};
-
-/**
- * This RAII type ensures that there are no uninterruptible lock acquisitions while in scope. If an
- * UninterruptibleLockGuard is held at a higher level, or taken at a lower level, an invariant will
- * occur. This protects against UninterruptibleLockGuard uses on code paths that must be
- * interruptible. Safe to nest InterruptibleLockGuard instances.
- */
-class InterruptibleLockGuard {
-public:
-    /*
-     * Accepts a Locker, and increments the Locker's _keepInterruptibleRequests counter. Decrements
-     * the counter when destroyed.
-     */
-    explicit InterruptibleLockGuard(Locker* locker) : _locker(locker) {
-        invariant(_locker);
-        invariant(_locker->_uninterruptibleLocksRequested == 0);
-        invariant(_locker->_keepInterruptibleRequests >= 0);
-        invariant(_locker->_keepInterruptibleRequests < std::numeric_limits<int>::max());
-        _locker->_keepInterruptibleRequests += 1;
-    }
-
-    InterruptibleLockGuard(const InterruptibleLockGuard& other) = delete;
-    InterruptibleLockGuard& operator=(const InterruptibleLockGuard&) = delete;
-
-    ~InterruptibleLockGuard() {
-        invariant(_locker->_keepInterruptibleRequests > 0);
-        _locker->_keepInterruptibleRequests -= 1;
-    }
-
-private:
-    Locker* const _locker;
 };
 
 /**

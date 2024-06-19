@@ -982,6 +982,9 @@ void BuilderBase<BufferT>::_appendNumberInt(const int num, bool invert) {
 
 template <class BufferT>
 void BuilderBase<BufferT>::_appendNumberDecimal(const Decimal128 dec, bool invert) {
+    uassert(ErrorCodes::UnsupportedFormat,
+            "Index version does not support NumberDecimal",
+            version >= Version::V1);
     bool isNegative = dec.isNegative();
     if (dec.isZero()) {
         uint32_t zeroExp = dec.getBiasedExponent();
@@ -1218,9 +1221,6 @@ void BuilderBase<BufferT>::_appendBsonValue(const BSONElement& elem,
             _appendNumberLong(elem._numberLong(), invert);
             break;
         case NumberDecimal:
-            uassert(ErrorCodes::UnsupportedFormat,
-                    "Index version does not support NumberDecimal",
-                    version >= Version::V1);
             _appendNumberDecimal(elem._numberDecimal(), invert);
             break;
     }
@@ -3046,6 +3046,23 @@ size_t Value::getApproximateSize() const {
     auto size = sizeof(Value);
     size += !_buffer.isShared() ? SharedBuffer::kHolderSize + _buffer.size() : 0;
     return size;
+}
+
+Value Value::makeValue(Version version, StringData ks, StringData rid, StringData typeBits) {
+    const auto bufSize = ks.size() + rid.size() + (typeBits.size() > 0 ? typeBits.size() : 1);
+    BufBuilder buf(bufSize);
+    buf.appendBuf(ks.data(), ks.size());
+    buf.appendBuf(rid.data(), rid.size());
+    if (typeBits.size() == 0) {
+        buf.appendChar(0);
+    } else {
+        buf.appendBuf(typeBits.data(), typeBits.size());
+    }
+
+    invariant(bufSize == static_cast<unsigned long>(buf.len()));
+    return {version,
+            static_cast<int32_t>(ks.size() + rid.size()),
+            SharedBufferFragment(buf.release(), bufSize)};
 }
 
 template class BuilderBase<Builder>;

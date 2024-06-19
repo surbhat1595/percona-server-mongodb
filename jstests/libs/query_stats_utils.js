@@ -245,7 +245,8 @@ export function assertExpectedResults(results,
         latestSeenTimestamp,
         lastExecutionMicros,
         totalExecMicros,
-        firstResponseExecMicros
+        firstResponseExecMicros,
+        workingTimeMillis,
     } = metrics;
 
     // The tests can't predict exact timings, so just assert these three fields have been set (are
@@ -260,6 +261,7 @@ export function assertExpectedResults(results,
     for (const field of distributionFields) {
         assert.neq(totalExecMicros[field], NumberLong(0));
         assert.neq(firstResponseExecMicros[field], NumberLong(0));
+        assert.gte(workingTimeMillis[field], NumberLong(0));
         if (metrics.execCount > 1) {
             // If there are prior executions of the same query shape, we can't be certain if those
             // runs had getMores or not, so we can only check totalExec >= firstResponse.
@@ -350,6 +352,22 @@ function hasValueAtPath(object, dottedPath) {
         object = object[nestedField];
     }
     return true;
+}
+
+/**
+ *  Returns the object's value at the dottedPath.
+ * @param {object} object
+ * @param {string} dottedPath
+ */
+export function getValueAtPath(object, dottedPath) {
+    let nestedFields = dottedPath.split(".");
+    for (const nestedField of nestedFields) {
+        if (!object.hasOwnProperty(nestedField)) {
+            return false
+        }
+        object = object[nestedField];
+    }
+    return object;
 }
 
 /**
@@ -654,7 +672,8 @@ export function exhaustCursorAndGetQueryStats(conn, coll, cmd, key, expectedDocs
     assert.eq(allResults.length, expectedDocs);
 
     const execCountPost = getExecCount(testDB, namespace);
-    assert.eq(execCountPost, execCountPre + 1, "Didn't find query stats for namespace" + namespace);
+    assert.eq(
+        execCountPost, execCountPre + 1, "Didn't find query stats for namespace " + namespace);
 
     const queryStats = getSingleQueryStatsEntryForNs(conn, namespace);
     print("Query Stats: " + tojson(queryStats));
@@ -677,10 +696,14 @@ export function exhaustCursorAndGetQueryStats(conn, coll, cmd, key, expectedDocs
  * the test object (ReplSetTest or ShardingTest). For the standalone case, the test is null.
  */
 export function runForEachDeployment(callbackFn) {
-    const options = {setParameter: {internalQueryStatsRateLimit: -1}};
+    // The options passed to runMongod sometimes get modified. Instead of having a single constant
+    // that we pass around (risking modification), we return the defaults from a function.
+    function options() {
+        return {setParameter: {internalQueryStatsRateLimit: -1}};
+    }
 
     {
-        const conn = MongoRunner.runMongod(options);
+        const conn = MongoRunner.runMongod(options());
 
         callbackFn(conn, null);
 
@@ -688,7 +711,7 @@ export function runForEachDeployment(callbackFn) {
     }
 
     {
-        const rst = new ReplSetTest({nodes: 3, nodeOptions: options});
+        const rst = new ReplSetTest({nodes: 3, nodeOptions: options()});
         rst.startSet();
         rst.initiate();
 
@@ -698,7 +721,7 @@ export function runForEachDeployment(callbackFn) {
     }
 
     {
-        const st = new ShardingTest(Object.assign({shards: 2, other: {mongosOptions: options}}));
+        const st = new ShardingTest(Object.assign({shards: 2, other: {mongosOptions: options()}}));
 
         const testDB = st.s.getDB("test");
         // Enable sharding separate from per-test setup to avoid calling enableSharding repeatedly.
@@ -709,4 +732,54 @@ export function runForEachDeployment(callbackFn) {
 
         st.stop();
     }
+}
+
+/**
+ * Given a query stats entry, and stats that the entry should have, this function checks that the
+ * entry is the result of a change stream request and that the metrics are what are expected.
+ */
+export function checkChangeStreamEntry(
+    {queryStatsEntry, db, collectionName, numExecs, numDocsReturned}) {
+    assert.eq(collectionName, queryStatsEntry.key.queryShape.cmdNs.coll);
+
+    // Confirm entry is a change stream request.
+    let stringifiedPipeline = JSON.stringify(queryStatsEntry.key.queryShape.pipeline, null, 0);
+    assert(stringifiedPipeline.includes("_internalChangeStream"));
+
+    // TODO SERVER-76263 Support reporting 'collectionType' on a sharded cluster.
+    if (!FixtureHelpers.isMongos(db)) {
+        assert.eq("changeStream", queryStatsEntry.key.collectionType);
+    }
+
+    // Checking that metrics match expected metrics.
+    assert.eq(queryStatsEntry.metrics.execCount, numExecs);
+    assert.eq(queryStatsEntry.metrics.docsReturned.sum, numDocsReturned);
+
+    // FirstResponseExecMicros and TotalExecMicros match since each getMore is recorded as a new
+    // first response.
+    assert.eq(queryStatsEntry.metrics.totalExecMicros.sum,
+              queryStatsEntry.metrics.firstResponseExecMicros.sum);
+    assert.eq(queryStatsEntry.metrics.totalExecMicros.max,
+              queryStatsEntry.metrics.firstResponseExecMicros.max);
+    assert.eq(queryStatsEntry.metrics.totalExecMicros.min,
+              queryStatsEntry.metrics.firstResponseExecMicros.min);
+}
+
+/**
+ * Given a change stream cursor, this function will return the number of getMores executed until the
+ * change stream is updated. This only applies when the cursor is waiting for one new document (or
+ * set the batchSize of the input cursor to 1) so each hasNext() call will correspond to an internal
+ * getMore.
+ */
+export function getNumberOfGetMoresUntilNextDocForChangeStream(cursor) {
+    let numGetMores = 0;
+    assert.soon(() => {
+        numGetMores++;
+        return cursor.hasNext();
+    });
+
+    // Get the document that is on the cursor to reset the cursor to a state where calling hasNext()
+    // corresponds to a getMore.
+    cursor.next();
+    return numGetMores;
 }

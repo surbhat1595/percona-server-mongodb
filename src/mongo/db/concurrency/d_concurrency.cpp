@@ -61,6 +61,12 @@ bool Lock::ResourceMutex::isAtLeastReadLocked(Locker* locker) {
     return locker->isLockHeldForMode(_rid, MODE_IS);
 }
 
+Lock::ResourceLock::ResourceLock(ResourceLock&& other)
+    : _opCtx(other._opCtx), _rid(std::move(other._rid)), _result(other._result) {
+    other._opCtx = nullptr;
+    other._result = LOCK_INVALID;
+}
+
 void Lock::ResourceLock::_lock(LockMode mode, Date_t deadline) {
     invariant(_result == LOCK_INVALID);
     shard_role_details::getLocker(_opCtx)->lock(_opCtx, _rid, mode, deadline);
@@ -78,7 +84,7 @@ void Lock::ExclusiveLock::lock() {
     // The contract of the condition_variable-like utilities is that that the lock is returned in
     // the locked state so the acquisition below must be guaranteed to always succeed.
     invariant(_opCtx);
-    UninterruptibleLockGuard ulg(shard_role_details::getLocker(_opCtx));  // NOLINT.
+    UninterruptibleLockGuard ulg(_opCtx);  // NOLINT.
     _lock(MODE_X);
 }
 

@@ -93,6 +93,26 @@ private:
 
 std::mt19937_64 seedGen(1337);
 
+std::vector<BSONObj> generateObjects(int numObjects, int numElements) {
+    std::mt19937 gen(seedGen());
+    std::normal_distribution<> d(100, 10);
+
+    std::vector<BSONObj> objs;
+
+    for (int i = 0; i < numObjects; ++i) {
+        BSONObjBuilder builderOuter;
+        BSONObjBuilder builderInner;
+        for (int i = 0; i < numElements; ++i) {
+            int32_t value = std::lround(d(gen));
+            builderInner.append("x" + std::to_string(i), value);
+        }
+        builderOuter.appendElements(builderInner.obj());
+        objs.push_back(builderOuter.obj());
+    }
+
+    return objs;
+}
+
 std::vector<BSONObj> generateIntegers(int num, int skipPercentage) {
     std::mt19937 gen(seedGen());
     std::normal_distribution<> d(100, 10);
@@ -180,6 +200,80 @@ std::vector<BSONObj> generateObjectIds(int num, int skipPercentage) {
     return timestamps;
 }
 
+std::vector<BSONObj> generateBinary(
+    int num, int skipPercentage, int repeatPercentage, int repeatSizePercentage, bool toString) {
+    std::mt19937 gen(seedGen());
+    std::uniform_int_distribution percentDist(1, 100);
+    std::uniform_int_distribution byteDist(0, 255);
+    std::uniform_int_distribution strDist(1, 255);
+    std::normal_distribution<> sizeDist(10, 3);
+
+    std::vector<BSONObj> binaries;
+
+    BSONObj last;
+    size_t lastSize = 0;
+    for (int i = 0; i < num; ++i) {
+        if (percentDist(gen) <= skipPercentage) {
+            binaries.push_back(BSONObj());
+        } else if (percentDist(gen) <= repeatPercentage) {
+            binaries.push_back(last);
+        } else {
+            BSONObjBuilder builder;
+            // There is no meaning in repeating size > 16 since it exceeds delta limit
+            int32_t size = percentDist(gen) <= repeatSizePercentage && lastSize <= 16
+                ? lastSize
+                : std::lround(sizeDist(gen));
+            if (size < 0)
+                size = 0;
+            if (size > 255)
+                size = 255;
+            char buf[256];
+            if (toString) {
+                for (int i = 0; i < size; ++i) {
+                    buf[i] = std::lround(strDist(gen));
+                }
+                buf[size] = 0;
+                builder.append(""_sd, buf, size + 1);  // string requires room for null character
+            } else {
+                for (int i = 0; i < size; ++i) {
+                    buf[i] = std::lround(byteDist(gen));
+                }
+                builder.appendBinData(""_sd, size, BinDataType::BinDataGeneral, buf);
+            }
+
+            last = builder.obj();
+            lastSize = size;
+            binaries.push_back(last);
+        }
+    }
+
+    return binaries;
+}
+
+std::vector<BSONObj> generateUUIDs(int num, int skipPercentage, int size = 16) {
+    std::mt19937 gen(seedGen());
+    std::uniform_int_distribution byteDist(0, 255);
+    std::uniform_int_distribution skip(1, 100);
+
+    std::vector<BSONObj> uuids;
+
+    for (int i = 0; i < num; ++i) {
+        if (skip(gen) <= skipPercentage) {
+            uuids.push_back(BSONObj());
+        } else {
+            BSONObjBuilder builder;
+            char buf[256];
+            for (int i = 0; i < size; ++i) {
+                buf[i] = std::lround(byteDist(gen));
+            }
+            builder.appendBinData(""_sd, size, BinDataType::newUUID, buf);
+            uuids.push_back(builder.obj());
+        }
+    }
+
+    return uuids;
+}
+
 BSONObj buildCompressed(const std::vector<BSONObj>& elems) {
     BSONColumnBuilder col;
     for (auto&& elem : elems) {
@@ -195,19 +289,19 @@ BSONObj buildCompressed(const std::vector<BSONObj>& elems) {
     return objBuilder.obj();
 }
 
-BSONObj getCompressedFTDC() {
-// The large literal emits this on Visual Studio: Fatal error C1091: compiler limit: string exceeds
-// 65535 bytes in length
-#if !defined(_MSC_VER)
-    StringData compressedBase64Encoded = {};
-
-    std::string compressed = base64::decode(compressedBase64Encoded);
-    BSONObjBuilder builder;
-    builder.appendBinData("data"_sd, compressed.size(), BinDataType::Column, compressed.data());
-    return builder.obj();
-#else
-    return BSONObj();
-#endif
+BSONObj buildCompressedWithObjs(const std::vector<BSONObj>& elems) {
+    BSONColumnBuilder col;
+    for (auto&& elem : elems) {
+        if (!elem.isEmpty()) {
+            col.append(elem);
+        } else {
+            col.skip();
+        }
+    }
+    auto binData = col.finalize();
+    BSONObjBuilder objBuilder;
+    objBuilder.append(""_sd, binData);
+    return objBuilder.obj();
 }
 
 void benchmarkDecompression(benchmark::State& state,
@@ -368,6 +462,22 @@ void benchmarkReopenNaive(benchmark::State& state,
     }
 }
 
+void BM_decompressObjects(benchmark::State& state, int numElements, DecompressMode mode) {
+    BSONObj compressed = buildCompressedWithObjs(generateObjects(10000, numElements));
+    switch (mode) {
+        case kBlockBSON:
+            benchmarkBlockBasedDecompression(state, compressed.firstElement(), sizeof(int32_t));
+            break;
+        case kBlockSBE:
+            benchmarkBlockBasedDecompression_SBE(state, compressed.firstElement(), sizeof(int32_t));
+            break;
+        case kIterator:
+        default:
+            benchmarkDecompression(state, compressed.firstElement(), sizeof(int32_t));
+            break;
+    }
+}
+
 void BM_decompressIntegers(benchmark::State& state, int skipPercentage, DecompressMode mode) {
     BSONObj compressed = buildCompressed(generateIntegers(10000, skipPercentage));
     switch (mode) {
@@ -438,8 +548,50 @@ void BM_decompressObjectIds(benchmark::State& state, int skipPercentage, Decompr
     }
 }
 
-void BM_decompressFTDC(benchmark::State& state, DecompressMode mode) {
-    BSONObj compressed = getCompressedFTDC();
+void BM_decompressBinData(benchmark::State& state,
+                          int skipPercentage,
+                          int repeatPercentage,
+                          int repeatSizePercentage,
+                          DecompressMode mode) {
+    BSONObj compressed = buildCompressed(
+        generateBinary(10000, skipPercentage, repeatPercentage, repeatSizePercentage, false));
+    switch (mode) {
+        case kBlockBSON:
+            benchmarkBlockBasedDecompression(state, compressed.firstElement(), 0);
+            break;
+        case kBlockSBE:
+            benchmarkBlockBasedDecompression_SBE(state, compressed.firstElement(), 0);
+            break;
+        case kIterator:
+        default:
+            benchmarkDecompression(state, compressed.firstElement(), 0);
+            break;
+    }
+}
+
+void BM_decompressStrings(benchmark::State& state,
+                          int skipPercentage,
+                          int repeatPercentage,
+                          int repeatSizePercentage,
+                          DecompressMode mode) {
+    BSONObj compressed = buildCompressed(
+        generateBinary(10000, skipPercentage, repeatPercentage, repeatSizePercentage, true));
+    switch (mode) {
+        case kBlockBSON:
+            benchmarkBlockBasedDecompression(state, compressed.firstElement(), 0);
+            break;
+        case kBlockSBE:
+            benchmarkBlockBasedDecompression_SBE(state, compressed.firstElement(), 0);
+            break;
+        case kIterator:
+        default:
+            benchmarkDecompression(state, compressed.firstElement(), 0);
+            break;
+    }
+}
+
+void BM_decompressUUIDs(benchmark::State& state, int skipPercentage, DecompressMode mode) {
+    BSONObj compressed = buildCompressed(generateUUIDs(10000, skipPercentage, false));
     switch (mode) {
         case kBlockBSON:
             benchmarkBlockBasedDecompression(state, compressed.firstElement(), 0);
@@ -477,6 +629,29 @@ void BM_compressObjectIds(benchmark::State& state, int skipPercentage) {
     benchmarkCompression(state, compressed.firstElement(), sizeof(OID));
 }
 
+void BM_compressBinData(benchmark::State& state,
+                        int skipPercentage,
+                        int repeatPercentage,
+                        int repeatSizePercentage) {
+    BSONObj compressed = buildCompressed(
+        generateBinary(10000, skipPercentage, repeatPercentage, repeatSizePercentage, false));
+    benchmarkCompression(state, compressed.firstElement(), 0);
+}
+
+void BM_compressStrings(benchmark::State& state,
+                        int skipPercentage,
+                        int repeatPercentage,
+                        int repeatSizePercentage) {
+    BSONObj compressed = buildCompressed(
+        generateBinary(10000, skipPercentage, repeatPercentage, repeatSizePercentage, true));
+    benchmarkCompression(state, compressed.firstElement(), 0);
+}
+
+void BM_compressUUIDs(benchmark::State& state, int skipPercentage) {
+    BSONObj compressed = buildCompressed(generateUUIDs(10000, skipPercentage, true));
+    benchmarkCompression(state, compressed.firstElement(), 0);
+}
+
 void BM_reopenIntegers(benchmark::State& state, int skipPercentage, int num) {
     BSONObj compressed = buildCompressed(generateIntegers(num, skipPercentage));
     benchmarkReopen(state, compressed.firstElement(), sizeof(int32_t));
@@ -487,16 +662,14 @@ void BM_reopenNaiveIntegers(benchmark::State& state, int skipPercentage, int num
     benchmarkReopenNaive(state, compressed.firstElement(), sizeof(int32_t));
 }
 
-void BM_compressFTDC(benchmark::State& state) {
-    BSONObj compressed = getCompressedFTDC();
-    benchmarkCompression(state, compressed.firstElement(), 0);
-}
-
 // Block-based API benchmarks using the BSONElementMaterializer. We'll run a subset of the
 // benchmarks on the new API.
 BENCHMARK_CAPTURE(BM_decompressIntegers, Block API BSON Skip = 0 %, 0, kBlockBSON);
 BENCHMARK_CAPTURE(BM_decompressIntegers, Block API BSON Skip = 50 %, 50, kBlockBSON);
 BENCHMARK_CAPTURE(BM_decompressIntegers, Block API BSON Skip = 99 %, 99, kBlockBSON);
+
+BENCHMARK_CAPTURE(BM_decompressObjects, Block API BSON Objects Small, 1, kBlockBSON);
+BENCHMARK_CAPTURE(BM_decompressObjects, Block API BSON Objects Large, 10, kBlockBSON);
 
 BENCHMARK_CAPTURE(BM_decompressDoubles, Block API BSON Decimals = 0 / Skip = 0 %, 0, 0, kBlockBSON);
 BENCHMARK_CAPTURE(BM_decompressDoubles, Block API BSON Decimals = 1 / Skip = 0 %, 1, 0, kBlockBSON);
@@ -538,11 +711,31 @@ BENCHMARK_CAPTURE(BM_decompressTimestamps,
 BENCHMARK_CAPTURE(BM_decompressObjectIds, Block API BSON Skip = 0 %, 0, kBlockBSON);
 BENCHMARK_CAPTURE(BM_decompressObjectIds, Block API BSON Skip = 90 %, 90, kBlockBSON);
 
+BENCHMARK_CAPTURE(BM_decompressStrings,
+                  Block API BSON Skip = 0 % / Repeat = 0 %
+                  , 0, 0, 90, kBlockBSON);
+BENCHMARK_CAPTURE(BM_decompressStrings,
+                  Block API BSON Skip = 90 % / Repeat = 0 %
+                  , 90, 0, 90, kBlockBSON);
+BENCHMARK_CAPTURE(BM_decompressStrings,
+                  Block API BSON Skip = 0 % / Repeat = 90 %
+                  , 0, 90, 90, kBlockBSON);
+BENCHMARK_CAPTURE(BM_decompressStrings,
+                  Block API BSON Skip = 90 % / Repeat = 90 %
+                  , 90, 90, 90, kBlockBSON);
+
+BENCHMARK_CAPTURE(BM_decompressUUIDs, Block API BSON Skip = 0 %, 0, kBlockBSON);
+BENCHMARK_CAPTURE(BM_decompressUUIDs, Block API BSON Skip = 90 %, 90, kBlockBSON);
+
+
 // Block-based API benchmarks using the SBEMaterializer. We'll run a subset of the benchmarks on the
 // new API.
 BENCHMARK_CAPTURE(BM_decompressIntegers, Block API SBE Skip = 0 %, 0, kBlockSBE);
 BENCHMARK_CAPTURE(BM_decompressIntegers, Block API SBE Skip = 50 %, 50, kBlockSBE);
 BENCHMARK_CAPTURE(BM_decompressIntegers, Block API SBE Skip = 99 %, 99, kBlockSBE);
+
+BENCHMARK_CAPTURE(BM_decompressObjects, Block API SBE Objects Small, 1, kBlockSBE);
+BENCHMARK_CAPTURE(BM_decompressObjects, Block API SBE Objects Large, 10, kBlockSBE);
 
 BENCHMARK_CAPTURE(BM_decompressDoubles, Block API SBE Decimals = 0 / Skip = 0 %, 0, 0, kBlockSBE);
 BENCHMARK_CAPTURE(BM_decompressDoubles, Block API SBE Decimals = 1 / Skip = 0 %, 1, 0, kBlockSBE);
@@ -572,12 +765,31 @@ BENCHMARK_CAPTURE(BM_decompressTimestamps,
 BENCHMARK_CAPTURE(BM_decompressObjectIds, Block API SBE Skip = 0 %, 0, kBlockSBE);
 BENCHMARK_CAPTURE(BM_decompressObjectIds, Block API SBE Skip = 90 %, 90, kBlockSBE);
 
+BENCHMARK_CAPTURE(BM_decompressStrings,
+                  Block API SBE Skip = 0 % / Repeat = 0 %
+                  , 0, 0, 90, kBlockSBE);
+BENCHMARK_CAPTURE(BM_decompressStrings,
+                  Block API SBE Skip = 90 % / Repeat = 0 %
+                  , 90, 0, 90, kBlockSBE);
+BENCHMARK_CAPTURE(BM_decompressStrings,
+                  Block API SBE Skip = 0 % / Repeat = 90 %
+                  , 0, 90, 90, kBlockSBE);
+BENCHMARK_CAPTURE(BM_decompressStrings,
+                  Block API SBE Skip = 90 % / Repeat = 90 %
+                  , 90, 90, 90, kBlockSBE);
+
+BENCHMARK_CAPTURE(BM_decompressUUIDs, Block API SBE Skip = 0 %, 0, kBlockSBE);
+BENCHMARK_CAPTURE(BM_decompressUUIDs, Block API SBE Skip = 90 %, 90, kBlockSBE);
+
 // Iterator implementation benchmarks.
 BENCHMARK_CAPTURE(BM_decompressIntegers, Iterator API Skip = 0 %, 0, kIterator);
 BENCHMARK_CAPTURE(BM_decompressIntegers, Iterator API Skip = 10 %, 10, kIterator);
 BENCHMARK_CAPTURE(BM_decompressIntegers, Iterator API Skip = 50 %, 50, kIterator);
 BENCHMARK_CAPTURE(BM_decompressIntegers, Iterator API Skip = 90 %, 90, kIterator);
 BENCHMARK_CAPTURE(BM_decompressIntegers, Iterator API Skip = 99 %, 99, kIterator);
+
+BENCHMARK_CAPTURE(BM_decompressObjects, Iterator API Objects Small, 1, kIterator);
+BENCHMARK_CAPTURE(BM_decompressObjects, Iterator API Objects Large, 10, kIterator);
 
 BENCHMARK_CAPTURE(BM_decompressDoubles, Iterator API Decimals = 0 / Skip = 0 %, 0, 0, kIterator);
 BENCHMARK_CAPTURE(BM_decompressDoubles, Iterator API Decimals = 1 / Skip = 0 %, 1, 0, kIterator);
@@ -617,14 +829,22 @@ BENCHMARK_CAPTURE(BM_decompressObjectIds, Iterator API Skip = 0 %, 0, kIterator)
 BENCHMARK_CAPTURE(BM_decompressObjectIds, Iterator API Skip = 10 %, 10, kIterator);
 BENCHMARK_CAPTURE(BM_decompressObjectIds, Iterator API Skip = 90 %, 90, kIterator);
 
-// The large literal emits this on Visual Studio: Fatal error C1091: compiler limit: string exceeds
-// 65535 bytes in length
-#if !defined(_MSC_VER)
-// TODO SERVER-84389 enable these benchmarks.
-// BENCHMARK_CAPTURE(BM_decompressFTDC, Iterator API, kIterator);
-// BENCHMARK_CAPTURE(BM_decompressFTDC, Block API BSON, kBlockBSON);
-// BENCHMARK_CAPTURE(BM_decompressFTDC, Block API SBE, kBlockSBE);
-#endif
+BENCHMARK_CAPTURE(BM_decompressStrings,
+                  Iterator API Skip = 0 % / Repeat = 0 %
+                  , 0, 0, 90, kIterator);
+BENCHMARK_CAPTURE(BM_decompressStrings,
+                  Iterator API Skip = 90 % / Repeat = 0 %
+                  , 90, 0, 90, kIterator);
+BENCHMARK_CAPTURE(BM_decompressStrings,
+                  Iterator API Skip = 0 % / Repeat = 90 %
+                  , 0, 90, 90, kIterator);
+BENCHMARK_CAPTURE(BM_decompressStrings,
+                  Iterator API Skip = 90 % / Repeat = 90 %
+                  , 90, 90, 90, kIterator);
+
+BENCHMARK_CAPTURE(BM_decompressUUIDs, Iterator API Skip = 0 %, 0, kIterator);
+BENCHMARK_CAPTURE(BM_decompressUUIDs, Iterator API Skip = 10 %, 10, kIterator);
+BENCHMARK_CAPTURE(BM_decompressUUIDs, Iterator API Skip = 90 %, 90, kIterator);
 
 BENCHMARK_CAPTURE(BM_compressIntegers, Skip = 0 %, 0);
 BENCHMARK_CAPTURE(BM_compressIntegers, Skip = 10 %, 10);
@@ -658,6 +878,20 @@ BENCHMARK_CAPTURE(BM_compressObjectIds, Skip = 0 %, 0);
 BENCHMARK_CAPTURE(BM_compressObjectIds, Skip = 10 %, 10);
 BENCHMARK_CAPTURE(BM_compressObjectIds, Skip = 90 %, 90);
 
+BENCHMARK_CAPTURE(BM_compressStrings, Skip = 0 % / Repeat = 0 %, 0, 0, 90);
+BENCHMARK_CAPTURE(BM_compressStrings, Skip = 10 % / Repeat = 0 %, 10, 0, 90);
+BENCHMARK_CAPTURE(BM_compressStrings, Skip = 90 % / Repeat = 0 %, 90, 0, 90);
+BENCHMARK_CAPTURE(BM_compressStrings, Skip = 0 % / Repeat = 10 %, 0, 10, 90);
+BENCHMARK_CAPTURE(BM_compressStrings, Skip = 10 % / Repeat = 10 %, 10, 10, 90);
+BENCHMARK_CAPTURE(BM_compressStrings, Skip = 90 % / Repeat = 10 %, 90, 10, 90);
+BENCHMARK_CAPTURE(BM_compressStrings, Skip = 0 % / Repeat = 90 %, 0, 90, 90);
+BENCHMARK_CAPTURE(BM_compressStrings, Skip = 10 % / Repeat = 90 %, 10, 90, 90);
+BENCHMARK_CAPTURE(BM_compressStrings, Skip = 90 % / Repeat = 90 %, 90, 90, 90);
+
+BENCHMARK_CAPTURE(BM_compressUUIDs, Skip = 0 %, 0);
+BENCHMARK_CAPTURE(BM_compressUUIDs, Skip = 10 %, 10);
+BENCHMARK_CAPTURE(BM_compressUUIDs, Skip = 90 %, 90);
+
 BENCHMARK_CAPTURE(BM_reopenIntegers, Skip = 0 % / Num = 10, 0, 10);
 BENCHMARK_CAPTURE(BM_reopenIntegers, Skip = 50 % / Num = 10, 50, 10);
 BENCHMARK_CAPTURE(BM_reopenIntegers, Skip = 99 % / Num = 10, 99, 10);
@@ -689,13 +923,6 @@ BENCHMARK_CAPTURE(BM_reopenNaiveIntegers, Skip = 99 % / Num = 1000, 99, 1000);
 BENCHMARK_CAPTURE(BM_reopenNaiveIntegers, Skip = 0 % / Num = 10000, 0, 10000);
 BENCHMARK_CAPTURE(BM_reopenNaiveIntegers, Skip = 50 % / Num = 10000, 50, 10000);
 BENCHMARK_CAPTURE(BM_reopenNaiveIntegers, Skip = 99 % / Num = 10000, 99, 10000);
-
-// The large literal emits this on Visual Studio: Fatal error C1091: compiler limit: string exceeds
-// 65535 bytes in length
-#if !defined(_MSC_VER)
-// TODO SERVER-84389 enable these benchmarks.
-// BENCHMARK(BM_compressFTDC);
-#endif
 
 }  // namespace
 }  // namespace mongo

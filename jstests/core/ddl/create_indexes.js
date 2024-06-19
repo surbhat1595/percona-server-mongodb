@@ -1,7 +1,8 @@
 /**
  * @tags: [
  *   assumes_superuser_permissions,
- *   # TODO (SERVER-82067) re-enable on upgrade/downgrade
+ *   # TODO SERVER-88069: this test can be run in upgrade downgrade once
+ *   # createdCollectionAutomatically is removed.
  *   cannot_run_during_upgrade_downgrade,
  *   # simulate_atlas_proxy.js can't simulate req on config.transaction as tested
  *   simulate_atlas_proxy_incompatible,
@@ -11,7 +12,6 @@
 import {FeatureFlagUtil} from "jstests/libs/feature_flag_util.js";
 import {FixtureHelpers} from "jstests/libs/fixture_helpers.js";
 
-const kUnknownIDLFieldError = 40415;
 const runningOnMongos = FixtureHelpers.isMongos(db);
 
 const extractResult = function(obj) {
@@ -43,8 +43,8 @@ const extractResult = function(obj) {
     return result;
 };
 
+// TODO SERVER-88069: remove check once createdCollectionAutomatically is removed.
 const checkImplicitCreate = function(admin, createIndexResult) {
-    // TODO SERVER-82067 remove or fix this field for track unsharded
     const isMultiversion = jsTest.options().shardMixedBinVersions ||
         jsTest.options().useRandomBinVersionsWithinReplicaSet;
     if (!isMultiversion &&
@@ -167,7 +167,7 @@ assert.commandWorked(res, 'v1 index creation should succeed');
 
 // Test that index creation fails with an invalid top-level field.
 res = t.runCommand('createIndexes', {indexes: [{key: {e: 1}, name: 'e_1'}], 'invalidField': 1});
-assert.commandFailedWithCode(res, kUnknownIDLFieldError);
+assert.commandFailedWithCode(res, ErrorCodes.IDLUnknownField);
 
 // Test that index creation fails with an invalid field in the index spec for index version V2.
 res = t.runCommand('createIndexes',

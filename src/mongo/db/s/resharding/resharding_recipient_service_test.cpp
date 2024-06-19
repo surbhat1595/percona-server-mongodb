@@ -609,6 +609,55 @@ TEST_F(ReshardingRecipientServiceTest, StepDownStepUpEachTransition) {
     }
 }
 
+TEST_F(ReshardingRecipientServiceTest, ReportForCurrentOpAfterCompletion) {
+    const auto recipientState = RecipientStateEnum::kCreatingCollection;
+
+    PauseDuringStateTransitions stateTransitionsGuard{controller(), recipientState};
+    auto doc = makeStateDocument(false /* isAlsoDonor */);
+    auto instanceId =
+        BSON(ReshardingRecipientDocument::kReshardingUUIDFieldName << doc.getReshardingUUID());
+    auto opCtx = makeOperationContext();
+
+    auto recipient = [&] {
+        RecipientStateMachine::insertStateDocument(opCtx.get(), doc);
+        return RecipientStateMachine::getOrCreate(opCtx.get(), _service, doc.toBSON());
+    }();
+
+    notifyToStartCloning(opCtx.get(), *recipient, doc);
+
+    // Step down before the transition to state can complete.
+    stateTransitionsGuard.wait(recipientState);
+    stepDown();
+    stateTransitionsGuard.unset(recipientState);
+
+    // At this point, the resharding metrics will have been unregistered from the cumulative metrics
+    ASSERT_EQ(recipient->getCompletionFuture().getNoThrow(), ErrorCodes::CallbackCanceled);
+
+    // Now call step up. The old recipient object has not yet been destroyed because we still hold
+    // a shared pointer to it ('recipient') - this can happen in production after a failover if a
+    // state machine is slow to clean up.
+    stepUp(opCtx.get());
+
+    // Assert that the old recipient object will return a currentOp report, because the resharding
+    // metrics still exist on the coordinator object itelf.
+    ASSERT(
+        recipient->reportForCurrentOp(MongoProcessInterface::CurrentOpConnectionsMode::kExcludeIdle,
+                                      MongoProcessInterface::CurrentOpSessionsMode::kIncludeIdle));
+
+    // Ensure the new recipient started up successfully (and thus, registered new resharding
+    // metrics), despite the "zombie" state machine still existing.
+    auto [maybeRecipient, isPausedOrShutdown] =
+        RecipientStateMachine::lookup(opCtx.get(), _service, instanceId);
+    ASSERT_TRUE(maybeRecipient);
+    ASSERT_FALSE(isPausedOrShutdown);
+    auto newRecipient = *maybeRecipient;
+    ASSERT_NE(recipient, newRecipient);
+
+    // No need to finish the resharding op, so we just cancel the op.
+    newRecipient->abort(false);
+    ASSERT_OK(newRecipient->getCompletionFuture().getNoThrow());
+}
+
 TEST_F(ReshardingRecipientServiceTest, OpCtxKilledWhileRestoringMetrics) {
     for (bool isAlsoDonor : {false, true}) {
         LOGV2(5992701,
@@ -1116,6 +1165,7 @@ TEST_F(ReshardingRecipientServiceTest, RestoreMetricsAfterStepUpWithMissingProgr
 }
 
 TEST_F(ReshardingRecipientServiceTest, AbortAfterStepUpWithAbortReasonFromCoordinator) {
+    repl::primaryOnlyServiceTestStepUpWaitForRebuildComplete.setMode(FailPoint::alwaysOn);
     const auto abortErrMsg = "Recieved abort from the resharding coordinator";
 
     for (bool isAlsoDonor : {false, true}) {
@@ -1160,7 +1210,49 @@ TEST_F(ReshardingRecipientServiceTest, AbortAfterStepUpWithAbortReasonFromCoordi
         ASSERT_EQ(recipient->getCompletionFuture().getNoThrow(), ErrorCodes::CallbackCanceled);
         recipient.reset();
 
+        stepUp(opCtx.get());
+        removeRecipientDocFailpoint->waitForTimesEntered(timesEnteredFailPoint + 2);
+
+        auto [maybeRecipient, isPausedOrShutdown] =
+            RecipientStateMachine::lookup(opCtx.get(), _service, instanceId);
+        ASSERT_TRUE(maybeRecipient);
+        ASSERT_FALSE(isPausedOrShutdown);
+        recipient = *maybeRecipient;
+
         removeRecipientDocFailpoint->setMode(FailPoint::off);
+        ASSERT_OK(recipient->getCompletionFuture().getNoThrow());
+        checkStateDocumentRemoved(opCtx.get());
+    }
+}
+
+TEST_F(ReshardingRecipientServiceTest, FailoverDuringErrorState) {
+    for (bool isAlsoDonor : {false, true}) {
+        LOGV2(8916100,
+              "Running case",
+              "test"_attr = _agent.getTestName(),
+              "isAlsoDonor"_attr = isAlsoDonor);
+
+        std::string errMsg("Simulating an unrecoverable error for testing");
+        FailPointEnableBlock failpoint("reshardingRecipientFailsAfterTransitionToCloning",
+                                       BSON("errmsg" << errMsg));
+
+        auto doc = makeStateDocument(isAlsoDonor);
+        auto instanceId =
+            BSON(ReshardingRecipientDocument::kReshardingUUIDFieldName << doc.getReshardingUUID());
+
+        auto opCtx = makeOperationContext();
+        RecipientStateMachine::insertStateDocument(opCtx.get(), doc);
+        auto recipient = RecipientStateMachine::getOrCreate(opCtx.get(), _service, doc.toBSON());
+
+        notifyToStartCloning(opCtx.get(), *recipient, doc);
+
+        auto localTransitionToErrorFuture = recipient->awaitInStrictConsistencyOrError();
+        ASSERT_OK(localTransitionToErrorFuture.getNoThrow());
+
+        stepDown();
+        ASSERT_EQ(recipient->getCompletionFuture().getNoThrow(), ErrorCodes::CallbackCanceled);
+        recipient.reset();
+
         stepUp(opCtx.get());
 
         auto [maybeRecipient, isPausedOrShutdown] =
@@ -1169,8 +1261,16 @@ TEST_F(ReshardingRecipientServiceTest, AbortAfterStepUpWithAbortReasonFromCoordi
         ASSERT_FALSE(isPausedOrShutdown);
         recipient = *maybeRecipient;
 
+        {
+            auto persistedRecipientDocument =
+                getPersistedRecipientDocument(opCtx.get(), doc.getReshardingUUID());
+            auto state = persistedRecipientDocument.getMutableState().getState();
+            ASSERT_EQ(state, RecipientStateEnum::kError);
+            ASSERT(persistedRecipientDocument.getMutableState().getAbortReason());
+        }
+
+        recipient->abort(false);
         ASSERT_OK(recipient->getCompletionFuture().getNoThrow());
-        checkStateDocumentRemoved(opCtx.get());
     }
 }
 

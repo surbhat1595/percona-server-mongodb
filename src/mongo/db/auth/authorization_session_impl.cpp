@@ -34,7 +34,6 @@
 #include <boost/none.hpp>
 #include <boost/optional.hpp>
 #include <cstddef>
-#include <mutex>
 #include <string>
 #include <utility>
 #include <vector>
@@ -45,7 +44,6 @@
 #include "mongo/base/error_codes.h"
 #include "mongo/base/init.h"  // IWYU pragma: keep
 #include "mongo/base/initializer.h"
-#include "mongo/base/shim.h"
 #include "mongo/base/status.h"
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobj.h"
@@ -64,7 +62,6 @@
 #include "mongo/db/auth/privilege.h"
 #include "mongo/db/auth/resource_pattern_search_list.h"
 #include "mongo/db/auth/validated_tenancy_scope.h"
-#include "mongo/db/bson/dotted_path_support.h"
 #include "mongo/db/client.h"
 #include "mongo/db/list_collections_gen.h"
 #include "mongo/db/namespace_string.h"
@@ -75,7 +72,6 @@
 #include "mongo/idl/idl_parser.h"
 #include "mongo/logv2/log.h"
 #include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
 #include "mongo/logv2/redaction.h"
 #include "mongo/platform/compiler.h"
 #include "mongo/stdx/unordered_map.h"
@@ -89,10 +85,8 @@
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kAccessControl
 
-
 namespace mongo {
 
-namespace dps = ::mongo::dotted_path_support;
 using std::vector;
 namespace {
 
@@ -172,10 +166,7 @@ MONGO_FAIL_POINT_DEFINE(allowMultipleUsersWithApiStrict);
 
 AuthorizationSessionImpl::AuthorizationSessionImpl(
     std::unique_ptr<AuthzSessionExternalState> externalState, InstallMockForTestingOrAuthImpl)
-    : _externalState(std::move(externalState)),
-      _contract(TestingProctor::instance().isEnabled()),
-      _mayBypassWriteBlockingMode(false),
-      _mayUseTenant(false) {}
+    : _externalState(std::move(externalState)), _contract(TestingProctor::instance().isEnabled()) {}
 
 AuthorizationSessionImpl::~AuthorizationSessionImpl() {
     invariant(_authenticatedUser == boost::none,
@@ -839,6 +830,34 @@ bool AuthorizationSessionImpl::isAuthorizedForAnyActionOnResource(const Resource
     });
 }
 
+namespace {
+// ActionTypes usable with the isAuthorizedForClusterAction() "quick" method.
+// Checks on non-root tenants, or for unauthenticated connections will be handled
+// by the isAuthorizedForPrivileges() fallback.
+const ActionSet kClusterActionsQuickList({
+    ActionType::advanceClusterTime,
+    ActionType::bypassDefaultMaxTimeMS,
+    ActionType::bypassWriteBlockingMode,
+    ActionType::useTenant,
+});
+}  // namespace
+
+bool AuthorizationSessionImpl::isAuthorizedForClusterActions(
+    const ActionSet& actionSet, const boost::optional<TenantId>& tenantId) {
+
+    if (_externalState->shouldIgnoreAuthChecks()) {
+        return true;
+    }
+
+    if (tenantId || !kClusterActionsQuickList.isSupersetOf(actionSet) || !isAuthenticated()) {
+        dassert(kClusterActionsQuickList.isSupersetOf(actionSet));
+        // Fallback on slower method for multitenancy, non-allowlisted actions, or unauthenticated.
+        return isAuthorizedForPrivilege(
+            Privilege(ResourcePattern::forClusterResource(tenantId), actionSet));
+    }
+
+    return _nonTenantClusterActions.isSupersetOf(actionSet);
+}
 
 bool AuthorizationSessionImpl::_isAuthorizedForPrivilege(const Privilege& privilege) {
     _contract.addPrivilege(privilege);
@@ -865,7 +884,8 @@ bool AuthorizationSessionImpl::_isAuthorizedForPrivilege(const Privilege& privil
 
     const auto& user = _authenticatedUser.value();
     // Safeguard that cross-tenant privileges are only granted when users have cluster-useTenant.
-    if (!MONGO_unlikely(_mayUseTenant) && user->getName().getTenant() != rp.tenantId()) {
+    if (MONGO_unlikely(!_nonTenantClusterActions.contains(ActionType::useTenant) &&
+                       (user->getName().getTenant() != rp.tenantId()))) {
         return unmetRequirements.empty();
     }
     return std::any_of(search.cbegin(), search.cend(), [&](const auto& pattern) {
@@ -876,7 +896,7 @@ bool AuthorizationSessionImpl::_isAuthorizedForPrivilege(const Privilege& privil
 
 void AuthorizationSessionImpl::setImpersonatedUserData(const UserName& username,
                                                        const std::vector<RoleName>& roles) {
-    _impersonatedUserName = std::make_shared<UserName>(username);
+    std::atomic_store(&_impersonatedUserName, std::make_shared<UserName>(username));
     _impersonatedRoleNames = roles;
 }
 
@@ -929,13 +949,13 @@ bool AuthorizationSessionImpl::isUsingLocalhostBypass() {
 
 // Clear the vectors of impersonated usernames and roles.
 void AuthorizationSessionImpl::clearImpersonatedUserData() {
-    _impersonatedUserName.reset();
+    std::atomic_store(&_impersonatedUserName, {});
     _impersonatedRoleNames.clear();
 }
 
 
 bool AuthorizationSessionImpl::isImpersonating() const {
-    return _impersonatedUserName != nullptr;
+    return std::atomic_load(&_impersonatedUserName) != nullptr;
 }
 
 auto AuthorizationSessionImpl::checkCursorSessionPrivilege(
@@ -1030,6 +1050,10 @@ void AuthorizationSessionImpl::verifyContract(const AuthorizationContract* contr
     tempContract.addPrivilege(Privilege(ResourcePattern::forClusterResource(boost::none),
                                         ActionType::bypassWriteBlockingMode));
 
+    // Operations which do not specify a maxTimeMS check if the defaultMaxTimeMS can be bypassed.
+    tempContract.addPrivilege(Privilege(ResourcePattern::forClusterResource(boost::none),
+                                        ActionType::bypassDefaultMaxTimeMS));
+
     // Implicitly checked often to keep useTenant checks fast
     tempContract.addPrivilege(
         Privilege(ResourcePattern::forClusterResource(boost::none), ActionType::useTenant));
@@ -1061,22 +1085,22 @@ void AuthorizationSessionImpl::_updateInternalAuthorizationState() {
         }
     }
 
-    // Update cached _mayBypassWriteBlockingMode to reflect current state.
-    _mayBypassWriteBlockingMode = getAuthorizationManager().isAuthEnabled()
-        ? _isAuthorizedForPrivilege(
-              Privilege(ResourcePattern::forClusterResource(getUserTenantId()),
-                        ActionType::bypassWriteBlockingMode))
-        : true;
-
-    // Update cached _mayUseTenant to reflect current state.
-    _mayUseTenant = getAuthorizationManager().isAuthEnabled()
-        ? _isAuthorizedForPrivilege(
-              Privilege(ResourcePattern::forClusterResource(boost::none), ActionType::useTenant))
-        : true;
+    // Update cached cluster/any action types for non-tenant resources.
+    if (!getAuthorizationManager().isAuthEnabled()) {
+        _nonTenantClusterActions.addAllActions();
+    } else if (!isAuthenticated()) {
+        _nonTenantClusterActions.removeAllActions();
+    } else {
+        auto user = _authenticatedUser.get();
+        _nonTenantClusterActions =
+            user->getActionsForResource(ResourcePattern::forAnyResource(boost::none));
+        _nonTenantClusterActions.addAllActionsFromSet(
+            user->getActionsForResource(ResourcePattern::forClusterResource(boost::none)));
+    }
 }
 
 bool AuthorizationSessionImpl::mayBypassWriteBlockingMode() const {
-    return MONGO_unlikely(_mayBypassWriteBlockingMode);
+    return MONGO_unlikely(_nonTenantClusterActions.contains(ActionType::bypassWriteBlockingMode));
 }
 
 bool AuthorizationSessionImpl::isExpired() const {

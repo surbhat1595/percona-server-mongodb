@@ -203,10 +203,6 @@ public:
         return !_isEphemeral;
     }
 
-    bool supportsOnlineCompaction() const override {
-        return true;
-    }
-
     StatusWith<int64_t> doCompact(OperationContext* opCtx, const CompactOptions& options) final;
 
     void validate(OperationContext* opCtx, bool full, ValidateResults* results) override;
@@ -232,7 +228,7 @@ public:
 
     Status updateOplogSize(OperationContext* opCtx, long long newOplogSize) override;
 
-    bool yieldAndAwaitOplogDeletionRequest(OperationContext* opCtx) override;
+    std::shared_ptr<CollectionTruncateMarkers> getCollectionTruncateMarkers() override;
 
     /**
      * Attempts to truncate oplog entries before the pinned oplog timestamp. Truncation will occur
@@ -454,8 +450,11 @@ protected:
      * Perform a bounded seek on the cursor, and return the next matching RecordId, if one exists.
      *
      * If countSeekMetric is false, does not record this seek towards metrics collection.
+     * If restoring is true, this seek is part of a restore operation.
      */
-    RecordId seekIdCommon(const RecordId& id, BoundInclusion boundInclusion);
+    RecordId seekIdCommon(const RecordId& id,
+                          BoundInclusion boundInclusion,
+                          bool restoring = false);
 
     /**
      * Perform an exact seek on the cursor, and return the Record, if one exists.

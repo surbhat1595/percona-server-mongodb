@@ -152,13 +152,12 @@ void BlockBasedInterleavedDecompressor::DecodingState::loadUncompressed(const BS
         switch (type) {
             case String:
             case Code:
-                d128.lastEncodedValue =
-                    Simple8bTypeUtil::encodeString(elem.valueStringData()).value_or(0);
+                d128.lastEncodedValue = Simple8bTypeUtil::encodeString(elem.valueStringData());
                 break;
             case BinData: {
                 int size;
                 const char* binary = elem.binData(size);
-                d128.lastEncodedValue = Simple8bTypeUtil::encodeBinary(binary, size).value_or(0);
+                d128.lastEncodedValue = Simple8bTypeUtil::encodeBinary(binary, size);
                 break;
             }
             case NumberDecimal:
@@ -220,7 +219,7 @@ BlockBasedInterleavedDecompressor::DecodingState::loadControl(ElementStorage& al
                                                               const char* buffer) {
     uint8_t control = *buffer;
     if (isUncompressedLiteralControlByte(control)) {
-        BSONElement literalElem(buffer, 1, -1);
+        BSONElement literalElem(buffer, 1, BSONElement::TrustedInitTag{});
         loadUncompressed(literalElem);
         return {literalElem, literalElem.size()};
     }
@@ -248,6 +247,10 @@ BlockBasedInterleavedDecompressor::DecodingState::loadControl(ElementStorage& al
                       auto encoded = Simple8bTypeUtil::encodeDouble(val, newScaleIndex);
                       uassert(8690001, "Invalid double encoding in BSON Column", encoded);
                       d64.lastEncodedValue = *encoded;
+                  } else {
+                      uassert(8915500,
+                              "Unexpected control for type in BSONColumn",
+                              newScaleIndex == Simple8bTypeUtil::kMemoryAsInteger);
                   }
 
                   d64.scaleIndex = newScaleIndex;
@@ -262,6 +265,11 @@ BlockBasedInterleavedDecompressor::DecodingState::loadControl(ElementStorage& al
               [&](DecodingState::Decoder128& d128) {
                   // We can read the last known value from the decoder iterator even as it has
                   // reached end.
+                  uassert(8915501,
+                          "Invalid control byte in BSON Column",
+                          bsoncolumn::scaleIndexForControlByte(control) ==
+                              Simple8bTypeUtil::kMemoryAsInteger);
+
                   boost::optional<uint128_t> lastSimple8bValue =
                       d128.pos.valid() ? *d128.pos : uint128_t(0);
                   d128.pos = Simple8b<uint128_t>(buffer + 1, size, lastSimple8bValue).begin();
@@ -331,13 +339,14 @@ BlockBasedInterleavedDecompressor::DecodingState::loadDelta(ElementStorage& allo
         return _lastLiteral;
     }
 
+    // 'String' and 'Code' can have unencodable values that are followed by non-zero deltas.
     uassert(8690000,
             "attempt to expand delta for type that does not have encoded representation",
-            d128.lastEncodedValue);
+            d128.lastEncodedValue || _lastLiteral.type() == String || _lastLiteral.type() == Code);
 
-    // Expand delta as last encoded.
+    // Expand delta as last encoded. If the last value is unencodable it will be set to 0.
     d128.lastEncodedValue =
-        expandDelta(*d128.lastEncodedValue, Simple8bTypeUtil::decodeInt128(*delta));
+        expandDelta(d128.lastEncodedValue.value_or(0), Simple8bTypeUtil::decodeInt128(*delta));
     return std::pair{_lastLiteral.type(), *d128.lastEncodedValue};
 }
 

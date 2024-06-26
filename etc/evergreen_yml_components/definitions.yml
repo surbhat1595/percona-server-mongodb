@@ -2316,6 +2316,14 @@ functions:
       content_type: text/plain
       display_name: Generated multiversion exclude tags options
 
+  "cleanup external auth test artifacts":
+  - *f_expansions_write
+  - command: subprocess.exec
+    params:
+      binary: bash
+      args:
+        - "./src/evergreen/sasl_windows_cyrussasl_teardown.sh"
+
 
 #######################################
 #               Tasks                 #
@@ -2803,7 +2811,7 @@ tasks:
       compiling_for_test: true
 
 - name: compile_and_run_unittests_first_quarter
-  exec_timeout_secs: 10800 # 3 hours
+  exec_timeout_secs: 21600 # 6 hours
   depends_on:
   - name: compile_dist_test
   commands:
@@ -2820,10 +2828,10 @@ tasks:
     vars:
       suite: unittests_first_quarter
       install_dir: build/install/bin
-      exec_timeout_secs: 10800 # 3 hours
+      exec_timeout_secs: 21600 # 6 hours
 
 - name: compile_and_run_unittests_second_quarter
-  exec_timeout_secs: 10800 # 3 hours
+  exec_timeout_secs: 21600 # 6 hours
   depends_on:
   - name: compile_dist_test
   commands:
@@ -2840,10 +2848,10 @@ tasks:
     vars:
       suite: unittests_second_quarter
       install_dir: build/install/bin
-      exec_timeout_secs: 10800 # 3 hours
+      exec_timeout_secs: 21600 # 6 hours
 
 - name: compile_and_run_unittests_third_quarter
-  exec_timeout_secs: 10800 # 3 hours
+  exec_timeout_secs: 21600 # 6 hours
   depends_on:
   - name: compile_dist_test
   commands:
@@ -2860,10 +2868,10 @@ tasks:
     vars:
       suite: unittests_third_quarter
       install_dir: build/install/bin
-      exec_timeout_secs: 10800 # 3 hours
+      exec_timeout_secs: 21600 # 6 hours
 
 - name: compile_and_run_unittests_fourth_quarter
-  exec_timeout_secs: 10800 # 3 hours
+  exec_timeout_secs: 21600 # 6 hours
   depends_on:
   - name: compile_dist_test
   commands:
@@ -2880,7 +2888,7 @@ tasks:
     vars:
       suite: unittests_fourth_quarter
       install_dir: build/install/bin
-      exec_timeout_secs: 10800 # 3 hours
+      exec_timeout_secs: 21600 # 6 hours
 
 ## clang_tidy - run clang_tidy
 - name: clang_tidy
@@ -3337,6 +3345,28 @@ tasks:
   - func: "scons lint"
     vars:
       targets: lint-pylinters
+
+## lint ##
+- name: lint_sbom
+  tags: ["lint"]
+  commands:
+  - command: timeout.update
+    params:
+      # 40 minutes
+      exec_timeout_secs: 2400
+  - *f_expansions_write
+  - command: manifest.load
+  - func: "git get project and add git tag"
+  - *f_expansions_write
+  - *kill_processes
+  - *cleanup_environment
+  - func: "set up venv"
+  - command: subprocess.exec
+    params:
+      binary: bash
+      args:
+      - "src/evergreen/run_python_script.sh"
+      - "buildscripts/sbom_linter.py"
 
 - name: lint_sconslinters
   tags: ["lint"]
@@ -5079,6 +5109,20 @@ tasks:
       resmoke_args: --includeWithAnyTags=requires_domain_controller
 
 - <<: *task_template
+  name: sasl_windows_cyrussasl
+  tags: ["assigned_to_jira_team_server_security", "sasl", "experimental"]
+  commands:
+  - func: "f_expansions_write"
+  - func: "do setup"
+  - func: "f_expansions_write"
+  - command: subprocess.exec
+    params:
+      binary: bash
+      args:
+        - "src/evergreen/sasl_windows_cyrussasl_setup.sh"
+  - func: "run tests"
+
+- <<: *task_template
   name: jsCore
   tags: ["jscore", "common"]
   commands:
@@ -5515,7 +5559,14 @@ tasks:
 
 - <<: *gen_task_template
   name: noPassthrough_gen
-  tags: ["misc_js", "no_debug_mode"]
+  tags:
+    [
+      "incompatible_mac",
+      "incompatible_ppc",
+      "incompatible_s390x",
+      "misc_js",
+      "no_debug_mode"
+    ]
   commands:
   - func: "generate resmoke tasks"
     vars:
@@ -8194,13 +8245,6 @@ task_groups:
   - archive_dist_test
   - archive_dist_test_debug
   - package
-
-- <<: *compile_task_group_template
-  name: compile_and_package_serial_no_unittests_TG
-  tasks:
-  - compile_dist_test
-  - archive_dist_test
-  - archive_dist_test_debug
 
 - <<: *compile_task_group_template
   name: compile_ninja_next_TG

@@ -39,6 +39,8 @@ last-continuous:
     ticket: SERVER-51943
   - test_file: jstests/sharding/query/collation_shard_targeting_hashed_shard_key.js
     ticket: SERVER-53335
+  - test_file: jstests/core/index/elemmatch_index.js
+    ticket: SERVER-90747
   - test_file: jstests/sharding/migration_server_status.js
     ticket: SERVER-56186
   - test_file: jstests/sharding/cwwc_conflict_add_shard.js
@@ -499,6 +501,20 @@ last-continuous:
     ticket: SERVER-81454
   - test_file: jstests/sharding/move_chunk_deferred_lookup.js
     ticket: SERVER-89859
+  - test_file: jstests/aggregation/unwind_sort.js
+    ticket: SERVER-90485
+  - test_file: jstests/aggregation/group_by_objectid.js
+    ticket: SERVER-90173
+  - test_file: jstests/aggregation/match_swapping_renamed_fields.js
+    ticket: SERVER-90869
+  - test_file: jstests/replsets/catchup_ignores_old_heartbeats.js
+    ticket: SERVER-86674
+  - test_file: jstests/replsets/snapshot_read_drop_collection.js
+    ticket: SERVER-91178
+  - test_file: jstests/sharding/direct_shard_connection_auth.js
+    ticket: SERVER-89994
+  - test_file: jstests/core/timeseries/bucket_unpacking_with_sort_negative.js
+    ticket: SERVER-90833
   suites: null
 last-lts:
   all:
@@ -584,6 +600,8 @@ last-lts:
     ticket: SERVER-55305
   - test_file: jstests/replsets/rollback_with_coalesced_txn_table_updates_from_vectored_inserts.js
     ticket: SERVER-55305
+  - test_file: jstests/core/index/elemmatch_index.js
+    ticket: SERVER-90747
   - test_file: jstests/sharding/migration_server_status.js
     ticket: SERVER-56186
   - test_file: jstests/sharding/time_zone_info_mongos.js
@@ -1048,4 +1066,18 @@ last-lts:
     ticket: SERVER-81454
   - test_file: jstests/sharding/move_chunk_deferred_lookup.js
     ticket: SERVER-89859
+  - test_file: jstests/aggregation/unwind_sort.js
+    ticket: SERVER-90485
+  - test_file: jstests/aggregation/group_by_objectid.js
+    ticket: SERVER-90173
+  - test_file: jstests/aggregation/match_swapping_renamed_fields.js
+    ticket: SERVER-90869
+  - test_file: jstests/replsets/catchup_ignores_old_heartbeats.js
+    ticket: SERVER-86674
+  - test_file: jstests/replsets/snapshot_read_drop_collection.js
+    ticket: SERVER-91178
+  - test_file: jstests/sharding/direct_shard_connection_auth.js
+    ticket: SERVER-89994
+  - test_file: jstests/core/timeseries/bucket_unpacking_with_sort_negative.js
+    ticket: SERVER-90833
   suites: null

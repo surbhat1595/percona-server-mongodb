@@ -983,6 +983,10 @@ buildvariants:
   - name: multi_stmt_txn_jscore_passthrough_with_migration_gen
   - name: multiversion_gen
   - name: .query_fuzzer
+  - name: query_stats_aggregation_passthrough
+  - name: query_stats_mongos_aggregation_passthrough
+  - name: query_stats_mongos_passthrough
+  - name: query_stats_passthrough
   - name: .random_multiversion_ds
   - name: .read_write_concern .large
     distros:
@@ -1097,6 +1101,10 @@ buildvariants:
   - name: multiversion_gen
   - name: .ocsp
   - name: .query_fuzzer
+  - name: query_stats_aggregation_passthrough
+  - name: query_stats_mongos_aggregation_passthrough
+  - name: query_stats_mongos_passthrough
+  - name: query_stats_passthrough
   - name: .read_write_concern .large
     distros:
     - rhel80-medium
@@ -1229,6 +1237,10 @@ buildvariants:
   - name: multiversion_gen
   - name: powercycle_smoke
   - name: .query_fuzzer
+  - name: query_stats_aggregation_passthrough
+  - name: query_stats_mongos_aggregation_passthrough
+  - name: query_stats_mongos_passthrough
+  - name: query_stats_passthrough
   - name: .random_multiversion_ds
   - name: .read_write_concern .large
     distros:
@@ -2137,6 +2149,10 @@ buildvariants:
   - name: query_golden_classic
   - name: query_golden_cqf
   - name: .query_fuzzer
+  - name: query_stats_aggregation_passthrough
+  - name: query_stats_mongos_aggregation_passthrough
+  - name: query_stats_mongos_passthrough
+  - name: query_stats_passthrough
   - name: .read_write_concern
   - name: replica_sets_large_txns_format_jscore_passthrough
   - name: .replica_sets !.multi_oplog
@@ -2259,6 +2275,10 @@ buildvariants:
   - name: .query_fuzzer
   - name: query_golden_classic
   - name: query_golden_cqf
+  - name: query_stats_aggregation_passthrough
+  - name: query_stats_mongos_aggregation_passthrough
+  - name: query_stats_mongos_passthrough
+  - name: query_stats_passthrough
   # - name: .random_multiversion_ds # Multiversion does not pass yet, also making this work is going to be pretty tricky
   # - name: .read_write_concern .large # Not passing
   #   distros:
@@ -2385,34 +2405,6 @@ buildvariants:
     distros:
     - rhel80-xlarge
   - name: generate_buildid_to_debug_symbols_mapping
-
-- name: &enterprise-rhel80-no-latch-64-bit enterprise-rhel80-no-latch-64-bit
-  display_name: "~ Enterprise RHEL 8.0 (without Diagnostic Latches)"
-  cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
-  expansions:
-    compile_flags: >-
-      MONGO_DISTMOD=rhel80
-      -j$(grep -c ^processor /proc/cpuinfo)
-      --variables-files=etc/scons/mongodbtoolchain_stable_gcc.vars
-      --use-diagnostic-latches=off
-      --link-model=dynamic
-    scons_cache_mode: all
-    scons_cache_scope: shared
-    num_scons_link_jobs_available: 0.99
-    compile_variant: *enterprise-rhel80-no-latch-64-bit
-  tasks:
-  - name: compile_test_and_package_parallel_core_stream_TG
-    distros:
-    - rhel80-build
-  - name: compile_test_and_package_parallel_unittest_stream_TG
-    distros:
-    - rhel80-build
-  - name: compile_test_and_package_parallel_dbtest_stream_TG
-    distros:
-    - rhel80-build
-  - name: generate_buildid_to_debug_symbols_mapping
-    distros:
-    - rhel80-build
 
 - name: &enterprise-rhel80-unoptimized-64-bit enterprise-rhel80-unoptimized-64-bit
   display_name: "~ Enterprise RHEL 8.0 DEBUG (Unoptimized)"

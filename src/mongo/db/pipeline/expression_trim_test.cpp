@@ -722,14 +722,16 @@ TEST(ExpressionTrimTest, DoesSerializeCorrectly) {
                                             BSON("$trim" << BSON("input"
                                                                  << " abc ")),
                                             expCtx.variablesParseState);
-    ASSERT_VALUE_EQ(trim->serialize(false), trim->serialize(true));
+    ASSERT_VALUE_EQ(trim->serialize(),
+                    trim->serialize(SerializationOptions{
+                        boost::make_optional(ExplainOptions::Verbosity::kQueryPlanner)}));
     ASSERT_VALUE_EQ(
-        trim->serialize(false),
+        trim->serialize(),
         Value(Document{{"$trim", Document{{"input", Document{{"$const", " abc "_sd}}}}}}));
 
     // Make sure we can re-parse it and evaluate it.
     auto reparsedTrim = Expression::parseExpression(
-        &expCtx, trim->serialize(false).getDocument().toBson(), expCtx.variablesParseState);
+        &expCtx, trim->serialize().getDocument().toBson(), expCtx.variablesParseState);
     ASSERT_VALUE_EQ(reparsedTrim->evaluate({}, &expCtx.variables), Value("abc"_sd));
 
     // Use $ltrim, and specify the 'chars' option.
@@ -740,12 +742,12 @@ TEST(ExpressionTrimTest, DoesSerializeCorrectly) {
                                                              << "$$CURRENT.a")),
                                        expCtx.variablesParseState);
     ASSERT_VALUE_EQ(
-        trim->serialize(false),
+        trim->serialize(),
         Value(Document{{"$ltrim", Document{{"input", "$inputField"_sd}, {"chars", "$a"_sd}}}}));
 
     // Make sure we can re-parse it and evaluate it.
     reparsedTrim = Expression::parseExpression(
-        &expCtx, trim->serialize(false).getDocument().toBson(), expCtx.variablesParseState);
+        &expCtx, trim->serialize().getDocument().toBson(), expCtx.variablesParseState);
     ASSERT_VALUE_EQ(reparsedTrim->evaluate(Document{{"inputField", " , 4"_sd}, {"a", " ,"_sd}},
                                            &expCtx.variables),
                     Value("4"_sd));

@@ -53,6 +53,7 @@
 #include "mongo/unittest/bson_test_util.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/str.h"
+#include "mongo/util/synchronized_value.h"
 
 /**
  * Fail unconditionally, reporting the given message.
@@ -149,6 +150,21 @@
  */
 #define ASSERT_THROWS(EXPRESSION, EXCEPTION_TYPE) \
     ASSERT_THROWS_WITH_CHECK(EXPRESSION, EXCEPTION_TYPE, ([](const EXCEPTION_TYPE&) {}))
+
+/**
+ * Verify that the evaluation of "EXPRESSION" does not throw any exceptions.
+ *
+ * If "EXPRESSION" throws an exception the test is considered a failure and further evaluation
+ * halts.
+ */
+#define ASSERT_DOES_NOT_THROW(EXPRESSION)                          \
+    try {                                                          \
+        EXPRESSION;                                                \
+    } catch (const AssertionException& e) {                        \
+        str::stream err;                                           \
+        err << "Threw an exception incorrectly: " << e.toString(); \
+        FAIL(err);                                                 \
+    }
 
 /**
  * Behaves like ASSERT_THROWS, above, but also fails if calling what() on the thrown exception
@@ -649,7 +665,7 @@ protected:
      * Gets a vector of strings, one log line per string, captured since
      * the last call to startCapturingLogMessages() in this test.
      */
-    const std::vector<std::string>& getCapturedTextFormatLogMessages() const;
+    std::vector<std::string> getCapturedTextFormatLogMessages() const;
     std::vector<BSONObj> getCapturedBSONFormatLogMessages() const;
 
     /**

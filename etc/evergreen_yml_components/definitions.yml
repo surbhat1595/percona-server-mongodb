@@ -636,7 +636,7 @@ functions:
   "get buildnumber": &get_buildnumber
     command: keyval.inc
     params:
-      key: "${build_variant}_v6.0"
+      key: "${build_variant}_${project}"
       destination: "builder_num"
 
   "run diskstats": &run_diskstats
@@ -2209,6 +2209,13 @@ functions:
       content_type: text/plain
       display_name: Resmoke.py Invocation for Local Usage
 
+  "cleanup external auth test artifacts":
+  - *f_expansions_write
+  - command: subprocess.exec
+    params:
+      binary: bash
+      args:
+        - "./src/evergreen/sasl_windows_cyrussasl_teardown.sh"
 
 # Pre task steps
 pre:
@@ -2239,13 +2246,13 @@ post:
 - func: "cleanup FUSE watchdog"
 - func: "cleanup environment"
 - func: "cleanup jepsen docker test"
+- func: "cleanup external auth test artifacts"
 
 # Timeout steps
 timeout:
 - func: "f_expansions_write"
 - func: "run hang analyzer"
 - func: "wait for resmoke to shutdown"
-
 
 #######################################
 #               Tasks                 #
@@ -2635,7 +2642,7 @@ tasks:
       compiling_for_test: true
 
 - name: compile_and_run_unittests_first_quarter
-  exec_timeout_secs: 10800 # 3 hours
+  exec_timeout_secs: 21600 # 6 hours
   depends_on:
   - name: compile_dist_test
   commands:
@@ -2652,10 +2659,10 @@ tasks:
     vars:
       suite: unittests_first_quarter
       install_dir: build/install/bin
-      exec_timeout_secs: 10800 # 3 hours
+      exec_timeout_secs: 21600 # 6 hours
 
 - name: compile_and_run_unittests_second_quarter
-  exec_timeout_secs: 10800 # 3 hours
+  exec_timeout_secs: 21600 # 6 hours
   depends_on:
   - name: compile_dist_test
   commands:
@@ -2672,10 +2679,10 @@ tasks:
     vars:
       suite: unittests_second_quarter
       install_dir: build/install/bin
-      exec_timeout_secs: 10800 # 3 hours
+      exec_timeout_secs: 21600 # 6 hours
 
 - name: compile_and_run_unittests_third_quarter
-  exec_timeout_secs: 10800 # 3 hours
+  exec_timeout_secs: 21600 # 6 hours
   depends_on:
   - name: compile_dist_test
   commands:
@@ -2692,10 +2699,10 @@ tasks:
     vars:
       suite: unittests_third_quarter
       install_dir: build/install/bin
-      exec_timeout_secs: 10800 # 3 hours
+      exec_timeout_secs: 21600 # 6 hours
 
 - name: compile_and_run_unittests_fourth_quarter
-  exec_timeout_secs: 10800 # 3 hours
+  exec_timeout_secs: 21600 # 6 hours
   depends_on:
   - name: compile_dist_test
   commands:
@@ -2712,7 +2719,7 @@ tasks:
     vars:
       suite: unittests_fourth_quarter
       install_dir: build/install/bin
-      exec_timeout_secs: 10800 # 3 hours
+      exec_timeout_secs: 21600 # 6 hours
 
 ## clang_tidy - run clang_tidy
 - name: clang_tidy
@@ -5014,6 +5021,20 @@ tasks:
       resmoke_args: --includeWithAnyTags=requires_domain_controller
 
 - <<: *task_template
+  name: sasl_windows_cyrussasl
+  tags: ["assigned_to_jira_team_server_security", "sasl", "experimental"]
+  commands:
+  - func: "f_expansions_write"
+  - func: "do setup"
+  - func: "f_expansions_write"
+  - command: subprocess.exec
+    params:
+      binary: bash
+      args:
+        - "src/evergreen/sasl_windows_cyrussasl_setup.sh"
+  - func: "run tests"
+
+- <<: *task_template
   name: jsCore
   tags: ["jscore", "common"]
   commands:
@@ -5521,6 +5542,34 @@ tasks:
     vars:
       use_large_distro: "true"
 
+- <<: *task_template
+  name: query_stats_passthrough
+  tags: []
+  commands:
+  - func: "do setup"
+  - func: "run tests"
+
+- <<: *task_template
+  name: query_stats_aggregation_passthrough
+  tags: []
+  commands:
+  - func: "do setup"
+  - func: "run tests"
+
+- <<: *task_template
+  name: query_stats_mongos_passthrough
+  tags: []
+  commands:
+  - func: "do setup"
+  - func: "run tests"
+
+- <<: *task_template
+  name: query_stats_mongos_aggregation_passthrough
+  tags: []
+  commands:
+  - func: "do setup"
+  - func: "run tests"
+
 - <<: *gen_task_template
   name: tenant_migration_jscore_passthrough_gen
   tags: ["serverless"]
@@ -5606,14 +5655,6 @@ tasks:
 - <<: *gen_task_template
   name: replica_sets_batched_deletes_passthrough_gen
   tags: ["large", "batched_deletes"]
-  commands:
-  - func: "generate resmoke tasks"
-    vars:
-      use_large_distro: "true"
-
-- <<: *gen_task_template
-  name: sharding_batched_deletes_passthrough_gen
-  tags: ["sharding", "large", "batched_deletes"]
   commands:
   - func: "generate resmoke tasks"
     vars:
@@ -6862,7 +6903,6 @@ tasks:
   - func: "scons compile"
     vars:
       targets: >-
-        distsrc-${ext|tgz}
         archive-dist
         archive-dist-debug
         archive-jstestshell
@@ -6884,19 +6924,6 @@ tasks:
       binary: bash
       args:
       - "src/evergreen/package.sh"
-  - command: s3.put
-    params:
-      aws_key: ${aws_key}
-      aws_secret: ${aws_secret}
-      local_file: src/distsrc.${ext|tgz}
-      remote_file: ${project}/${build_variant}/${revision}/sources/mongo-src-${build_id}.${ext|tgz}
-      bucket: mciuploads
-      permissions: public-read
-      content_type: ${content_type|application/gzip}
-      display_name: Source tarball
-      # We only need to upload the source tarball from one of the build variants
-      # because it should be the same everywhere, so just use rhel70/windows.
-      build_variants: [rhel70, windows]
   - command: s3.put
     params:
       optional: true
@@ -7079,14 +7106,6 @@ tasks:
       local_file: src/mh.tgz
       build_variants: *mh_variants
   # Fetch the sources (on relevant variants only)
-  - command: s3.get
-    params:
-      aws_key: ${aws_key}
-      aws_secret: ${aws_secret}
-      remote_file: ${project}/${build_variant}/${revision}/sources/mongo-src-${build_id}.${ext|tgz}
-      bucket: mciuploads
-      local_file: src/distsrc.${ext|tgz}
-      build_variants: [rhel70, windows]
   - func: "generate compile expansions"
   - func: "apply compile expansions"
   - func: "fetch dist debugsymbols"
@@ -7151,17 +7170,6 @@ tasks:
       content_type: ${content_type|application/gzip}
       remote_file: ${push_path}-STAGE/${push_name}/mh-${push_name}-${push_arch}-${suffix}-${task_id}.${ext|tgz}
       build_variants: *mh_variants
-  # Put the source tarball
-  - command: s3.put
-    params:
-      aws_secret: ${aws_secret}
-      local_file: src/mongodb-src-${src_suffix}.${ext|tar.gz}
-      aws_key: ${aws_key}
-      bucket: build-push-testing
-      permissions: public-read
-      content_type: ${content_type|application/gzip}
-      remote_file: ${push_path}-STAGE/${push_name}/mongodb-src-${src_suffix}-${task_id}.${ext|tar.gz}
-      build_variants: [rhel70, windows]
 
   # Put the debug symbols
   # push directly to repo due to limitations in file size SERVER-63432
@@ -7198,18 +7206,6 @@ tasks:
       content_type: ${content_type|application/gzip}
       remote_file: ${push_path}-STAGE/${push_name}/mongodb-cryptd-${push_name}-${push_arch}-${suffix}-${task_id}.${ext|tgz}.sig
       build_variants: *mongocryptd_variants
-
-  # Put the source tarball signature
-  - command: s3.put
-    params:
-      aws_secret: ${aws_secret}
-      local_file: src/mongodb-src-${src_suffix}.${ext|tar.gz}.sig
-      aws_key: ${aws_key}
-      bucket: build-push-testing
-      permissions: public-read
-      content_type: ${content_type|application/gzip}
-      remote_file: ${push_path}-STAGE/${push_name}/mongodb-src-${src_suffix}-${task_id}.${ext|tar.gz}.sig
-      build_variants: [rhel70, windows]
 
   # Put the debug symbols signature
   - command: s3.put
@@ -7258,18 +7254,6 @@ tasks:
       remote_file: ${push_path}-STAGE/${push_name}/mongodb-cryptd-${push_name}-${push_arch}-${suffix}-${task_id}.${ext|tgz}.sha1
       build_variants: *mongocryptd_variants
 
-  # Put the source tarball sha1
-  - command: s3.put
-    params:
-      aws_secret: ${aws_secret}
-      local_file: src/mongodb-src-${src_suffix}.${ext|tar.gz}.sha1
-      aws_key: ${aws_key}
-      permissions: public-read
-      bucket: build-push-testing
-      content_type: text/plain
-      remote_file: ${push_path}-STAGE/${push_name}/mongodb-src-${src_suffix}-${task_id}.${ext|tar.gz}.sha1
-      build_variants: [rhel70, windows]
-
   # Put the debug symbols sha1
   - command: s3.put
     params:
@@ -7316,18 +7300,6 @@ tasks:
       content_type: text/plain
       remote_file: ${push_path}-STAGE/${push_name}/mongodb-cryptd-${push_name}-${push_arch}-${suffix}-${task_id}.${ext|tgz}.sha256
       build_variants: *mongocryptd_variants
-
-  # Put the source tarball sha256
-  - command: s3.put
-    params:
-      aws_secret: ${aws_secret}
-      local_file: src/mongodb-src-${src_suffix}.${ext|tar.gz}.sha256
-      permissions: public-read
-      aws_key: ${aws_key}
-      bucket: build-push-testing
-      content_type: text/plain
-      remote_file: ${push_path}-STAGE/${push_name}/mongodb-src-${src_suffix}-${task_id}.${ext|tar.gz}.sha256
-      build_variants: [rhel70, windows]
 
   # Put the debug symbols sha256
   - command: s3.put
@@ -7376,18 +7348,6 @@ tasks:
       remote_file: ${push_path}-STAGE/${push_name}/mongodb-cryptd-${push_name}-${push_arch}-${suffix}-${task_id}.${ext|tgz}.md5
       build_variants: *mongocryptd_variants
 
-  # Put the source tarball md5
-  - command: s3.put
-    params:
-      aws_secret: ${aws_secret}
-      local_file: src/mongodb-src-${src_suffix}.${ext|tar.gz}.md5
-      aws_key: ${aws_key}
-      bucket: build-push-testing
-      permissions: public-read
-      content_type: text/plain
-      remote_file: ${push_path}-STAGE/${push_name}/mongodb-src-${src_suffix}-${task_id}.${ext|tar.gz}.md5
-      build_variants: [rhel70, windows]
-
   # Put the debug symbols md5
   - command: s3.put
     params:
@@ -7431,11 +7391,6 @@ tasks:
          'destination': {'path': '${push_path}/mh-${push_name}-${push_arch}-${suffix}.${ext|tgz}', 'bucket': '${push_bucket}'},
          'build_variants': *mh_variants}
 
-      #Source tarball
-      - {'source': {'path': '${push_path}-STAGE/${push_name}/mongodb-src-${src_suffix}-${task_id}.${ext|tar.gz}', 'bucket': 'build-push-testing'},
-         'destination': {'path': 'src/mongodb-src-${src_suffix}.${ext|tar.gz}', 'bucket': '${push_bucket}'},
-         'build_variants': ['rhel70', 'windows']}
-
       #MSI (Windows only)
       - {'source': {'path': '${push_path}-STAGE/${push_name}/mongodb-${push_name}-${push_arch}-${suffix}-${task_id}-signed.msi', 'bucket': 'build-push-testing'},
          'destination': {'path': '${push_path}/mongodb-${push_name}-${push_arch}-${suffix}-signed.msi', 'bucket': '${push_bucket}'},
@@ -7450,11 +7405,6 @@ tasks:
          'destination': {'path': '${push_path}/mongodb-cryptd-${push_name}-${push_arch}-${suffix}.${ext|tgz}.sig', 'bucket': '${push_bucket}'},
          'build_variants': *mongocryptd_variants}
 
-      #Source tarball signature
-      - {'source': {'path': '${push_path}-STAGE/${push_name}/mongodb-src-${src_suffix}-${task_id}.${ext|tar.gz}.sig', 'bucket': 'build-push-testing'},
-         'destination': {'path': 'src/mongodb-src-${src_suffix}.${ext|tar.gz}.sig', 'bucket': '${push_bucket}'},
-         'build_variants': ['rhel70', 'windows']}
-
       #SHA1 for binaries
       - {'source': {'path': '${push_path}-STAGE/${push_name}/mongodb-${push_name}-${push_arch}-${suffix}-${task_id}.${ext|tgz}.sha1', 'bucket': 'build-push-testing'},
          'destination': {'path': '${push_path}/mongodb-${push_name}-${push_arch}-${suffix}.${ext|tgz}.sha1', 'bucket': '${push_bucket}'}}
@@ -7463,11 +7413,6 @@ tasks:
       - {'source': {'path': '${push_path}-STAGE/${push_name}/mongodb-cryptd-${push_name}-${push_arch}-${suffix}-${task_id}.${ext|tgz}.sha1', 'bucket': 'build-push-testing'},
          'destination': {'path': '${push_path}/mongodb-cryptd-${push_name}-${push_arch}-${suffix}.${ext|tgz}.sha1', 'bucket': '${push_bucket}'},
          'build_variants': *mongocryptd_variants}
-
-      #SHA1 for source tarball
-      - {'source': {'path': '${push_path}-STAGE/${push_name}/mongodb-src-${src_suffix}-${task_id}.${ext|tar.gz}.sha1', 'bucket': 'build-push-testing'},
-         'destination': {'path': 'src/mongodb-src-${src_suffix}.${ext|tar.gz}.sha1', 'bucket': '${push_bucket}'},
-         'build_variants': ['rhel70', 'windows']}
 
       #SHA1 for MSI
       - {'source': {'path': '${push_path}-STAGE/${push_name}/mongodb-${push_name}-${push_arch}-${suffix}-${task_id}-signed.msi.sha1', 'bucket': 'build-push-testing'},
@@ -7483,11 +7428,6 @@ tasks:
          'destination': {'path': '${push_path}/mongodb-cryptd-${push_name}-${push_arch}-${suffix}.${ext|tgz}.sha256', 'bucket': '${push_bucket}'},
          'build_variants': *mongocryptd_variants}
 
-      #SHA256 for source tarball
-      - {'source': {'path': '${push_path}-STAGE/${push_name}/mongodb-src-${src_suffix}-${task_id}.${ext|tar.gz}.sha256', 'bucket': 'build-push-testing'},
-         'destination': {'path': 'src/mongodb-src-${src_suffix}.${ext|tar.gz}.sha256', 'bucket': '${push_bucket}'},
-         'build_variants': ['rhel70', 'windows']}
-
       #SHA256 for MSI files
       - {'source': {'path': '${push_path}-STAGE/${push_name}/mongodb-${push_name}-${push_arch}-${suffix}-${task_id}-signed.msi.sha256', 'bucket': 'build-push-testing'},
          'destination': {'path': '${push_path}/mongodb-${push_name}-${push_arch}-${suffix}-signed.msi.sha256', 'bucket': '${push_bucket}'},
@@ -7501,11 +7441,6 @@ tasks:
       - {'source': {'path': '${push_path}-STAGE/${push_name}/mongodb-cryptd-${push_name}-${push_arch}-${suffix}-${task_id}.${ext|tgz}.md5', 'bucket': 'build-push-testing'},
          'destination': {'path': '${push_path}/mongodb-cryptd-${push_name}-${push_arch}-${suffix}.${ext|tgz}.md5', 'bucket': '${push_bucket}'},
          'build_variants': *mongocryptd_variants}
-
-      #MD5 for source tarball
-      - {'source': {'path': '${push_path}-STAGE/${push_name}/mongodb-src-${src_suffix}-${task_id}.${ext|tar.gz}.md5', 'bucket': 'build-push-testing'},
-         'destination': {'path': 'src/mongodb-src-${src_suffix}.${ext|tar.gz}.md5', 'bucket': '${push_bucket}'},
-         'build_variants': ['rhel70', 'windows']}
 
       #MD5 for MSIs
       - {'source': {'path': '${push_path}-STAGE/${push_name}/mongodb-${push_name}-${push_arch}-${suffix}-${task_id}-signed.msi.md5', 'bucket': 'build-push-testing'},
@@ -7800,13 +7735,6 @@ tasks:
       binary: bash
       args:
       - "./src/evergreen/todos_check.sh"
-
-- <<: *task_template
-  name: mqlrun
-  tags: []
-  commands:
-  - func: "do setup"
-  - func: "run tests"
 
 - name: check_feature_flag_tags
   tags: []

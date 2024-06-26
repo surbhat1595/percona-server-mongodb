@@ -1497,6 +1497,30 @@ std::deque<std::string> getUniqueFiles(const std::vector<std::string>& files,
     return result;
 }
 
+/**
+ * Normalizes ident names with and without 'directoryPerDb' and 'wiredTigerDirectoryForIndexes'
+ * mode.
+ *
+ * The durable catalog can return idents in four forms:
+ *  - <db_name>/<collection|index>/<ident_identifier>
+ *    - directoryPerDb + wiredTigerDirectoryForIndexes
+ *  - <db_name>/<ident_name>
+ *    - directoryPerDb
+ *  - <collection|index>/<ident_identifier>
+ *    - wiredTigerDirectoryForIndexes
+ *  - <ident_name>
+ *    - default, no options enabled
+ *
+ * ident_identifier: <counter>-<random number>
+ * ident_name: <collection|index>-<ident_identifier>
+ *
+ * This function trims the leading directory names leaving only the ident's unique identifier.
+ */
+inline std::string getIdentStem(const std::string& ident) {
+    boost::filesystem::path identPath(ident);
+    return identPath.stem().string();
+}
+
 class StreamingCursorImpl : public StorageEngine::StreamingCursor {
 public:
     StreamingCursorImpl() = delete;
@@ -1606,11 +1630,22 @@ private:
         int wtRet;
         bool fileUnchangedFlag = false;
         if (!_wtBackup->dupCursor) {
-            wtRet = (_session)->open_cursor(
-                _session, nullptr, _wtBackup->cursor, config.c_str(), &_wtBackup->dupCursor);
-            if (wtRet != 0) {
-                return wtRCToStatus(wtRet, _session);
-            }
+            size_t attempt = 0;
+            do {
+                wtRet = _session->open_cursor(
+                    _session, nullptr, _wtBackup->cursor, config.c_str(), &_wtBackup->dupCursor);
+
+                if (wtRet == EBUSY) {
+                    logAndBackoff(8927900,
+                                  ::mongo::logv2::LogComponent::kStorage,
+                                  logv2::LogSeverity::Debug(1),
+                                  ++attempt,
+                                  "Opening duplicate backup cursor returned EBUSY, retrying",
+                                  "config"_attr = config);
+                } else if (wtRet != 0) {
+                    return wtRCToStatus(wtRet, _session);
+                }
+            } while (wtRet == EBUSY);
             fileUnchangedFlag = true;
         }
 
@@ -1774,11 +1809,14 @@ WiredTigerKVEngine::beginNonBlockingBackup(OperationContext* opCtx,
         for (const DurableCatalog::Entry& e : catalogEntries) {
             // Populate the collection ident with its namespace and UUID.
             UUID uuid = catalog->getMetaData(opCtx, e.catalogId)->options.uuid.get();
-            _wtBackup.identToNamespaceAndUUIDMap.emplace(e.ident, std::make_pair(e.nss, uuid));
+            std::string collectionIdent = getIdentStem(e.ident);
+            _wtBackup.identToNamespaceAndUUIDMap.emplace(collectionIdent,
+                                                         std::make_pair(e.nss, uuid));
 
             // Populate the collection's index idents with the collection's namespace and UUID.
             std::vector<std::string> idxIdents = catalog->getIndexIdents(opCtx, e.catalogId);
-            for (const std::string& idxIdent : idxIdents) {
+            for (const std::string& idxIdentFull : idxIdents) {
+                std::string idxIdent = getIdentStem(idxIdentFull);
                 _wtBackup.identToNamespaceAndUUIDMap.emplace(idxIdent, std::make_pair(e.nss, uuid));
             }
         }

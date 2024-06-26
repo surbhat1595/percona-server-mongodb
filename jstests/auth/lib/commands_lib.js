@@ -322,7 +322,6 @@ var authCommandsLib = {
               roles: roles_clusterManager,
           }]
         },
-
         {
           testname: "applyOps_empty",
           command: {applyOps: []},
@@ -6072,6 +6071,26 @@ var authCommandsLib = {
                     ]
                 }, */
         {
+          // Test that clusterMonitor has permission to run $queryStats without transformation
+          testname: "testQueryStatsReadPrivilege",
+          command: {aggregate: 1, pipeline: [{$queryStats: {}}], cursor: {}},
+          skipSharded: false,
+          skipTest: (conn) => {
+              return !TestData.setParameters.featureFlagQueryStats;
+          },
+          testcases: [{runOnDb: adminDbName, roles: roles_monitoring}]
+        },
+        {
+          // Test that clusterMonitor has permission to run $queryStats with transformation
+          testname: "testQueryStatsReadTransformedPrivilege",
+          command: {aggregate: 1, pipeline: [{$queryStats: {transformIdentifiers: {algorithm: "hmac-sha-256", hmacKey: BinData(8, "MjM0NTY3ODkxMDExMTIxMzE0MTUxNjE3MTgxOTIwMjE=")}}}], cursor: {}},
+          skipSharded: false,
+          skipTest: (conn) => {
+              return !TestData.setParameters.featureFlagQueryStats;
+          },
+          testcases: [{runOnDb: adminDbName, roles: roles_monitoring}]
+        },
+        {
           testname: "top",
           command: {top: 1},
           skipSharded: true,
@@ -6383,6 +6402,23 @@ var authCommandsLib = {
                       {killCursors: "$cmd.aggregate", cursors: [response.cursor.id]}));
               }
           }
+        },
+        {
+          testname: "aggregate_$backupFileCursor",
+          command: {aggregate: 1, cursor: {}, pipeline: [{$_backupFile: {backupId: UUID()}}]},
+          skipSharded: true,
+          // Only enterprise knows of this aggregation stage.
+          skipTest:
+              (conn) =>
+                  !getBuildInfo().modules.includes("enterprise"),
+          testcases: [{
+              runOnDb: adminDbName,
+              roles: {__system: 1},
+              privileges: [
+                  {resource: {cluster: true}, actions: ["internal"]},
+              ],
+              expectFail: true
+          }],
         },
         {
           testname: "aggregate_$search",

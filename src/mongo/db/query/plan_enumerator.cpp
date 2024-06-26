@@ -35,6 +35,7 @@
 
 #include "mongo/db/query/index_tag.h"
 #include "mongo/db/query/indexability.h"
+#include "mongo/db/query/query_planner_common.h"
 #include "mongo/logv2/log.h"
 #include "mongo/util/string_map.h"
 
@@ -58,8 +59,8 @@ std::string getPathPrefix(std::string path) {
  * is a predicate that is required to use an index.
  */
 bool expressionRequiresIndex(const MatchExpression* node) {
-    return CanonicalQuery::countNodes(node, MatchExpression::GEO_NEAR) > 0 ||
-        CanonicalQuery::countNodes(node, MatchExpression::TEXT) > 0;
+    return QueryPlannerCommon::countNodes(node, MatchExpression::GEO_NEAR) > 0 ||
+        QueryPlannerCommon::countNodes(node, MatchExpression::TEXT) > 0;
 }
 
 size_t getPathLength(const MatchExpression* expr) {
@@ -1289,6 +1290,8 @@ void PlanEnumerator::getIndexedPreds(MatchExpression* node,
                                      std::vector<MatchExpression*>* indexedPreds) {
     if (Indexability::nodeCanUseIndexOnOwnField(node)) {
         RelevantTag* rt = static_cast<RelevantTag*>(node->getTag());
+        tassert(9074700, "RelevantTag is not assigned to the match expression node", rt != nullptr);
+
         if (context.elemMatchExpr) {
             // If we're in an $elemMatch context, store the
             // innermost parent $elemMatch, as well as the
@@ -1305,7 +1308,7 @@ void PlanEnumerator::getIndexedPreds(MatchExpression* node,
         indexedPreds->push_back(node);
     } else if (Indexability::isBoundsGeneratingNot(node)) {
         getIndexedPreds(node->getChild(0), context, indexedPreds);
-    } else if (MatchExpression::ELEM_MATCH_OBJECT == node->matchType()) {
+    } else if (Indexability::isBoundsGeneratingElemMatchObject(node)) {
         PrepMemoContext childContext;
         childContext.elemMatchExpr = node;
         for (size_t i = 0; i < node->numChildren(); ++i) {

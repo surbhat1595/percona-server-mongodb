@@ -40,6 +40,7 @@
 #include "mongo/db/pipeline/document_path_support.h"
 #include "mongo/db/pipeline/document_source_documents.h"
 #include "mongo/db/pipeline/document_source_merge_gen.h"
+#include "mongo/db/pipeline/document_source_queue.h"
 #include "mongo/db/pipeline/document_source_sort.h"
 #include "mongo/db/pipeline/expression.h"
 #include "mongo/db/pipeline/expression_context.h"
@@ -188,6 +189,7 @@ DocumentSourceLookUp::DocumentSourceLookUp(
 std::vector<BSONObj> extractSourceStage(const std::vector<BSONObj>& pipeline) {
     if (!pipeline.empty() &&
         (pipeline[0].hasField(DocumentSourceDocuments::kStageName) ||
+         pipeline[0].hasField(DocumentSourceQueue::kStageName) ||
          pipeline[0].hasField("$search"_sd))) {
         return {pipeline[0]};
     }
@@ -558,6 +560,7 @@ std::unique_ptr<Pipeline, PipelineDeleter> DocumentSourceLookUp::buildPipeline(
     // If we don't have a cache, build and return the pipeline immediately.
     if (!_cache || _cache->isAbandoned()) {
         MakePipelineOptions pipelineOpts;
+        pipelineOpts.alreadyOptimized = false;
         pipelineOpts.optimize = true;
         pipelineOpts.attachCursorSource = true;
         pipelineOpts.validator = lookupPipeValidator;
@@ -592,6 +595,7 @@ std::unique_ptr<Pipeline, PipelineDeleter> DocumentSourceLookUp::buildPipeline(
     // Construct the basic pipeline without a cache stage. Avoid optimizing here since we need to
     // add the cache first, as detailed below.
     MakePipelineOptions pipelineOpts;
+    pipelineOpts.alreadyOptimized = false;
     pipelineOpts.optimize = false;
     pipelineOpts.attachCursorSource = false;
     pipelineOpts.validator = lookupPipeValidator;
@@ -647,21 +651,55 @@ std::unique_ptr<Pipeline, PipelineDeleter> DocumentSourceLookUp::buildPipeline(
     return pipeline;
 }
 
+/**
+ * Method that looks for a DocumentSourceSequentialDocumentCache stage and calls optimizeAt() on
+ * it if it has yet to be optimized.
+ */
+void findAndOptimizeSequentialDocumentCache(Pipeline& pipeline) {
+    auto& container = pipeline.getSources();
+    auto itr = (&container)->begin();
+    while (itr != (&container)->end()) {
+        if (dynamic_cast<DocumentSourceSequentialDocumentCache*>(itr->get())) {
+            auto sequentialCache = dynamic_cast<DocumentSourceSequentialDocumentCache*>(itr->get());
+            if (!sequentialCache->hasOptimizedPos()) {
+                sequentialCache->optimizeAt(itr, &container);
+            }
+        }
+        itr = std::next(itr);
+    }
+}
+
 void DocumentSourceLookUp::addCacheStageAndOptimize(Pipeline& pipeline) {
-    // Add the cache stage at the end and optimize. During the optimization process, the cache will
-    // either move itself to the correct position in the pipeline, or will abandon itself if no
-    // suitable cache position exists. Do it only if pipeline optimization is enabled, otherwise
-    // Pipeline::optimizePipeline() will exit early and correct placement of the cache will not
-    // occur.
+    // Adds the cache to the end of the pipeline and calls optimizeContainer which will ensure the
+    // stages of the pipeline are in the correct and optimal order, before the cache runs
+    // doOptimizeAt. During the optimization process, the cache will either move itself to the
+    // correct position in the pipeline, or abandon itself if no suitable cache position exists.
+    // Once the cache is finished optimizing, the entire pipeline is optimized.
+    //
+    // When pipeline optimization is disabled, 'Pipeline::optimizePipeline()' exits early and so the
+    // cache would not be placed correctly. So we only add the cache when pipeline optimization is
+    // enabled.
     if (auto fp = globalFailPointRegistry().find("disablePipelineOptimization");
         fp && fp->shouldFail()) {
         _cache->abandon();
     } else {
+        // The cache needs to see the full pipeline in its correct order in order to properly place
+        // itself, therefore we are adding it to the end of the pipeline, and calling
+        // optimizeContainer on the pipeline to ensure the rest of the pipeline is in its correct
+        // order before optimizing the cache.
         pipeline.addFinalSource(
             DocumentSourceSequentialDocumentCache::create(_fromExpCtx, _cache.get_ptr()));
-    }
 
-    pipeline.optimizePipeline();
+        auto& container = pipeline.getSources();
+
+        Pipeline::optimizeContainer(&container);
+
+        // We want to ensure the cache has been optimized prior to any calls to optimize().
+        findAndOptimizeSequentialDocumentCache(pipeline);
+
+        // Optimize the pipeline, with the cache in its correct position if it exists.
+        Pipeline::optimizeEachStage(&container);
+    }
 }
 
 DocumentSource::GetModPathsReturn DocumentSourceLookUp::getModifiedPaths() const {
@@ -1023,44 +1061,61 @@ void DocumentSourceLookUp::appendSpecificExecStats(MutableDocument& doc) const {
     doc["indexesUsed"] = Value{std::move(indexesUsedVec)};
 }
 
-void DocumentSourceLookUp::serializeToArray(
-    std::vector<Value>& array, boost::optional<ExplainOptions::Verbosity> explain) const {
-
+void DocumentSourceLookUp::serializeToArray(std::vector<Value>& array,
+                                            const SerializationOptions& opts) const {
     // Support alternative $lookup from config.cache.chunks* namespaces.
     auto fromValue = (pExpCtx->ns.db() == _fromNs.db())
-        ? Value(_fromNs.coll())
-        : Value(Document{{"db", _fromNs.db()}, {"coll", _fromNs.coll()}});
+        ? Value(opts.serializeIdentifier(_fromNs.coll()))
+        : Value(Document{{"db", opts.serializeIdentifier(_fromNs.db())},
+                         {"coll", opts.serializeIdentifier(_fromNs.coll())}});
 
-    MutableDocument output(
-        Document{{getSourceName(), Document{{"from", fromValue}, {"as", _as.fullPath()}}}});
+    MutableDocument output(Document{
+        {getSourceName(), Document{{"from", fromValue}, {"as", opts.serializeFieldPath(_as)}}}});
 
     if (hasLocalFieldForeignFieldJoin()) {
-        output[getSourceName()]["localField"] = Value(_localField->fullPath());
-        output[getSourceName()]["foreignField"] = Value(_foreignField->fullPath());
+        output[getSourceName()]["localField"] = Value(opts.serializeFieldPath(_localField.value()));
+        output[getSourceName()]["foreignField"] =
+            Value(opts.serializeFieldPath(_foreignField.value()));
     }
 
     // Add a pipeline field if only-pipeline syntax was used (to ensure the output is valid $lookup
     // syntax) or if a $match was absorbed.
-    auto pipeline = _userPipeline.get_value_or(std::vector<BSONObj>());
+    auto serializedPipeline = [&]() -> std::vector<BSONObj> {
+        auto pipeline = _userPipeline.get_value_or(std::vector<BSONObj>());
+        if (opts.transformIdentifiers ||
+            opts.literalPolicy != LiteralSerializationPolicy::kUnchanged) {
+            return Pipeline::parse(pipeline, _fromExpCtx)->serializeToBson(opts);
+        }
+        return pipeline;
+    }();
     if (_additionalFilter) {
-        pipeline.emplace_back(BSON("$match" << *_additionalFilter));
+        auto serializedFilter = [&]() -> BSONObj {
+            if (opts.transformIdentifiers ||
+                opts.literalPolicy != LiteralSerializationPolicy::kUnchanged) {
+                auto filter =
+                    uassertStatusOK(MatchExpressionParser::parse(*_additionalFilter, pExpCtx));
+                return filter->serialize(opts);
+            }
+            return *_additionalFilter;
+        }();
+        serializedPipeline.emplace_back(BSON("$match" << serializedFilter));
     }
-    if (!hasLocalFieldForeignFieldJoin() || pipeline.size() > 0) {
+    if (!hasLocalFieldForeignFieldJoin() || serializedPipeline.size() > 0) {
         MutableDocument exprList;
         for (auto letVar : _letVariables) {
-            exprList.addField(letVar.name,
-                              letVar.expression->serialize(static_cast<bool>(explain)));
+            exprList.addField(opts.serializeFieldPathFromString(letVar.name),
+                              letVar.expression->serialize(opts));
         }
         output[getSourceName()]["let"] = Value(exprList.freeze());
 
-        output[getSourceName()]["pipeline"] = Value(pipeline);
+        output[getSourceName()]["pipeline"] = Value(serializedPipeline);
     }
 
     if (_hasExplicitCollation) {
         output[getSourceName()]["_internalCollation"] = Value(_fromExpCtx->getCollatorBSON());
     }
 
-    if (explain) {
+    if (opts.verbosity) {
         if (_unwindSrc) {
             const boost::optional<FieldPath> indexPath = _unwindSrc->indexPath();
             output[getSourceName()]["unwinding"] =
@@ -1068,8 +1123,11 @@ void DocumentSourceLookUp::serializeToArray(
                           << _unwindSrc->preserveNullAndEmptyArrays() << "includeArrayIndex"
                           << (indexPath ? Value(indexPath->fullPath()) : Value())));
         }
-
-        if (explain.get() >= ExplainOptions::Verbosity::kExecStats) {
+        // Conflict is .get() vs .value(), changed in 6.1 during
+        // https://jira.mongodb.org/browse/SERVER-68246. Going to stick with 7.0's version of
+        // '.value()', I think there is no meaningful difference here since line 1080 check that the
+        // optional is set.
+        if (opts.verbosity.value() >= ExplainOptions::Verbosity::kExecStats) {
             appendSpecificExecStats(output);
         }
 

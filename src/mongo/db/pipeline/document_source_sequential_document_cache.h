@@ -97,6 +97,10 @@ public:
         return newStage;
     }
 
+    bool hasOptimizedPos() const {
+        return _hasOptimizedPos;
+    }
+
 protected:
     GetNextResult doGetNext() final;
     Pipeline::SourceContainer::iterator doOptimizeAt(Pipeline::SourceContainer::iterator itr,
@@ -106,7 +110,7 @@ private:
     DocumentSourceSequentialDocumentCache(const boost::intrusive_ptr<ExpressionContext>& expCtx,
                                           SequentialDocumentCache* cache);
 
-    Value serialize(boost::optional<ExplainOptions::Verbosity> explain = boost::none) const final;
+    Value serialize(const SerializationOptions& opts = SerializationOptions{}) const final override;
 
     SequentialDocumentCache* _cache;
 

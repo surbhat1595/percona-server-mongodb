@@ -33,7 +33,7 @@
 #include <functional>
 #include <queue>
 
-#include "mongo/db/logical_session_id.h"
+#include "mongo/db/query/query_stats/key.h"
 #include "mongo/s/query/cluster_client_cursor.h"
 
 namespace mongo {
@@ -106,9 +106,9 @@ public:
 
     boost::optional<uint32_t> getQueryHash() const final;
 
-    std::uint64_t getNBatches() const final;
+    boost::optional<std::size_t> getQueryStatsKeyHash() const final;
 
-    void incNBatches() final;
+    bool getQueryStatsWillNeverExhaust() const final;
 
     /**
      * Returns false unless the mock cursor has been fully iterated.
@@ -119,6 +119,8 @@ public:
      * Queues an error response.
      */
     void queueError(Status status);
+
+    std::unique_ptr<query_stats::Key> takeKey() final;
 
 private:
     bool _killed = false;

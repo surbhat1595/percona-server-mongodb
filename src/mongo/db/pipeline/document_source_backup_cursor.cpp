@@ -65,8 +65,7 @@ const char* DocumentSourceBackupCursor::getSourceName() const {
     return kStageName.rawData();
 }
 
-Value DocumentSourceBackupCursor::serialize(
-    boost::optional<ExplainOptions::Verbosity> explain) const {
+Value DocumentSourceBackupCursor::serialize(const SerializationOptions& opts) const {
     return Value(Document{
         {getSourceName(),
          Document{

@@ -43,6 +43,7 @@
 #include "mongo/db/logical_session_cache.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
+#include "mongo/db/query/cursor_response.h"
 #include "mongo/db/query/distinct_command_gen.h"
 #include "mongo/db/repl/repl_client_info.h"
 #include "mongo/db/s/sharding_logging.h"
@@ -1404,10 +1405,12 @@ void ShardingCatalogManager::upgradeChunksHistory(OperationContext* opCtx,
             }()});
             return updateOp;
         }());
-        request.setWriteConcern(ShardingCatalogClient::kLocalWriteConcern.toBSON());
 
-        auto response = configShard->runBatchWriteCommand(
-            opCtx, Shard::kDefaultConfigCommandTimeout, request, Shard::RetryPolicy::kIdempotent);
+        auto response = configShard->runBatchWriteCommand(opCtx,
+                                                          Shard::kDefaultConfigCommandTimeout,
+                                                          request,
+                                                          ShardingCatalogClient::kLocalWriteConcern,
+                                                          Shard::RetryPolicy::kIdempotent);
         uassertStatusOK(response.toStatus());
 
         uassert(ErrorCodes::Error(5760502),
@@ -2073,11 +2076,13 @@ bool ShardingCatalogManager::clearChunkEstimatedSize(OperationContext* opCtx, co
         }()});
         return updateOp;
     }());
-    request.setWriteConcern(ShardingCatalogClient::kMajorityWriteConcern.toBSON());
 
     auto configShard = Grid::get(opCtx)->shardRegistry()->getConfigShard();
-    auto response = configShard->runBatchWriteCommand(
-        opCtx, Shard::kDefaultConfigCommandTimeout, request, Shard::RetryPolicy::kIdempotent);
+    auto response = configShard->runBatchWriteCommand(opCtx,
+                                                      Shard::kDefaultConfigCommandTimeout,
+                                                      request,
+                                                      ShardingCatalogClient::kMajorityWriteConcern,
+                                                      Shard::RetryPolicy::kIdempotent);
 
     uassertStatusOK(response.toStatus());
     return response.getN() > 0;

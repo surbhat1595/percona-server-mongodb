@@ -61,18 +61,19 @@ public:
     };
 
     DocumentSourceUnionWith(const boost::intrusive_ptr<ExpressionContext>& expCtx,
-                            std::unique_ptr<Pipeline, PipelineDeleter> pipeline)
-        : DocumentSource(kStageName, expCtx), _pipeline(std::move(pipeline)) {
-        // If this pipeline is being run as part of explain, then cache a copy to use later during
-        // serialization.
-        if (expCtx->explain >= ExplainOptions::Verbosity::kExecStats) {
-            _cachedPipeline = _pipeline->getSources();
-        }
-    }
+                            NamespaceString unionNss,
+                            std::vector<BSONObj> pipeline);
+
+    // Expose a constructor that skips the parsing step for testing purposes.
+    DocumentSourceUnionWith(const boost::intrusive_ptr<ExpressionContext>& expCtx,
+                            std::unique_ptr<Pipeline, PipelineDeleter> pipeline);
 
     DocumentSourceUnionWith(const DocumentSourceUnionWith& original,
                             const boost::intrusive_ptr<ExpressionContext>& newExpCtx)
-        : DocumentSource(kStageName, newExpCtx), _pipeline(original._pipeline->clone()) {}
+        : DocumentSource(kStageName, newExpCtx),
+          _pipeline(original._pipeline->clone()),
+          _userNss(original._userNss),
+          _userPipeline(original._userPipeline) {}
 
     ~DocumentSourceUnionWith();
 
@@ -180,7 +181,7 @@ private:
         kFinished
     };
 
-    Value serialize(boost::optional<ExplainOptions::Verbosity> explain = boost::none) const final;
+    Value serialize(const SerializationOptions& opts = SerializationOptions{}) const final override;
 
     void addViewDefinition(NamespaceString nss, std::vector<BSONObj> viewPipeline);
 
@@ -189,7 +190,15 @@ private:
         const ExceptionFor<ErrorCodes::CommandOnShardedViewNotSupportedOnMongod>& e);
 
     std::unique_ptr<Pipeline, PipelineDeleter> _pipeline;
-    Pipeline::SourceContainer _cachedPipeline;
+    // The original, unresolved namespace to union.
+    NamespaceString _userNss;
+    // The aggregation pipeline defined with the user request, prior to optimization and view
+    // resolution.
+    std::vector<BSONObj> _userPipeline;
+    // Match and/or project stages after a $unionWith can be pushed down into the $unionWith (and
+    // the head of the pipeline). If we're doing an explain with execution stats, we will need
+    // copies of these stages as they may be pushed down to the find layer.
+    std::vector<BSONObj> _pushedDownStages;
     ExecutionProgress _executionState = ExecutionProgress::kIteratingSource;
     UnionWithStats _stats;
 };

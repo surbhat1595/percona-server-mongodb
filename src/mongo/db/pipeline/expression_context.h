@@ -114,6 +114,16 @@ public:
     };
 
     /**
+     * Constructs an ExpressionContext to be used for find command parsing and evaluation.
+     */
+    ExpressionContext(OperationContext* opCtx,
+                      const FindCommandRequest& findCmd,
+                      std::unique_ptr<CollatorInterface> collator,
+                      bool mayDbProfile,
+                      boost::optional<ExplainOptions::Verbosity> verbosity = boost::none,
+                      bool allowDiskUseByDefault = false);
+
+    /**
      * Constructs an ExpressionContext to be used for Pipeline parsing and evaluation.
      * 'resolvedNamespaces' maps collection names (not full namespaces) to ResolvedNamespaces.
      */
@@ -159,6 +169,22 @@ public:
                       const boost::optional<BSONObj>& letParameters = boost::none,
                       bool mayDbProfile = true,
                       boost::optional<ExplainOptions::Verbosity> explain = boost::none);
+
+    /**
+     * Constructs a blank ExpressionContext suitable for creating Query Shapes, but it could be
+     * applied to other use cases as well.
+     *
+     * The process for creating a Query Shape sometimes requires re-parsing the BSON into a proper
+     * AST, and for that you need an ExpressionContext.
+     *
+     * Note: this is meant for introspection and is not suitable for using to execute queries -
+     * since it does not contain for example a collation argument or a real MongoProcessInterface
+     * for execution.
+     */
+    static boost::intrusive_ptr<ExpressionContext> makeBlankExpressionContext(
+        OperationContext* opCtx,
+        const NamespaceStringOrUUID& nssOrUUID,
+        boost::optional<BSONObj> shapifiedLet = boost::none);
 
     /**
      * Used by a pipeline to check for interrupts so that killOp() works. Throws a UserAssertion if
@@ -278,7 +304,8 @@ public:
      */
     const ResolvedNamespace& getResolvedNamespace(const NamespaceString& nss) const {
         auto it = _resolvedNamespaces.find(nss.coll());
-        invariant(it != _resolvedNamespaces.end());
+        invariant(it != _resolvedNamespaces.end(),
+                  str::stream() << "No resolved namespace provided for " << nss.toString());
         return it->second;
     };
 
@@ -558,6 +585,14 @@ protected:
     bool _requiresTimeseriesExtendedRangeSupport = false;
 
 private:
+    // Instantiates an ExpressionContext which does not increment expression counters and does not
+    // enforce FCV restrictions. It is used for implementing the `makeBlankExpressionContext()`
+    // factory method. Please also note that the runtime constants are not given real/accurate
+    // values of '$$NOW' and '$$CLUSTER_TIME', in the name of efficiency.
+    ExpressionContext(OperationContext* opCtx,
+                      const NamespaceString& ns,
+                      const boost::optional<BSONObj>& letParameters = boost::none);
+
     boost::optional<ExpressionCounters> _expressionCounters = boost::none;
 };
 

@@ -144,8 +144,8 @@ WindowFunctionStatement WindowFunctionStatement::parse(BSONElement elem,
         window_function::Expression::parse(elem.embeddedObject(), sortBy, expCtx));
 }
 void WindowFunctionStatement::serialize(MutableDocument& outputFields,
-                                        boost::optional<ExplainOptions::Verbosity> explain) const {
-    outputFields[fieldName] = expr->serialize(explain);
+                                        const SerializationOptions& opts) const {
+    outputFields[opts.serializeFieldPathFromString(fieldName)] = expr->serialize(opts);
 }
 
 list<intrusive_ptr<DocumentSource>> document_source_set_window_fields::create(
@@ -218,12 +218,10 @@ list<intrusive_ptr<DocumentSource>> document_source_set_window_fields::create(
         } else {
             // In DocumentSource we don't have a mechanism for generating non-colliding field names,
             // so we have to choose the tmp name carefully to make a collision unlikely in practice.
-            std::array<unsigned char, 16> nonce = UUID::gen().data();
-            // We encode as a base64 string for a shorter, more performant field name (length 22).
-            std::string tmpField = base64::encode(nonce.data(), sizeof(nonce));
-            simplePartitionBy = FieldPath{tmpField};
+            auto tmp = "__internal_setWindowFields_partition_key";
+            simplePartitionBy = FieldPath{tmp};
             simplePartitionByExpr = ExpressionFieldPath::createPathFromString(
-                expCtx.get(), tmpField, expCtx->variablesParseState);
+                expCtx.get(), tmp, expCtx->variablesParseState);
             complexPartitionBy = partitionBy;
         }
     }
@@ -288,39 +286,38 @@ intrusive_ptr<DocumentSource> DocumentSourceInternalSetWindowFields::optimize() 
     return this;
 }
 
-Value DocumentSourceInternalSetWindowFields::serialize(
-    boost::optional<ExplainOptions::Verbosity> explain) const {
+Value DocumentSourceInternalSetWindowFields::serialize(const SerializationOptions& opts) const {
     MutableDocument spec;
     spec[SetWindowFieldsSpec::kPartitionByFieldName] =
-        _partitionBy ? (*_partitionBy)->serialize(false) : Value();
+        _partitionBy ? (*_partitionBy)->serialize(opts) : Value();
 
-    auto sortKeySerialization = explain
+    auto sortKeySerialization = opts.verbosity
         ? SortPattern::SortKeySerialization::kForExplain
         : SortPattern::SortKeySerialization::kForPipelineSerialization;
     spec[SetWindowFieldsSpec::kSortByFieldName] =
-        _sortBy ? Value(_sortBy->serialize(sortKeySerialization)) : Value();
+        _sortBy ? Value(_sortBy->serialize(sortKeySerialization, opts)) : Value();
 
     MutableDocument output;
     for (auto&& stmt : _outputFields) {
-        stmt.serialize(output, explain);
+        stmt.serialize(output, opts);
     }
     spec[SetWindowFieldsSpec::kOutputFieldName] = output.freezeToValue();
 
     MutableDocument out;
     out[getSourceName()] = Value(spec.freeze());
 
-    if (explain && *explain >= ExplainOptions::Verbosity::kExecStats) {
+    if (opts.verbosity && *opts.verbosity >= ExplainOptions::Verbosity::kExecStats) {
         MutableDocument md;
 
         for (auto&& [fieldName, function] : _executableOutputs) {
-            md[fieldName] =
-                Value(static_cast<long long>(_memoryTracker[fieldName].maxMemoryBytes()));
+            md[opts.serializeFieldPathFromString(fieldName)] = opts.serializeLiteral(
+                static_cast<long long>(_memoryTracker[fieldName].maxMemoryBytes()));
         }
 
         out["maxFunctionMemoryUsageBytes"] = Value(md.freezeToValue());
         out["maxTotalMemoryUsageBytes"] =
-            Value(static_cast<long long>(_memoryTracker.maxMemoryBytes()));
-        out["usedDisk"] = Value(_iterator.usedDisk());
+            opts.serializeLiteral(static_cast<long long>(_memoryTracker.maxMemoryBytes()));
+        out["usedDisk"] = opts.serializeLiteral(_iterator.usedDisk());
     }
 
     return Value(out.freezeToValue());
@@ -477,13 +474,15 @@ DocumentSource::GetNextResult DocumentSourceInternalSetWindowFields::doGetNext()
     // Populate the output document with the result from each window function.
     auto projSpec = std::make_unique<projection_executor::InclusionNode>(
         ProjectionPolicies{ProjectionPolicies::DefaultIdPolicy::kIncludeId});
-    for (auto&& [fieldName, function] : _executableOutputs) {
+    for (auto&& outputField : _outputFields) {
         try {
             // If we hit a uassert while evaluating expressions on user data, delete the temporary
             // table before aborting the operation.
+            auto& fieldName = outputField.fieldName;
             projSpec->addExpressionForPath(
                 FieldPath(fieldName),
-                ExpressionConstant::create(pExpCtx.get(), function->getNext()));
+                ExpressionConstant::create(pExpCtx.get(),
+                                           _executableOutputs[fieldName]->getNext()));
         } catch (const DBException&) {
             _iterator.finalize();
             throw;

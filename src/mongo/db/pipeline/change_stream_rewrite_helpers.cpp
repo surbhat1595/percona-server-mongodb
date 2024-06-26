@@ -227,7 +227,7 @@ boost::intrusive_ptr<Expression> exprRewriteOperationType(
     opCases.push_back(fromjson("{case: {$ne: ['$o.collMod', '$$REMOVE']}, then: 'modify'}"));
 
     // The default case, if nothing matches.
-    auto defaultCase = ExpressionConstant::create(expCtx.get(), Value())->serialize(false);
+    auto defaultCase = ExpressionConstant::create(expCtx.get(), Value())->serialize();
 
     // Build the final expression object...
     BSONObjBuilder exprBuilder;
@@ -417,7 +417,7 @@ boost::intrusive_ptr<Expression> exprRewriteDocumentKey(
         fromjson("{case: {$eq: ['$op', 'u']}, then: '" + updateAndReplacePath + "'}"));
 
     // The default case, if nothing matches.
-    auto defaultCase = ExpressionConstant::create(expCtx.get(), Value())->serialize(false);
+    auto defaultCase = ExpressionConstant::create(expCtx.get(), Value())->serialize();
 
     // Build the expression BSON object.
     BSONObjBuilder exprBuilder;
@@ -1159,7 +1159,7 @@ boost::intrusive_ptr<Expression> exprRewriteNs(
     collCases.push_back(fromjson("{case: {$ne: ['$o.collMod', '$$REMOVE']}, then: '$o.collMod'}"));
 
     // The default case, if nothing matches.
-    auto defaultCase = ExpressionConstant::create(expCtx.get(), Value())->serialize(false);
+    auto defaultCase = ExpressionConstant::create(expCtx.get(), Value())->serialize();
 
     // Build the collection expression object...
     BSONObjBuilder collExprBuilder;
@@ -1500,7 +1500,8 @@ std::unique_ptr<MatchExpression> rewriteMatchExpressionTree(
         case MatchExpression::EXPRESSION: {
             // Agg expressions are rewritten in-place, so we must clone the expression tree.
             auto origExprVal =
-                static_cast<const ExprMatchExpression*>(root)->getExpression()->serialize(false);
+                static_cast<const ExprMatchExpression*>(root)->getExpression()->serialize(
+                    SerializationOptions{});
             auto clonedExpr = Expression::parseOperand(
                 expCtx.get(), BSON("" << origExprVal).firstElement(), expCtx->variablesParseState);
 
@@ -1513,7 +1514,11 @@ std::unique_ptr<MatchExpression> rewriteMatchExpressionTree(
         }
         default: {
             if (auto pathME = dynamic_cast<const PathMatchExpression*>(root)) {
-                tassert(5687201, "Unexpected empty path", !pathME->path().empty());
+                // Only attempt to rewrite non-empty paths.
+                if (pathME->path().empty()) {
+                    return nullptr;
+                }
+
                 auto firstPath = pathME->fieldRef()->getPart(0).toString();
 
                 // Only attempt to rewrite paths that begin with one of the caller-requested fields.

@@ -5,7 +5,7 @@ buildvariants:
   display_name: Amazon Linux 2
   cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
   run_on:
-  - amazon2-test
+  - amazon2-latest-small
   expansions:
     test_flags: >-
       --excludeWithAnyTags=SERVER-34286,incompatible_with_amazon_linux,requires_latch_analyzer --enableEnterpriseTests=off
@@ -22,14 +22,14 @@ buildvariants:
     packager_distro: amazon2
     repo_edition: org
     scons_cache_scope: shared
-    large_distro_name: amazon2-large
+    large_distro_name: amazon2-latest-large
   tasks:
   - name: compile_test_and_package_serial_TG
     distros:
-    - amazon2-build
+    - amazon2-latest-large
   - name: compile_test_and_package_parallel_unittest_stream_TG
     distros:
-    - amazon2-build
+    - amazon2-latest-large
   - name: .aggfuzzer .common
   - name: aggregation
   - name: .auth !.audit !.multiversion
@@ -57,7 +57,7 @@ buildvariants:
   display_name: "Enterprise Amazon Linux 2"
   cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
   run_on:
-  - amazon2-test
+  - amazon2-latest-small
   expansions:
     additional_package_targets: archive-mongocryptd archive-mongocryptd-debug
     # TODO BUILD-13887 should fix uses_pykmip incompatibility.
@@ -80,13 +80,13 @@ buildvariants:
   tasks:
   - name: compile_test_and_package_serial_TG
     distros:
-    - amazon2-build
+    - amazon2-latest-large
   - name: compile_test_and_package_parallel_unittest_stream_TG
     distros:
-    - amazon2-build
+    - amazon2-latest-large
   - name: compile_integration_and_test_parallel_stream_TG
     distros:
-    - amazon2-build
+    - amazon2-latest-large
   - name: .aggfuzzer .common
   - name: aggregation
   - name: audit
@@ -115,7 +115,7 @@ buildvariants:
   display_name: Amazon Linux 2 arm64
   cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
   run_on:
-  - amazon2-arm64-small
+  - amazon2-arm64-latest-small
   expansions:
     push_path: linux
     push_bucket: downloads.mongodb.org
@@ -129,21 +129,21 @@ buildvariants:
     packager_distro: amazon2
     repo_edition: org
     scons_cache_scope: shared
-    large_distro_name: amazon2-arm64-large
+    large_distro_name: amazon2-arm64-latest-large
   tasks:
   - name: compile_test_and_package_serial_TG
     distros:
-    - amazon2-arm64-large
+    - amazon2-arm64-latest-large
   - name: compile_test_and_package_parallel_unittest_stream_TG
     distros:
-    - amazon2-arm64-large
+    - amazon2-arm64-latest-large
   - name: aggregation
   - name: .auth !.audit !.multiversion
   - name: causally_consistent_jscore_txns_passthrough
   - name: .misc_js
   - name: .concurrency .common
     distros:
-    - amazon2-arm64-large
+    - amazon2-arm64-latest-large
   - name: concurrency_replication_causal_consistency_gen
   - name: disk_wiredtiger
   - name: .jscore .common
@@ -162,7 +162,7 @@ buildvariants:
   display_name: "Enterprise Amazon Linux 2 arm64"
   cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
   run_on:
-  - amazon2-arm64-small
+  - amazon2-arm64-latest-small
   expansions:
     additional_package_targets: archive-mongocryptd archive-mongocryptd-debug archive-mh archive-mh-debug
     push_path: linux
@@ -187,13 +187,13 @@ buildvariants:
   tasks:
   - name: compile_test_and_package_serial_TG
     distros:
-    - amazon2-arm64-large
+    - amazon2-arm64-latest-large
   - name: compile_test_and_package_parallel_unittest_stream_TG
     distros:
-    - amazon2-arm64-large
+    - amazon2-arm64-latest-large
   - name: compile_integration_and_test_parallel_stream_TG
     distros:
-    - amazon2-arm64-large
+    - amazon2-arm64-latest-large
   - name: test_api_version_compatibility
   - name: .aggfuzzer
   - name: .aggregation
@@ -206,48 +206,47 @@ buildvariants:
   - name: .concurrency !.large !.ubsan !.no_txns !.debug_only
   - name: .concurrency .large !.ubsan !.no_txns !.debug_only
     distros:
-    - amazon2-arm64-large
+    - amazon2-arm64-latest-large
   - name: config_fuzzer_concurrency
   - name: config_fuzzer_simulate_crash_concurrency_replication
     distros:
-    - amazon2-arm64-large
+    - amazon2-arm64-latest-large
   - name: config_fuzzer_concurrency_replication
     distros:
-    - amazon2-arm64-large
+    - amazon2-arm64-latest-large
   - name: config_fuzzer_jsCore
   - name: config_fuzzer_replica_sets_jscore_passthrough
     distros:
-    - amazon2-arm64-large
+    - amazon2-arm64-latest-large
   - name: disk_wiredtiger
   - name: .encrypt
   - name: idl_tests
   - name: initial_sync_fuzzer_gen
   - name: jsCore
     distros:
-    - amazon2-arm64-large
+    - amazon2-arm64-latest-large
   - name: .jscore .common !jsCore
   - name: jsCore_minimum_batch_size
   - name: jsCore_txns_large_txns_format
   - name: json_schema
   - name: .jstestfuzz !.flow_control  # Flow control jstestfuzz take longer.
   - name: libunwind_tests
-  - name: mqlrun
   - name: .multi_shard
   - name: multi_stmt_txn_jscore_passthrough_with_migration_gen
   - name: .query_fuzzer
   - name: .read_write_concern .large
     distros:
-    - amazon2-arm64-large
+    - amazon2-arm64-latest-large
   - name: .read_write_concern !.large
   - name: .replica_sets !.encrypt !.auth
     distros:
-    - amazon2-arm64-large
+    - amazon2-arm64-latest-large
   - name: replica_sets_api_version_jscore_passthrough_gen
   - name: replica_sets_reconfig_jscore_passthrough_gen
   - name: retryable_writes_jscore_passthrough_gen
   - name: retryable_writes_jscore_stepdown_passthrough_gen
     distros:
-    - amazon2-arm64-large
+    - amazon2-arm64-latest-large
   - name: .read_only
   - name: .rollbackfuzzer
   - name: sasl
@@ -263,16 +262,16 @@ buildvariants:
   - name: snmp
   - name: .crypt
     distros:
-    - amazon2-arm64-large
+    - amazon2-arm64-latest-large
   - name: .publish_crypt
   - name: secondary_reads_passthrough_gen
   - name: server_discovery_and_monitoring_json_test_TG
   - name: .serverless
     distros:
-    - amazon2-arm64-large
+    - amazon2-arm64-latest-large
   - name: server_selection_json_test_TG
     distros:
-    - amazon2-arm64-large
+    - amazon2-arm64-latest-large
   - name: .publish
   - name: generate_buildid_to_debug_symbols_mapping
   - name: vector_search
@@ -563,9 +562,6 @@ buildvariants:
   - name: audit
   - name: causally_consistent_jscore_txns_passthrough
   - name: .encrypt !.replica_sets !.aggregation !.sharding !.jscore
-  - name: .jepsen_docker
-    distros:
-    - debian10-large
   - name: .jscore .common !.decimal !.sharding
   - name: .jstestfuzz .common
   - name: .logical_session_cache .one_sec
@@ -593,8 +589,10 @@ buildvariants:
     test_flags: --enableEnterpriseTests=off --excludeWithAnyTags=requires_latch_analyzer
     multiversion_platform: linux_x86_64
     multiversion_edition: base
-    multiversion_platform_42_or_later: debian11
+    multiversion_platform_42_or_later: debian10
     multiversion_edition_42_or_later: targeted
+    multiversion_platform_last_lts: debian11
+    multiversion_edition_last_lts: targeted
     has_packages: true
     packager_script: packager.py
     packager_arch: x86_64
@@ -646,8 +644,10 @@ buildvariants:
     crypt_task_compile_flags: SHLINKFLAGS_EXTRA="-Wl,-Bsymbolic -Wl,--no-gnu-unique" CCFLAGS="-fno-gnu-unique"
     multiversion_platform: linux_x86_64
     multiversion_edition: base
-    multiversion_platform_42_or_later: debian11
+    multiversion_platform_42_or_later: debian10
     multiversion_edition_42_or_later: enterprise
+    multiversion_platform_last_lts: debian11
+    multiversion_edition_last_lts: enterprise
     has_packages: true
     packager_script: packager_enterprise.py
     packager_arch: x86_64
@@ -880,7 +880,6 @@ buildvariants:
   - name: json_schema
   - name: .jstestfuzz !.flow_control  # Flow control jstestfuzz take longer.
   - name: libunwind_tests
-  - name: mqlrun
   - name: .multi_shard
   - name: multi_stmt_txn_jscore_passthrough_with_migration_gen
   - name: multiversion_gen
@@ -1355,6 +1354,7 @@ buildvariants:
     repo_edition: enterprise
     scons_cache_scope: shared
     test_flags: --excludeWithAnyTags=requires_latch_analyzer
+    large_distro_name: suse12-sp5-large
   tasks:
   - name: compile_test_and_package_serial_TG
     distros:
@@ -1887,6 +1887,31 @@ buildvariants:
   - name: .publish
   - name: generate_buildid_to_debug_symbols_mapping
 
+
+- name: enterprise-ubuntu2204-jepsen
+  display_name: Jepsen Tests on Enterprise Ubuntu 22.04
+  tags: ["bazel_check"]
+  cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
+  run_on:
+    - ubuntu2204-small
+  stepback: false
+  expansions:
+    compile_flags: >-
+      --ssl
+      MONGO_DISTMOD=ubuntu2204
+      -j$(grep -c ^processor /proc/cpuinfo)
+      --variables-files=etc/scons/mongodbtoolchain_stable_gcc.vars
+    scons_cache_scope: shared
+    large_distro_name: ubuntu2204-large
+    compile_variant: enterprise-ubuntu2204-64
+  tasks:
+    - name: compile_test_and_package_serial_TG
+      distros:
+        - ubuntu2204-large
+    - name: .jepsen_docker
+      distros:
+        - ubuntu2204-large
+
 - name: enterprise-ubuntu2004-arm64
   display_name: Enterprise Ubuntu 20.04 arm64
   cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
@@ -2262,7 +2287,6 @@ buildvariants:
   - name: auth_audit_gen
   - name: .encrypt !.replica_sets !.sharding !.aggregation !.jscore
   - name: .logical_session_cache .one_sec
-  - name: mqlrun
   - name: replica_sets_auth_gen
   - name: sasl
   - name: push
@@ -2294,7 +2318,6 @@ buildvariants:
   - name: fle
   - name: fle2
   - name: .logical_session_cache .one_sec
-  - name: mqlrun
   - name: replica_sets_auth_gen
   - name: sasl
   - name: push
@@ -2305,18 +2328,25 @@ buildvariants:
   display_name: Amazon Linux 2 arm64 Query Patch Only (trySbeEngine)
   cron: "0 4 * * 0" # From the ${project_weekly_cron} parameter.
   run_on:
-  - amazon2-arm64-small
+  - amazon2-arm64-latest-small
   expansions:
     additional_package_targets: archive-mongocryptd archive-mongocryptd-debug archive-mh archive-mh-debug
     push_path: linux
     push_bucket: downloads.10gen.com
     push_name: linux
     push_arch: aarch64-enterprise-amazon2
-    compile_flags: --ssl MONGO_DISTMOD=amazon2 -j$(grep -c ^processor /proc/cpuinfo) --variables-files=etc/scons/mongodbtoolchain_v3_gcc.vars
+    # Diagnostic latches are disabled by default, and we match that behavior here. We also need to
+    # exclude tests with 'requires_latch_analyzer'.
+    compile_flags: >-
+      --ssl
+      MONGO_DISTMOD=amazon2
+      -j$(grep -c ^processor /proc/cpuinfo)
+      --variables-files=etc/scons/mongodbtoolchain_v3_gcc.vars
+      --use-diagnostic-latches=off
     crypt_task_compile_flags: SHLINKFLAGS_EXTRA="-Wl,-Bsymbolic -Wl,--no-gnu-unique" CCFLAGS="-fno-gnu-unique"
     test_flags: >-
       --mongodSetParameters="{featureFlagSbeFull: true}"
-      --excludeWithAnyTags=resource_intensive,incompatible_with_amazon_linux,sbe_incompatible
+      --excludeWithAnyTags=resource_intensive,incompatible_with_amazon_linux,sbe_incompatible,requires_latch_analyzer
     has_packages: true
     multiversion_platform: amazon2
     multiversion_edition: enterprise
@@ -2328,11 +2358,11 @@ buildvariants:
     packager_distro: amazon2
     repo_edition: enterprise
     scons_cache_scope: shared
-    large_distro_name: amazon2-arm64-large
+    large_distro_name: amazon2-arm64-latest-large
   tasks:
   - name: compile_and_archive_dist_test_then_package_TG
     distros:
-    - amazon2-arm64-large
+    - amazon2-arm64-latest-large
   - name: aggregation_mongos_passthrough
   - name: aggregation_sharded_collections_passthrough
   - name: aggregation_one_shard_sharded_collections
@@ -2342,7 +2372,7 @@ buildvariants:
   - name: noPassthroughWithMongod_gen
   - name: jsCore
     distros:
-    - amazon2-arm64-large
+    - amazon2-arm64-latest-large
   - name: replica_sets_jscore_passthrough_gen
   - name: sharded_collections_jscore_passthrough_gen
   - name: sharding_jscore_passthrough
@@ -2350,3 +2380,156 @@ buildvariants:
   - name: concurrency_gen
   - name: concurrency_replication_gen
   - name: concurrency_sharded_replication_gen
+
+# This task is responsible for creating a AL2023 x86 server binary candidate for 10gen/mongot.
+# A project trigger defined on 10gen/mongot runs when this variant succeeds, to check if the resulting
+# binary candidate passes their tests and is therefore safe to use in their pre-commit integration tests.
+- name: amazon-linux-2023-x86-mongot-integration-cron-only
+  display_name: "AL2023 x86 mongot integration tasks cron only"
+  cron: "0 */4 * * *" # Run these tasks every 4 hours
+  patchable: false
+  run_on:
+  - amazon2023.0-small
+  expansions:
+    push_path: linux
+    push_bucket: downloads.10gen.com
+    push_name: linux
+    push_arch: x86_64-enterprise-amazon2023
+    compile_flags: --ssl MONGO_DISTMOD=amazon2023 -j$(grep -c ^processor /proc/cpuinfo) --variables-files=etc/scons/mongodbtoolchain_stable_gcc.vars --enterprise-features="audit,encryptdb,fcbis,fips,fle,hot_backups,inmemory,kerberos,vector_search,ldap,live_import,mongohouse,queryable,sasl,search,serverless"
+    # TODO BUILD-13887 should fix uses_pykmip incompatibility.
+    test_flags: --excludeWithAnyTags=incompatible_with_amazon_linux,requires_ldap_pool,uses_pykmip,requires_v4_0,requires_external_data_source,requires_latch_analyzer
+    has_packages: false
+    multiversion_platform: amazon2023
+    multiversion_edition: enterprise
+    multiversion_architecture: x86_64
+    packager_script: packager_enterprise.py
+    packager_arch: x86_64
+    packager_distro: amazon2023
+    repo_edition: enterprise
+    scons_cache_scope: shared
+    compile_variant: amazon-linux-2023-x86-mongot-integration-cron-only
+  tasks:
+  - name: compile_test_and_package_serial_TG
+    distros:
+    - amazon2023.0-large
+  - name: search
+  - name: search_auth
+  - name: search_pinned_connections_auth
+  - name: search_ssl
+  - name: vector_search
+  - name: vector_search_auth
+  - name: vector_search_ssl
+
+# This task is responsible for creating a AL2023 arm64 server binary candidate for 10gen/mongot.
+# A project trigger defined on 10gen/mongot runs when this variant succeeds, to check if the resulting
+# binary candidate passes their tests and is therefore safe to use in their pre-commit integration tests.
+- name: amazon2023-arm64-mongot-integration-cron-only
+  display_name: "AL2023 arm64 mongot integration tasks cron only"
+  cron: "0 */4 * * *" # Run these tasks every 4 hours
+  patchable: false
+  run_on:
+  - amazon2023.0-arm64-small
+  expansions:
+    compile_flags: >-
+      --ssl
+      MONGO_DISTMOD=amazon2023
+      -j$(grep -c ^processor /proc/cpuinfo)
+      --variables-files=etc/scons/mongodbtoolchain_stable_gcc.vars
+      --modules=
+    test_flags: >-
+      --excludeWithAnyTags=incompatible_with_amazon_linux,requires_external_data_source,requires_latch_analyzer
+      --enableEnterpriseTests=off
+    has_packages: false
+    multiversion_platform: amazon2023
+    multiversion_edition: enterprise
+    multiversion_architecture: aarch64
+    packager_script: packager_enterprise.py
+    packager_arch: aarch64
+    packager_distro: amazon2023
+    repo_edition: enterprise
+    scons_cache_scope: shared
+    compile_variant: amazon2023-arm64-mongot-integration-cron-only
+  tasks:
+  - name: compile_test_and_package_serial_TG
+    distros:
+    - amazon2023.0-arm64-large
+  - name: search
+  - name: search_auth
+  - name: search_pinned_connections_auth
+  - name: search_ssl
+  - name: vector_search
+  - name: vector_search_auth
+  - name: vector_search_ssl
+
+# This task is responsible for creating a AL2 arm64 server binary candidate for 10gen/mongot.
+# A project trigger defined on 10gen/mongot runs when this variant succeeds, to check if the resulting
+# binary candidate passes their tests and is therefore safe to use in their pre-commit integration tests.
+- name: amazon-linux2-arm64-mongot-integration-cron-only
+  display_name: "AL2 arm64 mongot integration tasks cron only"
+  cron: "0 */4 * * *" # Run these tasks every 4 hours
+  patchable: false
+  run_on:
+  - amazon2-arm64-small
+  stepback: true
+  expansions:
+    compile_flags: >-
+      --ssl
+      MONGO_DISTMOD=amazon2
+      -j$(grep -c ^processor /proc/cpuinfo)
+      --variables-files=etc/scons/mongodbtoolchain_stable_gcc.vars
+    scons_cache_scope: shared
+    scons_cache_mode: all
+    has_packages: false
+    target_resmoke_time: 10
+    idle_timeout_factor: 1.5
+    exec_timeout_factor: 1.5
+    compile_variant: amazon-linux2-arm64-mongot-integration-cron-only
+  tasks:
+  - name: compile_test_and_package_serial_TG
+    distros:
+    - amazon2-arm64-large
+  - name: search
+  - name: search_auth
+  - name: search_pinned_connections_auth
+  - name: search_ssl
+  - name: vector_search
+  - name: vector_search_auth
+  - name: vector_search_ssl
+
+# This task is responsible for creating a AL2 x86 server binary candidate for 10gen/mongot.
+# A project trigger defined on 10gen/mongot runs when this variant succeeds, to check if the resulting
+# binary candidate passes their tests and is therefore safe to use in their pre-commit integration tests
+- name: amazon2-x86-mongot-integration-cron-only
+  display_name: "AL2 x86 mongot integration tasks cron only"
+  cron: "0 */4 * * *" # Run these tasks every 4 hours
+  patchable: false
+  run_on:
+  - amazon2-large
+  expansions:
+    compile_flags: >-
+      --ssl
+      MONGO_DISTMOD=amazon2
+      -j$(grep -c ^processor /proc/cpuinfo)
+      --variables-files=etc/scons/mongodbtoolchain_stable_gcc.vars
+    test_flags: --excludeWithAnyTags=incompatible_with_amazon_linux,requires_ldap_pool,requires_v4_0,requires_external_data_source,requires_latch_analyzer
+    has_packages: false
+    multiversion_platform: amazon2
+    multiversion_edition: enterprise
+    multiversion_architecture: x86_64
+    packager_script: packager_enterprise.py
+    packager_arch: x86_64
+    packager_distro: amazon2
+    repo_edition: enterprise
+    scons_cache_scope: shared
+    compile_variant: amazon2-x86-mongot-integration-cron-only
+  tasks:
+  - name: compile_test_and_package_serial_TG
+    distros:
+    - amazon2-large
+  - name: search
+  - name: search_auth
+  - name: search_pinned_connections_auth
+  - name: search_ssl
+  - name: vector_search
+  - name: vector_search_auth
+  - name: vector_search_ssl

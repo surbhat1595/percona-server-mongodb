@@ -305,6 +305,11 @@ void Pipeline::validateCommon(bool alreadyOptimized) const {
                 str::stream() << stage->getSourceName() << " can only be used once in the pipeline",
                 !(constraints.canAppearOnlyOnceInPipeline &&
                   !singleUseStages.insert(stage->getSourceName()).second));
+
+        tassert(7355707,
+                "If a stage is broadcast to all shard servers then it must be a data source.",
+                constraints.hostRequirement != HostTypeRequirement::kAllShardServers ||
+                    !constraints.requiresInputDocSource);
     }
 }
 
@@ -313,21 +318,29 @@ void Pipeline::optimizePipeline() {
     if (MONGO_unlikely(disablePipelineOptimization.shouldFail())) {
         return;
     }
-
     optimizeContainer(&_sources);
+    optimizeEachStage(&_sources);
 }
 
 void Pipeline::optimizeContainer(SourceContainer* container) {
-    SourceContainer optimizedSources;
-
     SourceContainer::iterator itr = container->begin();
     try {
         while (itr != container->end()) {
             invariant((*itr).get());
             itr = (*itr).get()->optimizeAt(itr, container);
         }
+    } catch (DBException& ex) {
+        ex.addContext("Failed to optimize pipeline");
+        throw;
+    }
 
-        // Once we have reached our final number of stages, optimize each individually.
+    stitch(container);
+}
+
+void Pipeline::optimizeEachStage(SourceContainer* container) {
+    SourceContainer optimizedSources;
+    try {
+        // We should have our final number of stages. Optimize each individually.
         for (auto&& source : *container) {
             if (auto out = source->optimize()) {
                 optimizedSources.push_back(out);
@@ -448,11 +461,19 @@ bool Pipeline::needsMongosMerger() const {
     });
 }
 
+bool Pipeline::needsAllShardServers() const {
+    return std::any_of(_sources.begin(), _sources.end(), [&](const auto& stage) {
+        return stage->constraints().resolvedHostTypeRequirement(pCtx) ==
+            HostTypeRequirement::kAllShardServers;
+    });
+}
+
 bool Pipeline::needsShard() const {
     return std::any_of(_sources.begin(), _sources.end(), [&](const auto& stage) {
         auto hostType = stage->constraints().resolvedHostTypeRequirement(pCtx);
         return (hostType == HostTypeRequirement::kAnyShard ||
-                hostType == HostTypeRequirement::kPrimaryShard);
+                hostType == HostTypeRequirement::kPrimaryShard ||
+                hostType == HostTypeRequirement::kAllShardServers);
     });
 }
 
@@ -498,20 +519,20 @@ stdx::unordered_set<NamespaceString> Pipeline::getInvolvedCollections() const {
 }
 
 vector<Value> Pipeline::serializeContainer(const SourceContainer& container,
-                                           boost::optional<ExplainOptions::Verbosity> explain) {
+                                           boost::optional<const SerializationOptions&> opts) {
     vector<Value> serializedSources;
     for (auto&& source : container) {
-        source->serializeToArray(serializedSources, explain);
+        source->serializeToArray(serializedSources, opts ? opts.get() : SerializationOptions());
     }
     return serializedSources;
 }
-vector<Value> Pipeline::serialize(boost::optional<ExplainOptions::Verbosity> explain) const {
-    return serializeContainer(_sources, explain);
+
+vector<Value> Pipeline::serialize(boost::optional<const SerializationOptions&> opts) const {
+    return serializeContainer(_sources, opts);
 }
 
-vector<BSONObj> Pipeline::serializeToBson(
-    boost::optional<ExplainOptions::Verbosity> explain) const {
-    const auto serialized = serialize(explain);
+vector<BSONObj> Pipeline::serializeToBson(boost::optional<const SerializationOptions&> opts) const {
+    const auto serialized = serialize(opts);
     std::vector<BSONObj> asBson;
     asBson.reserve(serialized.size());
     for (auto&& stage : serialized) {
@@ -552,16 +573,16 @@ boost::optional<Document> Pipeline::getNext() {
                               : boost::optional<Document>{nextResult.releaseDocument()};
 }
 
-vector<Value> Pipeline::writeExplainOps(ExplainOptions::Verbosity verbosity) const {
+vector<Value> Pipeline::writeExplainOps(const SerializationOptions& opts) const {
     vector<Value> array;
     for (auto&& stage : _sources) {
         auto beforeSize = array.size();
-        stage->serializeToArray(array, verbosity);
+        stage->serializeToArray(array, opts);
         auto afterSize = array.size();
         // Append execution stats to the serialized stage if the specified verbosity is
         // 'executionStats' or 'allPlansExecution'.
         invariant(afterSize - beforeSize == 1u);
-        if (verbosity >= ExplainOptions::Verbosity::kExecStats) {
+        if (*opts.verbosity >= ExplainOptions::Verbosity::kExecStats) {
             auto serializedStage = array.back();
             array.back() = appendCommonExecStats(serializedStage, stage->getCommonStats());
         }
@@ -652,7 +673,8 @@ Status Pipeline::_pipelineCanRunOnMongoS() const {
         auto hostRequirement = constraints.resolvedHostTypeRequirement(pCtx);
 
         const bool needsShard = (hostRequirement == HostTypeRequirement::kAnyShard ||
-                                 hostRequirement == HostTypeRequirement::kPrimaryShard);
+                                 hostRequirement == HostTypeRequirement::kPrimaryShard ||
+                                 hostRequirement == HostTypeRequirement::kAllShardServers);
 
         const bool mustWriteToDisk =
             (constraints.diskRequirement == DiskUseRequirement::kWritesPersistentData);
@@ -739,17 +761,31 @@ boost::intrusive_ptr<DocumentSource> Pipeline::popFrontWithNameAndCriteria(
     return popFront();
 }
 
+void Pipeline::appendPipeline(std::unique_ptr<Pipeline, PipelineDeleter> otherPipeline) {
+    auto& otherPipelineSources = otherPipeline->getSources();
+    while (!otherPipelineSources.empty()) {
+        _sources.push_back(std::move(otherPipelineSources.front()));
+        otherPipelineSources.pop_front();
+    }
+    constexpr bool alreadyOptimized = false;
+    validateCommon(alreadyOptimized);
+    stitch();
+}
+
+
 std::unique_ptr<Pipeline, PipelineDeleter> Pipeline::makePipeline(
     const std::vector<BSONObj>& rawPipeline,
     const boost::intrusive_ptr<ExpressionContext>& expCtx,
     const MakePipelineOptions opts) {
     auto pipeline = Pipeline::parse(rawPipeline, expCtx, opts.validator);
 
+    bool alreadyOptimized = opts.alreadyOptimized;
+
     if (opts.optimize) {
         pipeline->optimizePipeline();
+        alreadyOptimized = true;
     }
 
-    constexpr bool alreadyOptimized = true;
     pipeline->validateCommon(alreadyOptimized);
 
     if (opts.attachCursorSource) {
@@ -766,28 +802,11 @@ Pipeline::SourceContainer::iterator Pipeline::optimizeEndOfPipeline(
     // optimize, since otherwise calls to optimizeAt() will overrun these limits.
     auto endOfPipeline = Pipeline::SourceContainer(std::next(itr), container->end());
     Pipeline::optimizeContainer(&endOfPipeline);
+    Pipeline::optimizeEachStage(&endOfPipeline);
     container->erase(std::next(itr), container->end());
     container->splice(std::next(itr), endOfPipeline);
 
     return std::next(itr);
-}
-
-Pipeline::SourceContainer::iterator Pipeline::optimizeAtEndOfPipeline(
-    Pipeline::SourceContainer::iterator itr, Pipeline::SourceContainer* container) {
-    if (itr == container->end()) {
-        return itr;
-    }
-    itr = std::next(itr);
-    try {
-        while (itr != container->end()) {
-            invariant((*itr).get());
-            itr = (*itr).get()->optimizeAt(itr, container);
-        }
-    } catch (DBException& ex) {
-        ex.addContext("Failed to optimize pipeline");
-        throw;
-    }
-    return itr;
 }
 
 std::unique_ptr<Pipeline, PipelineDeleter> Pipeline::makePipelineFromViewDefinition(

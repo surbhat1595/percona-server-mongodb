@@ -63,12 +63,19 @@ WindowBounds::Bound<T> parseBound(ExpressionContext* expCtx,
 }
 
 template <class T>
-Value serializeBound(const WindowBounds::Bound<T>& bound) {
+Value serializeBound(const WindowBounds::Bound<T>& bound,
+                     const SerializationOptions& opts,
+                     const Value& representativeValue) {
     return stdx::visit(
         visit_helper::Overloaded{
-            [](const WindowBounds::Unbounded&) { return Value(WindowBounds::kValUnbounded); },
-            [](const WindowBounds::Current&) { return Value(WindowBounds::kValCurrent); },
-            [](const T& n) { return Value(n); },
+            [&](const WindowBounds::Unbounded&) { return Value(WindowBounds::kValUnbounded); },
+            [&](const WindowBounds::Current&) { return Value(WindowBounds::kValCurrent); },
+            [&](const T& n) {
+                // If not "unbounded" or "current", n must be a literal constant
+                // The upper bound must be greater than the lower bound. We override the
+                // representative value to meet this constraint.
+                return opts.serializeLiteral(n, representativeValue);
+            },
         },
         bound);
 }
@@ -215,22 +222,31 @@ WindowBounds WindowBounds::parse(BSONObj args,
         uassert(5339902,
                 "Range-based bounds require sortBy a single field",
                 sortBy && sortBy->size() == 1);
+        const SortPattern::SortPatternPart& part = *sortBy->begin();
+        uassert(8947400,
+                "Range-based bounds require a non-expression sortBy",
+                part.fieldPath && !part.expression);
+        uassert(8947401, "Range-based bounds require an ascending sortBy", part.isAscending);
         return bounds;
     }
 }
-void WindowBounds::serialize(MutableDocument& args) const {
+void WindowBounds::serialize(MutableDocument& args, const SerializationOptions& opts) const {
     stdx::visit(
         visit_helper::Overloaded{
             [&](const DocumentBased& docBounds) {
                 args[kArgDocuments] = Value{std::vector<Value>{
-                    serializeBound(docBounds.lower),
-                    serializeBound(docBounds.upper),
+                    serializeBound(
+                        docBounds.lower, opts, /* representative value, if needed */ Value(0LL)),
+                    serializeBound(
+                        docBounds.upper, opts, /* representative value, if needed */ Value(1LL)),
                 }};
             },
             [&](const RangeBased& rangeBounds) {
                 args[kArgRange] = Value{std::vector<Value>{
-                    serializeBound(rangeBounds.lower),
-                    serializeBound(rangeBounds.upper),
+                    serializeBound(
+                        rangeBounds.lower, opts, /* representative value, if needed */ Value(0LL)),
+                    serializeBound(
+                        rangeBounds.upper, opts, /* representative value, if needed */ Value(1LL)),
                 }};
                 if (rangeBounds.unit) {
                     args[kArgUnit] = Value{serializeTimeUnit(*rangeBounds.unit)};

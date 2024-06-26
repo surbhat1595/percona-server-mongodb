@@ -454,8 +454,7 @@ void _validateCatalogEntry(OperationContext* opCtx,
             index_key_validate::validateIndexSpec(opCtx, indexEntry->descriptor()->infoObj())
                 .getStatus();
         if (!status.isOK()) {
-            results->valid = false;
-            results->errors.push_back(
+            results->warnings.push_back(
                 fmt::format("The index specification for index '{}' contains invalid fields. {}. "
                             "Run the 'collMod' command on the collection without any arguments "
                             "to fix the invalid index options",
@@ -621,6 +620,14 @@ Status validate(OperationContext* opCtx,
         opCtx->recoveryUnit()->abandonSnapshot();
         opCtx->recoveryUnit()->setPrepareConflictBehavior(oldPrepareConflictBehavior);
     });
+
+    // Relax corruption detection so that we log and continue scanning instead of failing early.
+    auto oldDataCorruptionMode = opCtx->recoveryUnit()->getDataCorruptionDetectionMode();
+    opCtx->recoveryUnit()->setDataCorruptionDetectionMode(
+        DataCorruptionDetectionMode::kLogAndContinue);
+    ON_BLOCK_EXIT(
+        [&] { opCtx->recoveryUnit()->setDataCorruptionDetectionMode(oldDataCorruptionMode); });
+
     if (validateState.fixErrors()) {
         // Note: cannot set PrepareConflictBehavior here, since the validate command with repair
         // needs kIngnoreConflictsAllowWrites, but validate repair at startup cannot set that here
@@ -771,8 +778,7 @@ Status validate(OperationContext* opCtx,
             return e.toStatus();
         }
         string err = str::stream() << "exception during collection validation: " << e.toString();
-        results->errors.push_back(err);
-        results->valid = false;
+        results->warnings.push_back(err);
         LOGV2_OPTIONS(5160302,
                       {LogComponent::kIndex},
                       "Validation failed due to exception",

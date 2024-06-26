@@ -13,6 +13,7 @@ env.Library(
     ],
     LIBDEPS_PRIVATE=[
         '$BUILD_DIR/mongo/base',
+        '$BUILD_DIR/mongo/db/query/query_shape/query_shape',
         '$BUILD_DIR/mongo/idl/idl_parser',
         '$BUILD_DIR/mongo/idl/server_parameter',
         '$BUILD_DIR/mongo/util/processinfo'
@@ -145,6 +146,7 @@ env.CppUnitTest(
     source=[
         'bucket_catalog_test.cpp',
         'minmax_test.cpp',
+        'schema_test.cpp',
         'timeseries_dotted_path_support_test.cpp',
         'timeseries_extended_range_test.cpp',
         'timeseries_index_schema_conversion_functions_test.cpp',

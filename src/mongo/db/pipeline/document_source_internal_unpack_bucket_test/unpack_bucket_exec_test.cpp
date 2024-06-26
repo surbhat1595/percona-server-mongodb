@@ -890,7 +890,13 @@ TEST_F(InternalUnpackBucketExecTest, ParserRoundtripsComputedMetaProjFieldsInclu
     auto array = std::vector<Value>{};
     DocumentSourceInternalUnpackBucket::createFromBsonInternal(bson.firstElement(), getExpCtx())
         ->serializeToArray(array);
-    ASSERT_BSONOBJ_EQ(array[0].getDocument().toBson(), bson);
+
+    // Since fields in 'computedMetaProjFields' are not in 'include' they should be removed.
+    auto expectedBson = fromjson(
+        "{$_internalUnpackBucket: {include: [], timeField: 'time', metaField: 'meta', "
+        "bucketMaxSpanSeconds: 3600}}");
+
+    ASSERT_BSONOBJ_EQ(array[0].getDocument().toBson(), expectedBson);
 }
 
 TEST_F(InternalUnpackBucketExecTest, ParserRoundtripsComputedMetaProjFieldsIncludeWithCompute) {
@@ -924,6 +930,19 @@ TEST_F(InternalUnpackBucketExecTest, ParserRoundtripsComputedMetaProjFieldOverri
     auto array = std::vector<Value>{};
     unpackBucket->serializeToArray(array);
     ASSERT_BSONOBJ_EQ(array[0].getDocument().toBson(), bson);
+}
+
+TEST_F(InternalUnpackBucketExecTest, RedactsCorrectly) {
+    auto bson = fromjson(
+        "{$_internalUnpackBucket: {include: ['a', 'b', 'c'], timeField: 'time', metaField: 'meta', "
+        "bucketMaxSpanSeconds: 3600, computedMetaProjFields: ['a', 'b', 'c']}}");
+    auto docSource = DocumentSourceInternalUnpackBucket::createFromBsonInternal(bson.firstElement(),
+                                                                                getExpCtx());
+    ASSERT_BSONOBJ_EQ_AUTO(  // NOLINT
+        "{$_internalUnpackBucket: {include: [\"HASH<a>\", \"HASH<b>\", \"HASH<c>\"], timeField: "
+        "\"HASH<time>\", metaField: \"HASH<meta>\", bucketMaxSpanSeconds: \"?number\", "
+        "computedMetaProjFields: [\"HASH<a>\", \"HASH<b>\", \"HASH<c>\"]}}",
+        redact(*docSource));
 }
 }  // namespace
 }  // namespace mongo

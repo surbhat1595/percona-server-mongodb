@@ -33,6 +33,7 @@
 
 #include "mongo/bson/simple_bsonobj_comparator.h"
 #include "mongo/db/geo/geoparser.h"
+#include "mongo/db/matcher/expression_geo_serializer.h"
 #include "mongo/db/matcher/expression_parser.h"
 #include "mongo/logv2/log.h"
 #include "mongo/platform/basic.h"
@@ -244,6 +245,11 @@ Status GeoNearExpression::parseNewQuery(const BSONObj& obj) {
         if (fieldName == "$geometry") {
             if (e.isABSONObj()) {
                 BSONObj embeddedObj = e.embeddedObject();
+                // TODO SERVER-84598: $geoNear queries don't do a type check on the type of the
+                // geometry provided into the query. This is different than the behaviour we see for
+                // other GeoExpressions that use a GeometryContainer. GeoNear is a special case that
+                // only ever has type 'Point', however it may be a good idea to consider removing
+                // this silent acceptance of invalid "type" in the long term.
                 Status status = GeoParser::parseQueryPoint(e, centroid.get());
                 if (!status.isOK()) {
                     return Status(ErrorCodes::BadValue,
@@ -426,7 +432,7 @@ void GeoMatchExpression::debugString(StringBuilder& debug, int indentationLevel)
     _debugAddSpace(debug, indentationLevel);
 
     BSONObjBuilder builder;
-    serialize(&builder, true);
+    serialize(&builder, {});
     debug << "GEO raw = " << builder.obj().toString();
 
     MatchExpression::TagData* td = getTag();
@@ -437,10 +443,14 @@ void GeoMatchExpression::debugString(StringBuilder& debug, int indentationLevel)
     debug << "\n";
 }
 
-BSONObj GeoMatchExpression::getSerializedRightHandSide() const {
-    BSONObjBuilder subobj;
-    subobj.appendElements(_rawObj);
-    return subobj.obj();
+void GeoMatchExpression::appendSerializedRightHandSide(BSONObjBuilder* bob,
+                                                       const SerializationOptions& opts,
+                                                       bool includePath) const {
+    if (opts.literalPolicy != LiteralSerializationPolicy::kUnchanged) {
+        geoExpressionCustomSerialization(*bob, _rawObj, opts, includePath);
+        return;
+    }
+    bob->appendElements(_rawObj);
 }
 
 bool GeoMatchExpression::equivalent(const MatchExpression* other) const {
@@ -495,10 +505,14 @@ void GeoNearMatchExpression::debugString(StringBuilder& debug, int indentationLe
     debug << "\n";
 }
 
-BSONObj GeoNearMatchExpression::getSerializedRightHandSide() const {
-    BSONObjBuilder objBuilder;
-    objBuilder.appendElements(_rawObj);
-    return objBuilder.obj();
+void GeoNearMatchExpression::appendSerializedRightHandSide(BSONObjBuilder* bob,
+                                                           const SerializationOptions& opts,
+                                                           bool includePath) const {
+    if (opts.literalPolicy != LiteralSerializationPolicy::kUnchanged) {
+        geoNearExpressionCustomSerialization(*bob, _rawObj, opts, includePath);
+        return;
+    }
+    bob->appendElements(_rawObj);
 }
 
 bool GeoNearMatchExpression::equivalent(const MatchExpression* other) const {

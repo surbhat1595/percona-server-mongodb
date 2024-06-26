@@ -232,6 +232,7 @@ boost::intrusive_ptr<DocumentSourceGroup> createBucketGroupForReorder(
 void optimizePrefix(Pipeline::SourceContainer::iterator itr, Pipeline::SourceContainer* container) {
     auto prefix = Pipeline::SourceContainer(container->begin(), itr);
     Pipeline::optimizeContainer(&prefix);
+    Pipeline::optimizeEachStage(&prefix);
     container->erase(container->begin(), itr);
     container->splice(itr, prefix);
 }
@@ -474,15 +475,17 @@ boost::intrusive_ptr<DocumentSource> DocumentSourceInternalUnpackBucket::createF
         expCtx, BucketUnpacker{std::move(bucketSpec)}, 3600, assumeClean);
 }
 
-void DocumentSourceInternalUnpackBucket::serializeToArray(
-    std::vector<Value>& array, boost::optional<ExplainOptions::Verbosity> explain) const {
+void DocumentSourceInternalUnpackBucket::serializeToArray(std::vector<Value>& array,
+                                                          const SerializationOptions& opts) const {
+    auto explain = opts.verbosity;
+
     MutableDocument out;
     auto behavior =
         _bucketUnpacker.behavior() == BucketSpec::Behavior::kInclude ? kInclude : kExclude;
     const auto& spec = _bucketUnpacker.bucketSpec();
     std::vector<Value> fields;
     for (auto&& field : spec.fieldSet()) {
-        fields.emplace_back(field);
+        fields.emplace_back(opts.serializeFieldPathFromString(field));
     }
     if (((_bucketUnpacker.includeMetaField() &&
           _bucketUnpacker.behavior() == BucketSpec::Behavior::kInclude) ||
@@ -491,23 +494,26 @@ void DocumentSourceInternalUnpackBucket::serializeToArray(
         std::find(spec.computedMetaProjFields().cbegin(),
                   spec.computedMetaProjFields().cend(),
                   *spec.metaField()) == spec.computedMetaProjFields().cend())
-        fields.emplace_back(*spec.metaField());
+        fields.emplace_back(opts.serializeFieldPathFromString(*spec.metaField()));
 
     out.addField(behavior, Value{std::move(fields)});
-    out.addField(timeseries::kTimeFieldName, Value{spec.timeField()});
+    out.addField(timeseries::kTimeFieldName,
+                 Value{opts.serializeFieldPathFromString(spec.timeField())});
     if (spec.metaField()) {
-        out.addField(timeseries::kMetaFieldName, Value{*spec.metaField()});
+        out.addField(timeseries::kMetaFieldName,
+                     Value{opts.serializeFieldPathFromString(*spec.metaField())});
     }
-    out.addField(kBucketMaxSpanSeconds, Value{_bucketMaxSpanSeconds});
+    out.addField(kBucketMaxSpanSeconds, opts.serializeLiteral(Value{_bucketMaxSpanSeconds}));
     if (_assumeNoMixedSchemaData)
-        out.addField(kAssumeNoMixedSchemaData, Value(_assumeNoMixedSchemaData));
+        out.addField(kAssumeNoMixedSchemaData,
+                     opts.serializeLiteral(Value(_assumeNoMixedSchemaData)));
 
     if (spec.usesExtendedRange()) {
         // Include this flag so that 'explain' is more helpful.
         // But this is not so useful for communicating from one process to another,
         // because mongos and/or the primary shard don't know whether any other shard
         // has extended-range data.
-        out.addField(kUsesExtendedRange, Value{true});
+        out.addField(kUsesExtendedRange, opts.serializeLiteral(Value{true}));
     }
 
     if (!spec.computedMetaProjFields().empty())
@@ -516,34 +522,40 @@ void DocumentSourceInternalUnpackBucket::serializeToArray(
                          std::transform(spec.computedMetaProjFields().cbegin(),
                                         spec.computedMetaProjFields().cend(),
                                         std::back_inserter(compFields),
-                                        [](auto&& projString) { return Value{projString}; });
+                                        [opts](auto&& projString) {
+                                            return Value{
+                                                opts.serializeFieldPathFromString(projString)};
+                                        });
                          return compFields;
                      }()});
 
     if (_bucketUnpacker.includeMinTimeAsMetadata()) {
-        out.addField(kIncludeMinTimeAsMetadata, Value{_bucketUnpacker.includeMinTimeAsMetadata()});
+        out.addField(kIncludeMinTimeAsMetadata,
+                     opts.serializeLiteral(Value{_bucketUnpacker.includeMinTimeAsMetadata()}));
     }
     if (_bucketUnpacker.includeMaxTimeAsMetadata()) {
-        out.addField(kIncludeMaxTimeAsMetadata, Value{_bucketUnpacker.includeMaxTimeAsMetadata()});
+        out.addField(kIncludeMaxTimeAsMetadata,
+                     opts.serializeLiteral(Value{_bucketUnpacker.includeMaxTimeAsMetadata()}));
     }
 
     if (_wholeBucketFilter) {
-        out.addField(kWholeBucketFilter, Value{_wholeBucketFilter->serialize()});
+        out.addField(kWholeBucketFilter, Value{_wholeBucketFilter->serialize(opts)});
     }
     if (_eventFilter) {
-        out.addField(kEventFilter, Value{_eventFilter->serialize()});
+        out.addField(kEventFilter, Value{_eventFilter->serialize(opts)});
     }
 
     if (!explain) {
         array.push_back(Value(DOC(getSourceName() << out.freeze())));
         if (_sampleSize) {
             auto sampleSrc = DocumentSourceSample::create(pExpCtx, *_sampleSize);
-            sampleSrc->serializeToArray(array);
+            sampleSrc->serializeToArray(array, opts);
         }
     } else {
         if (_sampleSize) {
-            out.addField("sample", Value{static_cast<long long>(*_sampleSize)});
-            out.addField("bucketMaxCount", Value{_bucketMaxCount});
+            out.addField("sample",
+                         opts.serializeLiteral(Value{static_cast<long long>(*_sampleSize)}));
+            out.addField("bucketMaxCount", opts.serializeLiteral(Value{_bucketMaxCount}));
         }
         array.push_back(Value(DOC(getSourceName() << out.freeze())));
     }
@@ -1205,6 +1217,34 @@ bool findSequentialDocumentCache(Pipeline::SourceContainer::iterator start,
     return start != end;
 }
 
+Pipeline::SourceContainer::iterator DocumentSourceInternalUnpackBucket::optimizeAtRestOfPipeline(
+    Pipeline::SourceContainer::iterator itr, Pipeline::SourceContainer* container) {
+    if (itr == container->end()) {
+        return itr;
+    }
+
+    invariant(*itr == this);
+    Pipeline::SourceContainer::iterator unpackBucket = itr;
+
+    itr = std::next(itr);
+
+    try {
+        while (itr != container->end()) {
+            if (itr == unpackBucket) {
+                itr = std::next(itr);
+                if (itr == container->end())
+                    break;
+            }
+            itr = (*itr).get()->optimizeAt(itr, container);
+        }
+    } catch (DBException& ex) {
+        ex.addContext("Failed to optimize pipeline");
+        throw;
+    }
+
+    return itr;
+}
+
 DepsTracker DocumentSourceInternalUnpackBucket::getRestPipelineDependencies(
     Pipeline::SourceContainer::iterator itr,
     Pipeline::SourceContainer* container,
@@ -1297,31 +1337,31 @@ Pipeline::SourceContainer::iterator DocumentSourceInternalUnpackBucket::doOptimi
         }
     }
 
-    // Optimize the pipeline after this stage to merge $match stages and push them forward, and to
-    // take advantage of $expr rewrite optimizations.
+    // OptimizeAt the pipeline after this stage to merge $match stages and push them forward.
     if (!_optimizedEndOfPipeline) {
         _optimizedEndOfPipeline = true;
 
         if (std::next(itr) == container->end()) {
             return container->end();
         }
-        if (auto nextStage = dynamic_cast<DocumentSourceGeoNear*>(std::next(itr)->get())) {
-            // If the end of the pipeline starts with a $geoNear stage, make sure it gets optimized
-            // in a context where it knows there are other stages before it. It will split itself
-            // up into separate $match and $sort stages. But it doesn't split itself up when it's
-            // the first stage, because it expects to use a special DocumentSouceGeoNearCursor plan.
-            nextStage->optimizeAt(std::next(itr), container);
-        }
+
         auto cacheFound = findSequentialDocumentCache(itr, container->end());
         if (cacheFound) {
-            // optimizeAt() is responsible for reordering stages, and optimize() is responsible for
-            // simplifying individual stages. $sequentialCache's optimizeAt() places the stage where
-            // it can cache as big a prefix of the pipeline as possible. To do so correctly, it
-            // needs to look at dependencies: a stage that depends on a let-variable cannot be
-            // cached. But optimize() can inline variables. Therefore, we want to avoid calling
-            // optimize() before $sequentialCache has a chance to run optimizeAt().
-            return Pipeline::optimizeAtEndOfPipeline(itr, container);
+            // We want to call optimizeAt() on the rest of the pipeline first, and exit this
+            // function since any calls to optimize() will interfere with the
+            // sequentialDocumentCache's ability to properly place itself or abandon.
+            return DocumentSourceInternalUnpackBucket::optimizeAtRestOfPipeline(itr, container);
         } else {
+            if (auto nextStage = dynamic_cast<DocumentSourceGeoNear*>(std::next(itr)->get())) {
+                // If the end of the pipeline starts with a $geoNear stage, make sure it gets
+                // optimized in a context where it knows there are other stages before it. It will
+                // split itself up into separate $match and $sort stages. But it doesn't split
+                // itself up when it's the first stage, because it expects to use a special
+                // DocumentSouceGeoNearCursor plan.
+                nextStage->optimizeAt(std::next(itr), container);
+            }
+            // We want to optimize the rest of the pipeline to ensure the stages are in their
+            // optimal position and expressions have been optimized to allow for certain rewrites.
             Pipeline::optimizeEndOfPipeline(itr, container);
         }
 
@@ -1418,9 +1458,8 @@ Pipeline::SourceContainer::iterator DocumentSourceInternalUnpackBucket::doOptimi
 
         // Create a loose bucket predicate and push it before the unpacking stage.
         if (predicates.loosePredicate) {
-            BSONObjBuilder bob;
-            predicates.loosePredicate->serialize(&bob);
-            container->insert(itr, DocumentSourceMatch::create(bob.obj(), pExpCtx));
+            container->insert(
+                itr, DocumentSourceMatch::create(predicates.loosePredicate->serialize(), pExpCtx));
 
             // Give other stages a chance to optimize with the new $match.
             return std::prev(itr) == container->begin() ? std::prev(itr)

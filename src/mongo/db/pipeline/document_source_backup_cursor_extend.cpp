@@ -63,8 +63,7 @@ const char* DocumentSourceBackupCursorExtend::getSourceName() const {
     return kStageName.rawData();
 }
 
-Value DocumentSourceBackupCursorExtend::serialize(
-    boost::optional<ExplainOptions::Verbosity> explain) const {
+Value DocumentSourceBackupCursorExtend::serialize(const SerializationOptions& opts) const {
     return Value(
         Document{{getSourceName(),
                   Document{{kBackupId, Value(_backupId)}, {kTimestamp, Value(_extendTo)}}}});

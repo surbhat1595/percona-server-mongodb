@@ -32,12 +32,26 @@ const logQueries = {
     },
     duringInitialSyncQuery:
         {severity: "warning", "msg": "cannot execute dbcheck due to ongoing initial sync"},
+    duringStableRecovery:
+        {severity: "warning", "msg": "cannot execute dbcheck due to ongoing stable recovering"},
     errorQuery: {"severity": "error"},
     warningQuery: {"severity": "warning"},
     infoOrErrorQuery:
         {$or: [{"severity": "info", "operation": "dbCheckBatch"}, {"severity": "error"}]},
     infoBatchQuery: {"severity": "info", "operation": "dbCheckBatch"},
     inconsistentBatchQuery: {"severity": "error", "msg": "dbCheck batch inconsistent"},
+    startStopQuery: {
+        $or: [
+            {"operation": "dbCheckStart", "severity": "info"},
+            {"operation": "dbCheckStop", "severity": "info"}
+        ]
+    },
+    writeConcernErrorQuery: {severity: "error", "msg": "dbCheck failed waiting for writeConcern"},
+    skipApplyingBatchOnSecondaryQuery: {
+        severity: "warning",
+        "msg":
+            "skipping applying dbcheck batch because the 'skipApplyingDbCheckBatchOnSecondary' parameter is on",
+    },
 };
 
 // Apply function on all secondary nodes except arbiters.
@@ -430,7 +444,7 @@ const assertForDbCheckErrorsForAllNodes =
  * Utility for checking if the featureFlagSecondaryIndexChecksInDbCheck is on.
  */
 function checkSecondaryIndexChecksInDbCheckFeatureFlagEnabled(conn) {
-    return FeatureFlagUtil.isPresentAndEnabled(conn, 'SecondaryIndexChecksInDbCheck');
+    return FeatureFlagUtil.isEnabled(conn.getDB("admin"), 'SecondaryIndexChecksInDbCheck');
 }
 
 function checkNumSnapshots(debugBuild, expectedNumSnapshots) {

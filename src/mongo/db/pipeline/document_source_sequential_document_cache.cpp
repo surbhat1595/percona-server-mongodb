@@ -80,9 +80,10 @@ DocumentSource::GetNextResult DocumentSourceSequentialDocumentCache::doGetNext()
 
 Pipeline::SourceContainer::iterator DocumentSourceSequentialDocumentCache::doOptimizeAt(
     Pipeline::SourceContainer::iterator itr, Pipeline::SourceContainer* container) {
-    // The DocumentSourceSequentialDocumentCache should always be the last stage in the pipeline
-    // pre-optimization. By the time optimization reaches this point, all preceding stages are in
-    // the final positions which they would have occupied if no cache stage was present.
+    // The DocumentSourceSequentialDocumentCache relies on all other stages in the pipeline being at
+    // the final positions which they would have occupied if no cache stage was present. This should
+    // be the case when we reach this function. The cache should always be the last stage in the
+    // pipeline pre-optimizing.
     invariant(_hasOptimizedPos || std::next(itr) == container->end());
     invariant((*itr).get() == this);
 
@@ -152,12 +153,12 @@ Pipeline::SourceContainer::iterator DocumentSourceSequentialDocumentCache::doOpt
     return container->end();
 }
 
-Value DocumentSourceSequentialDocumentCache::serialize(
-    boost::optional<ExplainOptions::Verbosity> explain) const {
-    if (explain) {
+Value DocumentSourceSequentialDocumentCache::serialize(const SerializationOptions& opts) const {
+    if (opts.verbosity) {
         return Value(Document{
             {kStageName,
-             Document{{"maxSizeBytes"_sd, Value(static_cast<long long>(_cache->maxSizeBytes()))},
+             Document{{"maxSizeBytes"_sd,
+                       opts.serializeLiteral(static_cast<long long>(_cache->maxSizeBytes()))},
                       {"status"_sd,
                        _cache->isBuilding()
                            ? "kBuilding"_sd

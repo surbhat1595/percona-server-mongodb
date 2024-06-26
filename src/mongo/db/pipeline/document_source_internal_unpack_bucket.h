@@ -77,13 +77,14 @@ public:
 
     void serializeToArray(
         std::vector<Value>& array,
-        boost::optional<ExplainOptions::Verbosity> explain = boost::none) const final;
+        const SerializationOptions& opts = SerializationOptions{}) const final override;
 
     /**
      * Use 'serializeToArray' above.
      */
-    Value serialize(boost::optional<ExplainOptions::Verbosity> explain = boost::none) const final {
-        MONGO_UNREACHABLE;
+    Value serialize(
+        const SerializationOptions& opts = SerializationOptions{}) const final override {
+        MONGO_UNREACHABLE_TASSERT(7484305);
     }
 
     bool includeMetaField() const {
@@ -269,6 +270,17 @@ private:
     boost::optional<Document> getNextMatchingMeasure();
 
     bool haveComputedMetaField() const;
+
+    /**
+     * Applies optimizeAt() to all stages in the given pipeline after the stage that 'itr' points
+     * to, which is the bucket unpack stage.
+     *
+     * Due to the manipulation of 'itr' through the optimizations, it may be possible that
+     * preceeding stages will be optimized. However, optimization of the bucket unpack stage will be
+     * skipped.
+     */
+    Pipeline::SourceContainer::iterator optimizeAtRestOfPipeline(
+        Pipeline::SourceContainer::iterator itr, Pipeline::SourceContainer* container);
 
     // If buckets contained a mixed type schema along some path, we have to push down special
     // predicates in order to ensure correctness.

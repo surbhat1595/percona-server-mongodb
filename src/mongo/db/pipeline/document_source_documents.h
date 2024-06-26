@@ -64,9 +64,10 @@ public:
     }
 };
 
+static const std::string kGenFieldName = "_tempDocumentsField"s;
 static constexpr StringData kStageName = "$documents"_sd;
 
-static std::list<boost::intrusive_ptr<DocumentSource>> createFromBson(
+std::list<boost::intrusive_ptr<DocumentSource>> createFromBson(
     BSONElement elem, const boost::intrusive_ptr<ExpressionContext>& pExpCtx);
 
 };  // namespace DocumentSourceDocuments

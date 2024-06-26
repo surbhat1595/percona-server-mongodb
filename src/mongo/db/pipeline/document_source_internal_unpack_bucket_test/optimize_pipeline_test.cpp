@@ -40,7 +40,8 @@ namespace mongo {
 namespace {
 
 using OptimizePipeline = AggregationContextFixture;
-
+const auto kExplain =
+    SerializationOptions{boost::make_optional(ExplainOptions::Verbosity::kQueryPlanner)};
 TEST_F(OptimizePipeline, MixedMatchPushedDown) {
     auto unpack = fromjson(
         "{$_internalUnpackBucket: { exclude: [], timeField: 'time', metaField: 'myMeta', "
@@ -53,7 +54,7 @@ TEST_F(OptimizePipeline, MixedMatchPushedDown) {
     pipeline->optimizePipeline();
 
     // To get the optimized $match from the pipeline, we have to serialize with explain.
-    auto stages = pipeline->writeExplainOps(ExplainOptions::Verbosity::kQueryPlanner);
+    auto stages = pipeline->writeExplainOps(kExplain);
     ASSERT_EQ(2u, stages.size());
 
     // We should push down the $match on the metaField and the predicates on the control field.
@@ -104,7 +105,7 @@ TEST_F(OptimizePipeline, MixedMatchOr) {
 
     pipeline->optimizePipeline();
 
-    auto stages = pipeline->writeExplainOps(ExplainOptions::Verbosity::kQueryPlanner);
+    auto stages = pipeline->writeExplainOps(kExplain);
     ASSERT_EQ(2u, stages.size());
     auto expected = fromjson(
         "{$match: {$and: ["
@@ -170,7 +171,7 @@ TEST_F(OptimizePipeline, MultipleMatchesPushedDown) {
 
     // We should push down both the $match on the metaField and the predicates on the control field.
     // The created $match stages should be added before $_internalUnpackBucket and merged.
-    auto stages = pipeline->writeExplainOps(ExplainOptions::Verbosity::kQueryPlanner);
+    auto stages = pipeline->writeExplainOps(kExplain);
     ASSERT_EQ(2u, stages.size());
     ASSERT_BSONOBJ_EQ(fromjson("{$match: {$and: [ {meta: {$gte: 0}},"
                                "{meta: {$lte: 5}},"
@@ -199,7 +200,7 @@ TEST_F(OptimizePipeline, MultipleMatchesPushedDownWithSort) {
 
     // We should push down both the $match on the metaField and the predicates on the control field.
     // The created $match stages should be added before $_internalUnpackBucket and merged.
-    auto stages = pipeline->writeExplainOps(ExplainOptions::Verbosity::kQueryPlanner);
+    auto stages = pipeline->writeExplainOps(kExplain);
     ASSERT_EQ(3u, stages.size());
     ASSERT_BSONOBJ_EQ(fromjson("{$match: {$and: [ { meta: { $gte: 0 } },"
                                "{meta: { $lte: 5 } },"
@@ -343,7 +344,7 @@ TEST_F(OptimizePipeline, MixedMatchThenProjectPushedDown) {
     pipeline->optimizePipeline();
 
     // We can push down part of the $match and use dependency analysis on the end of the pipeline.
-    auto stages = pipeline->writeExplainOps(ExplainOptions::Verbosity::kQueryPlanner);
+    auto stages = pipeline->writeExplainOps(kExplain);
     ASSERT_EQ(3u, stages.size());
     ASSERT_BSONOBJ_EQ(fromjson("{$match: {$and: [{meta: {$eq: 'abc'}},"
                                "{$or: [ {'control.min.a': { $_internalExprLte: 4 } },"
@@ -392,7 +393,7 @@ TEST_F(OptimizePipeline, ProjectThenMixedMatchPushedDown) {
     pipeline->optimizePipeline();
 
     // We should push down part of the $match and do dependency analysis on the rest.
-    auto stages = pipeline->writeExplainOps(ExplainOptions::Verbosity::kQueryPlanner);
+    auto stages = pipeline->writeExplainOps(kExplain);
     ASSERT_EQ(3u, stages.size());
     ASSERT_BSONOBJ_EQ(fromjson("{$match: {$and: [{meta: {$eq: \"abc\"}},"
                                "{$or: [ {'control.min.a': {$_internalExprLte: 4}},"
@@ -423,7 +424,7 @@ TEST_F(OptimizePipeline, ProjectWithRenameThenMixedMatchPushedDown) {
     pipeline->optimizePipeline();
 
     // We should push down part of the $match and do dependency analysis on the end of the pipeline.
-    auto stages = pipeline->writeExplainOps(ExplainOptions::Verbosity::kQueryPlanner);
+    auto stages = pipeline->writeExplainOps(kExplain);
     ASSERT_EQ(3u, stages.size());
     ASSERT_BSONOBJ_EQ(
         fromjson("{$match: {$and: [{$or: [ {'control.max.y': {$_internalExprGte: \"abc\"}},"
@@ -1020,6 +1021,53 @@ TEST_F(OptimizePipeline, StreamingGroupIsNotEnabledWhenTimeFieldIsModified) {
     auto serialized = pipeline->serializeToBson();
     ASSERT_EQ(serialized.size(), 4U);
     ASSERT_BSONOBJ_EQ(groupSpecObj, serialized.back());
+}
+
+TEST_F(OptimizePipeline, ComputedMetaProjFieldsAreNotInInclusionProjection) {
+    auto pipeline = Pipeline::parse(
+        makeVector(
+            fromjson(
+                "{$_internalUnpackBucket: { exclude: [], timeField: 'time', metaField: "
+                "'myMeta', bucketMaxSpanSeconds: 3600, computedMetaProjFields: ['time', 'y']}}"),
+            fromjson("{$project: {time: 1, x: 1}}")),
+        getExpCtx());
+    ASSERT_EQ(2u, pipeline->getSources().size());
+
+    pipeline->optimizePipeline();
+
+    // The fields in 'computedMetaProjFields' that are not in the project should be removed.
+    auto serialized = pipeline->serializeToBson();
+    ASSERT_EQ(1u, serialized.size());
+    ASSERT_BSONOBJ_EQ(
+        fromjson("{$_internalUnpackBucket: { include: ['_id', 'time', 'x'], timeField: 'time', "
+                 "metaField: "
+                 "'myMeta', bucketMaxSpanSeconds: 3600, computedMetaProjFields: ['time']}}"),
+        serialized[0]);
+}
+
+TEST_F(OptimizePipeline, ComputedMetaProjectFieldsAfterInclusionGetsAddedToIncludes) {
+
+    auto pipeline = Pipeline::parse(
+        makeVector(fromjson("{$_internalUnpackBucket: { exclude: [], timeField: 'time', metaField: "
+                            "'myMeta', bucketMaxSpanSeconds: 3600, computedMetaProjFields: []}}"),
+                   fromjson("{$project: {myMeta: 1}}"),
+                   fromjson("{$addFields: {newMeta: {$toUpper : '$myMeta'}}}")),
+        getExpCtx());
+    ASSERT_EQ(3u, pipeline->getSources().size());
+
+    pipeline->optimizePipeline();
+
+    auto serialized = pipeline->serializeToBson();
+    ASSERT_EQ(2u, serialized.size());
+
+    ASSERT_BSONOBJ_EQ(fromjson("{$addFields: {newMeta: {$toUpper: ['$meta']}}}"), serialized[0]);
+
+    // 'newMeta' field gets added to 'computedMetaProjFields' and to 'include'.
+    auto expectedSpecObj = fromjson(
+        "{$_internalUnpackBucket: { include: ['_id','newMeta', 'myMeta'], timeField: 'time', "
+        "metaField: 'myMeta', "
+        "bucketMaxSpanSeconds: 3600, computedMetaProjFields: ['newMeta']}}");
+    ASSERT_BSONOBJ_EQ(expectedSpecObj, serialized[1]);
 }
 }  // namespace
 }  // namespace mongo

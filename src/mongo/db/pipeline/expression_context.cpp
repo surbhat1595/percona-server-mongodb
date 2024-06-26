@@ -49,6 +49,49 @@ ExpressionContext::ResolvedNamespace::ResolvedNamespace(NamespaceString ns,
     : ns(std::move(ns)), pipeline(std::move(pipeline)), uuid(collUUID) {}
 
 ExpressionContext::ExpressionContext(OperationContext* opCtx,
+                                     const FindCommandRequest& findCmd,
+                                     std::unique_ptr<CollatorInterface> collator,
+                                     bool mayDbProfile,
+                                     boost::optional<ExplainOptions::Verbosity> verbosity,
+                                     bool allowDiskUseDefault)
+    // Although both 'find' and 'aggregate' commands have an ExpressionContext, some of the data
+    // members in the ExpressionContext are used exclusively by the aggregation subsystem. This
+    // includes the following fields which here we simply initialize to some meaningless default
+    // value:
+    //  - explain
+    //  - fromMongos
+    //  - needsMerge
+    //  - bypassDocumentValidation
+    //  - mongoProcessInterface
+    //  - resolvedNamespaces
+    //  - uuid
+    //
+    // As we change the code to make the find and agg systems more tightly coupled, it would make
+    // sense to start initializing these fields for find operations as well.
+    : ExpressionContext(opCtx,
+                        verbosity,
+                        false,  // fromMongos
+                        false,  // needsMerge
+                        findCmd.getAllowDiskUse().value_or(allowDiskUseDefault),
+                        false,  // bypassDocumentValidation
+                        false,  // isMapReduceCommand
+                        findCmd.getNamespaceOrUUID().nss().has_value()
+                            ? *findCmd.getNamespaceOrUUID().nss()
+                            : NamespaceString{},
+                        findCmd.getLegacyRuntimeConstants(),
+                        std::move(collator),
+                        nullptr,  // mongoProcessInterface
+                        {},       // resolvedNamespaces
+                        [&findCmd]() -> boost::optional<UUID> {
+                            if (findCmd.getNamespaceOrUUID().uuid().has_value()) {
+                                return findCmd.getNamespaceOrUUID().uuid();
+                            }
+                            return boost::none;
+                        }(),
+                        findCmd.getLet(),
+                        mayDbProfile) {}
+
+ExpressionContext::ExpressionContext(OperationContext* opCtx,
                                      const AggregateCommandRequest& request,
                                      std::unique_ptr<CollatorInterface> collator,
                                      std::shared_ptr<MongoProcessInterface> processInterface,
@@ -157,6 +200,44 @@ ExpressionContext::ExpressionContext(
     jsHeapLimitMB = internalQueryJavaScriptHeapSizeLimitMB.load();
     if (letParameters)
         variables.seedVariablesWithLetParameters(this, *letParameters);
+}
+
+ExpressionContext::ExpressionContext(OperationContext* opCtx,
+                                     const NamespaceString& nss,
+                                     const boost::optional<BSONObj>& letParameters)
+    : explain(boost::none),
+      allowDiskUse(false),
+      ns(nss),
+      opCtx(opCtx),
+      jsHeapLimitMB(internalQueryJavaScriptHeapSizeLimitMB.load()),
+      mongoProcessInterface(std::make_shared<StubMongoProcessInterface>()),
+      timeZoneDatabase(opCtx && opCtx->getServiceContext()
+                           ? TimeZoneDatabase::get(opCtx->getServiceContext())
+                           : nullptr),
+      variablesParseState(variables.useIdGenerator()),
+      maxFeatureCompatibilityVersion(boost::none),  // Ensure all features are allowed.
+      mayDbProfile(true),
+      _collator(nullptr),
+      _documentComparator(_collator.get()),
+      _valueComparator(_collator.get()) {
+    // This is a shortcut to avoid reading the clock and the vector clock, since we don't actually
+    // care about their values for this 'blank' ExpressionContext codepath.
+    variables.setLegacyRuntimeConstants({Date_t::min(), Timestamp()});
+    // Expression counters are reported in serverStatus to indicate how often clients use certain
+    // expressions/stages, so it's a side effect tied to parsing. We must stop expression counters
+    // before re-parsing to avoid adding to the counters more than once per a given query.
+    stopExpressionCounters();
+    if (letParameters)
+        variables.seedVariablesWithLetParameters(this, *letParameters);
+}
+
+boost::intrusive_ptr<ExpressionContext> ExpressionContext::makeBlankExpressionContext(
+    OperationContext* opCtx,
+    const NamespaceStringOrUUID& nssOrUUID,
+    boost::optional<BSONObj> shapifiedLet) {
+    const auto nss = nssOrUUID.nss().has_value() ? *nssOrUUID.nss() : NamespaceString{};
+    // This constructor is private, so we can't use `boost::make_instrusive()`.
+    return new ExpressionContext(opCtx, nss, shapifiedLet);
 }
 
 void ExpressionContext::checkForInterruptSlow() {

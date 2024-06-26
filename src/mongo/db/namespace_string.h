@@ -45,6 +45,8 @@
 
 namespace mongo {
 
+struct SerializationOptions;
+
 class NamespaceString {
 public:
     constexpr static size_t MaxDatabaseNameLen =
@@ -308,6 +310,8 @@ public:
         return _ns;
     }
 
+    std::string toString(const SerializationOptions& opts) const;
+
     const std::string& toString() const {
         return ns();
     }
@@ -347,6 +351,9 @@ public:
     }
     bool isSystemDotViews() const {
         return coll() == kSystemDotViewsCollectionName;
+    }
+    bool isSystemDotUsers() const {
+        return coll() == kSystemUsers;
     }
     bool isServerConfigurationCollection() const {
         return (db() == kAdminDb) && (coll() == "system.version");
@@ -663,6 +670,15 @@ public:
     std::string toString() const;
 
     void serialize(BSONObjBuilder* builder, StringData fieldName) const;
+
+    template <typename H>
+    friend H AbslHashValue(H h, const NamespaceStringOrUUID& nssOrUUID) {
+        if (nssOrUUID.nss().has_value()) {
+            return H::combine(std::move(h), *nssOrUUID.nss());
+        } else {
+            return H::combine(std::move(h), *nssOrUUID.uuid());
+        }
+    }
 
 private:
     // At any given time exactly one of these optionals will be initialized.

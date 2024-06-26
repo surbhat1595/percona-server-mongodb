@@ -29,6 +29,13 @@ function _getErrorWithCode(codeOrObj, message) {
 
         if (codeOrObj.hasOwnProperty("writeErrors")) {
             e.writeErrors = codeOrObj.writeErrors;
+        } else if ((codeOrObj instanceof BulkWriteResult || codeOrObj instanceof BulkWriteError) &&
+                   codeOrObj.hasWriteErrors()) {
+            e.writeErrors = codeOrObj.getWriteErrors();
+        }
+
+        if (codeOrObj instanceof WriteResult && codeOrObj.hasWriteError()) {
+            e.writeErrors = [codeOrObj.getWriteError()];
         }
 
         if (codeOrObj.hasOwnProperty("errorLabels")) {
@@ -85,7 +92,11 @@ function isNetworkError(errorOrResponse) {
         "error doing query",
         "socket exception",
         "SocketException",
-        "HostNotFound"
+        "HostNotFound",
+        "HostUnreachable",
+        "NetworkTimeout",
+        "ConnectionPoolExpired",
+        "ConnectionError"
     ];
 
     // Then check if it's an Error, if so see if any of the known network error strings appear

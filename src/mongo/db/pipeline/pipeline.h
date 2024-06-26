@@ -45,7 +45,6 @@
 #include "mongo/db/query/explain_options.h"
 #include "mongo/db/query/query_knobs_gen.h"
 #include "mongo/executor/task_executor.h"
-#include "mongo/s/query/async_results_merger_params_gen.h"
 #include "mongo/util/intrusive_counter.h"
 #include "mongo/util/timer.h"
 
@@ -70,6 +69,10 @@ using PipelineValidatorCallback = std::function<void(const Pipeline&)>;
 
 struct MakePipelineOptions {
     bool optimize = true;
+    // It is assumed that the pipeline has already been optimized when we create the
+    // MakePipelineOptions. If this is not the case, the caller is responsible for setting
+    // alreadyOptimized to false.
+    bool alreadyOptimized = true;
     bool attachCursorSource = true;
     ShardTargetingPolicy shardTargetingPolicy = ShardTargetingPolicy::kAllowed;
     PipelineValidatorCallback validator = nullptr;
@@ -171,16 +174,6 @@ public:
     static Pipeline::SourceContainer::iterator optimizeEndOfPipeline(
         Pipeline::SourceContainer::iterator itr, Pipeline::SourceContainer* container);
 
-    /**
-     * Applies optimizeAt() to all stages in the given pipeline after the stage that 'itr' points
-     * to.
-     *
-     * Returns a valid iterator that points to the new "end of the pipeline": i.e., the stage that
-     * comes after 'itr' in the newly optimized pipeline.
-     */
-    static Pipeline::SourceContainer::iterator optimizeAtEndOfPipeline(
-        Pipeline::SourceContainer::iterator itr, Pipeline::SourceContainer* container);
-
     static std::unique_ptr<Pipeline, PipelineDeleter> makePipelineFromViewDefinition(
         const boost::intrusive_ptr<ExpressionContext>& subPipelineExpCtx,
         ExpressionContext::ResolvedNamespace resolvedNs,
@@ -269,6 +262,11 @@ public:
     bool needsShard() const;
 
     /**
+     * Returns 'true' if any stage in the pipeline requires being run on all shards.
+     */
+    bool needsAllShardServers() const;
+
+    /**
      * Returns true if the pipeline can run on mongoS, but is not obliged to; that is, it can run
      * either on mongoS or on a shard.
      */
@@ -286,7 +284,13 @@ public:
     void optimizePipeline();
 
     /**
-     * Modifies the container, optimizing it by combining and swapping stages.
+     * Modifies the container, optimizes each stage individually.
+     */
+    static void optimizeEachStage(SourceContainer* container);
+
+    /**
+     * Modifies the container, optimizing it by combining, swapping, dropping and/or inserting
+     * stages.
      */
     static void optimizeContainer(SourceContainer* container);
 
@@ -301,11 +305,12 @@ public:
      * Helpers to serialize a pipeline.
      */
     std::vector<Value> serialize(
-        boost::optional<ExplainOptions::Verbosity> explain = boost::none) const;
+        boost::optional<const SerializationOptions&> opts = boost::none) const;
     std::vector<BSONObj> serializeToBson(
-        boost::optional<ExplainOptions::Verbosity> explain = boost::none) const;
+        boost::optional<const SerializationOptions&> opts = boost::none) const;
     static std::vector<Value> serializeContainer(
-        const SourceContainer& container, boost::optional<ExplainOptions::Verbosity> = boost::none);
+        const SourceContainer& container,
+        boost::optional<const SerializationOptions&> opts = boost::none);
 
     /**
      * Serializes the pipeline into BSON for explain/debug logging purposes.
@@ -326,7 +331,8 @@ public:
      * Write the pipeline's operators to a std::vector<Value>, providing the level of detail
      * specified by 'verbosity'.
      */
-    std::vector<Value> writeExplainOps(ExplainOptions::Verbosity verbosity) const;
+    std::vector<Value> writeExplainOps(
+        const SerializationOptions& opts = SerializationOptions{}) const;
 
     /**
      * Returns the dependencies needed by this pipeline. 'unavailableMetadata' should reflect what
@@ -396,6 +402,12 @@ public:
      */
     boost::intrusive_ptr<DocumentSource> popFrontWithNameAndCriteria(
         StringData targetStageName, std::function<bool(const DocumentSource* const)> predicate);
+
+    /**
+     * Appends another pipeline to the existing pipeline.
+     * NOTE: The other pipeline will be destroyed.
+     */
+    void appendPipeline(std::unique_ptr<Pipeline, PipelineDeleter> otherPipeline);
 
     /**
      * Performs common validation for top-level or facet pipelines. Throws if the pipeline is

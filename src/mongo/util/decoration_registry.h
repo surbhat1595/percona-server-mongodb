@@ -69,12 +69,12 @@ public:
                                 "Decorations must be nothrow destructible");
         return
             typename DecorationContainer<DecoratedType>::template DecorationDescriptorWithType<T>(
-                std::move(declareDecoration(sizeof(T),
-                                            std::alignment_of<T>::value,
-                                            &constructAt<T>,
-                                            nullptr,
-                                            nullptr,
-                                            &destroyAt<T>)));
+                declareDecoration(sizeof(T),
+                                  std::alignment_of<T>::value,
+                                  &constructAt<T>,
+                                  nullptr,
+                                  nullptr,
+                                  &destroyAt<T>));
     }
 
     /**
@@ -91,12 +91,12 @@ public:
                                 "Decorations must be nothrow destructible");
         return
             typename DecorationContainer<DecoratedType>::template DecorationDescriptorWithType<T>(
-                std::move(declareDecoration(sizeof(T),
-                                            std::alignment_of<T>::value,
-                                            &constructAt<T>,
-                                            &copyConstructAt<T>,
-                                            &copyAssignAt<T>,
-                                            &destroyAt<T>)));
+                declareDecoration(sizeof(T),
+                                  std::alignment_of<T>::value,
+                                  &constructAt<T>,
+                                  &copyConstructAt<T>,
+                                  &copyAssignAt<T>,
+                                  &destroyAt<T>));
     }
 
     size_t getDecorationBufferSizeBytes() const {

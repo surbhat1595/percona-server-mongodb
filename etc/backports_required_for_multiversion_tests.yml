@@ -23,6 +23,8 @@ last-continuous:
   all:
   - test_file: jstests/replsets/dbcheck_skip_applying_batch_on_secondary_parameter.js
     ticket: SERVER-88885
+  - test_file: jstests/core/write/update/upsert_nor.js
+    ticket: SERVER-91700
   - test_file: src/mongo/db/modules/enterprise/jstests/fcbis/fcbis_pauses_watchdog_checks_during_storage_change.js
     ticket: SERVER-83508
   - test_file: jstests/sharding/config_shards_on_repl_set_changes.js
@@ -641,6 +643,8 @@ last-continuous:
     ticket: SERVER-89744
   - test_file: jstests/sharding/move_chunk_deferred_lookup.js
     ticket: SERVER-89859
+  - test_file: jstests/sharding/secondaries_clear_filtering_metadata.js
+    ticket: SERVER-86669
   - test_file: jstests/sharding/move_collection_capped_collection.js
     ticket: SERVER-89826
   - test_file: jstests/sharding/transactions_stale_shard_version_errors.js
@@ -667,8 +671,6 @@ last-continuous:
     ticket: SERVER-90818
   - test_file: jstests/sharding/migration_blocking_operation/implicit_create_from_upsert_with_paused_migrations.js
     ticket: SERVER-90157
-  - test_file: jstests/sharding/database_versioning_all_commands.js
-    ticket: SERVER-90092
   - test_file: jstests/replsets/majority_writes_wait_for_all_durable_timestamp.js
     ticket: SERVER-86685
   - test_file: jstests/sharding/change_streams_with_config_transitions.js
@@ -689,11 +691,27 @@ last-continuous:
     ticket: SERVER-88750
   - test_file: jstests/core/timeseries/timeseries_shadowing_meta_project_pushdown.js
     ticket: SERVER-90995
+  - test_file: jstests/core/index/index_bounds_pipe.js
+    ticket: SERVER-91616
+  - test_file: jstests/core/query/and/and3.js
+    ticket: SERVER-91616
+  - test_file: jstests/core/query/explain/explain6.js
+    ticket: SERVER-91616
+  - test_file: jstests/core/query/regex/regex6.js
+    ticket: SERVER-91616
+  - test_file: jstests/core/query/regex/regex3.js
+    ticket: SERVER-91616
+  - test_file: jstests/sharding/migration_coordinator_abort_failover.js
+    ticket: SERVER-91331
+  - test_file: jstests/sharding/migration_coordinator_commit_failover.js
+    ticket: SERVER-91331
   suites: null
 last-lts:
   all:
   - test_file: jstests/replsets/dbcheck_skip_applying_batch_on_secondary_parameter.js
     ticket: SERVER-88885
+  - test_file: jstests/core/write/update/upsert_nor.js
+    ticket: SERVER-91700
   - test_file: src/mongo/db/modules/enterprise/jstests/fcbis/fcbis_pauses_watchdog_checks_during_storage_change.js
     ticket: SERVER-83508
   - test_file: jstests/sharding/config_shards_on_repl_set_changes.js
@@ -1386,6 +1404,8 @@ last-lts:
     ticket: SERVER-89744
   - test_file: jstests/sharding/move_chunk_deferred_lookup.js
     ticket: SERVER-89859
+  - test_file: jstests/sharding/secondaries_clear_filtering_metadata.js
+    ticket: SERVER-86669
   - test_file: jstests/sharding/move_collection_capped_collection.js
     ticket: SERVER-89826
   - test_file: jstests/sharding/transactions_stale_shard_version_errors.js
@@ -1412,8 +1432,6 @@ last-lts:
     ticket: SERVER-90818
   - test_file: jstests/sharding/migration_blocking_operation/implicit_create_from_upsert_with_paused_migrations.js
     ticket: SERVER-90157
-  - test_file: jstests/sharding/database_versioning_all_commands.js
-    ticket: SERVER-90092
   - test_file: jstests/replsets/majority_writes_wait_for_all_durable_timestamp.js
     ticket: SERVER-86685
   - test_file: jstests/sharding/change_streams_with_config_transitions.js
@@ -1434,4 +1452,18 @@ last-lts:
     ticket: SERVER-88750
   - test_file: jstests/core/timeseries/timeseries_shadowing_meta_project_pushdown.js
     ticket: SERVER-90995
+  - test_file: jstests/core/index/index_bounds_pipe.js
+    ticket: SERVER-91616
+  - test_file: jstests/core/query/and/and3.js
+    ticket: SERVER-91616
+  - test_file: jstests/core/query/explain/explain6.js
+    ticket: SERVER-91616
+  - test_file: jstests/core/query/regex/regex6.js
+    ticket: SERVER-91616
+  - test_file: jstests/core/query/regex/regex3.js
+    ticket: SERVER-91616
+  - test_file: jstests/sharding/migration_coordinator_abort_failover.js
+    ticket: SERVER-91331
+  - test_file: jstests/sharding/migration_coordinator_commit_failover.js
+    ticket: SERVER-91331
   suites: null

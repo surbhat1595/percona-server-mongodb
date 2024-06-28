@@ -45,30 +45,23 @@ std::function<void()> shutdownSynchronizeJob;
 std::function<void(OperationContext*, boost::optional<Timestamp>)> migrateOldToNew;
 std::function<void(OperationContext*)> removeOldConfig;
 std::function<void(OperationContext*)> updateAuditConfigOnDowngrade;
-std::function<void(ServiceContext*)> setAuditInterface;
 
 #if !PERCONA_AUDIT_ENABLED
-
 ImpersonatedClientAttrs::ImpersonatedClientAttrs(Client* client) {}
-
 void rotateAuditLog() {}
-
 #endif
-
 
 namespace {
 const auto getAuditInterface = ServiceContext::declareDecoration<std::unique_ptr<AuditInterface>>();
-
 #if !PERCONA_AUDIT_ENABLED
 // @see the `src/mongo/audit/audit.cpp` file for registeting Percona's
 // implementation of `AuditInterface`.
 ServiceContext::ConstructorActionRegisterer registerCreateNoopAudit{
-    "CreateNoopAudit", [](ServiceContext* service) {
-        AuditInterface::set(service, std::make_unique<AuditNoOp>());
+    "initializeNoopAuditInterface", [](ServiceContext* svcCtx) {
+        AuditInterface::set(svcCtx, std::make_unique<AuditNoOp>());
     }};
 #endif
 }  // namespace
-
 
 AuditInterface* AuditInterface::get(ServiceContext* service) {
     return getAuditInterface(service).get();

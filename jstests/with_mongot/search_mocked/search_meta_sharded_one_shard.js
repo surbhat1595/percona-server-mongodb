@@ -38,7 +38,7 @@ assert.commandWorked(testDB.adminCommand({enableSharding: dbName, primaryShard: 
 const collName = jsTestName();
 const coll = testDB.getCollection(collName);
 
-const shard0ResultId = 2
+const shard0ResultId = 2;
 
 assert.commandWorked(coll.insert([
     {_id: shard0ResultId, openfda: {manufacturer_name: 'Factory', route: ['ORAL']}},
@@ -59,8 +59,12 @@ function setQueryMockResponses() {
             [
                 {
                     // Please note: intermediate results protocol version is not expected.
-                    expectedCommand:
-                        mongotCommandForQuery(mongotQuery, collName, dbName, collUUID0),
+                    expectedCommand: mongotCommandForQuery({
+                        query: mongotQuery,
+                        collName: collName,
+                        db: dbName,
+                        collectionUUID: collUUID0
+                    }),
                     response: {
                         "cursor": {
                             "id": NumberLong(0),

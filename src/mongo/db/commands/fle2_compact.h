@@ -118,13 +118,15 @@ void compactOneFieldValuePairV2(FLEQueryInterface* queryImpl,
  */
 void compactOneRangeFieldPad(FLEQueryInterface* queryImpl,
                              const NamespaceString& escNss,
+                             StringData fieldPath,
                              BSONType fieldType,
                              const QueryTypeConfig& queryTypeConfig,
                              double anchorPaddingFactor,
                              std::size_t uniqueLeaves,
                              std::size_t uniqueTokens,
                              const AnchorPaddingRootToken& anchorPaddingRootToken,
-                             ECStats* escStats);
+                             ECStats* escStats,
+                             std::size_t maxDocsPerInsert = write_ops::kMaxWriteBatchSize);
 
 /**
  * Performs cleanup of the ESC entries for the encrypted field/value pair

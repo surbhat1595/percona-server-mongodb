@@ -380,6 +380,9 @@ const st = new ShardingTest({mongos: 1, shards: 2});
             assert.contains("TransientTransactionError", err.errorLabels, tojson(err));
 
             session.abortTransaction();
+            // Transaction abort can race 'abort' before 'new transaction' command
+            // on participant, so ensure there are no orphan transactions on participant.
+            st.shard1.getDB('config').runCommand({killSessions: [session.id]});
         }
 
         readConcerns.forEach((readConcern) => commands.forEach((command) => {
@@ -397,7 +400,7 @@ const st = new ShardingTest({mongos: 1, shards: 2});
         const coll = db['sharded'];
 
         assert.commandWorked(st.s.getDB(db.getName()).dropDatabase());
-        assert.commandWorked(st.s.adminCommand({shardCollection: coll.getFullName(), key: {x: 1}}))
+        assert.commandWorked(st.s.adminCommand({shardCollection: coll.getFullName(), key: {x: 1}}));
         assert.commandWorked(st.s.adminCommand({split: coll.getFullName(), middle: {x: 0}}));
         assert.commandWorked(st.s.adminCommand({
             moveChunk: coll.getFullName(),

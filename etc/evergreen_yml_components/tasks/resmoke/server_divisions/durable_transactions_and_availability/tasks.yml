@@ -340,7 +340,7 @@ tasks:
 
 - <<: *gen_task_template
   name: concurrency_sharded_initial_sync_gen
-  tags: ["assigned_to_jira_team_server_repl", "default", "concurrency", "stepdowns", "initsync", "large", "sharded", "no_debug_mode", "requires_wt"]
+  tags: ["assigned_to_jira_team_server_repl", "default", "concurrency", "stepdowns", "initsync", "large", "sharded", "no_debug_mode", "requires_wt", "incompatible_tsan"]
   commands:
   - func: "generate resmoke tasks"
     vars:
@@ -1022,7 +1022,7 @@ tasks:
 
 - <<: *task_template
   name: serial_run
-  tags: ["assigned_to_jira_team_server_repl", "release_critical", "misc_js", "non_win_dbg"]
+  tags: ["assigned_to_jira_team_server_repl", "release_critical", "misc_js", "non_win_dbg", "requires_large_host"]
   commands:
   - func: "do setup"
   - func: "run tests"

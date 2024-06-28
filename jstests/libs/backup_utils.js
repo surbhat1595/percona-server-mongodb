@@ -212,10 +212,12 @@ export function _copyFileHelper(file, sourceDbPath, destinationDirectory) {
 // needed.
 
 export class MagicRestoreUtils {
-    constructor({backupSource, pipeDir, insertHigherTermOplogEntry}) {
+    constructor({backupSource, pipeDir, insertHigherTermOplogEntry, backupDbPathSuffix}) {
         this.backupSource = backupSource;
         this.pipeDir = pipeDir;
-        this.backupDbPath = pipeDir + "/backup";
+        this.backupDbPath =
+            pipeDir + "/backup" + (backupDbPathSuffix != undefined ? backupDbPathSuffix : "");
+
         // isPit is set when we receive the restoreConfiguration.
         this.isPit = false;
         this.insertHigherTermOplogEntry = insertHigherTermOplogEntry;
@@ -374,10 +376,10 @@ export class MagicRestoreUtils {
     /**
      * Combines writing objects to the named pipe and running magic restore.
      */
-    writeObjsAndRunMagicRestore(restoreConfiguration, entriesAfterBackup = [], options = {}) {
+    writeObjsAndRunMagicRestore(restoreConfiguration, entriesAfterBackup, options) {
         this.pointInTimeTimestamp = restoreConfiguration.pointInTimeTimestamp;
         if (this.pointInTimeTimestamp) {
-            assert(entriesAfterBackup);
+            assert(entriesAfterBackup.length > 0);
             this.isPit = true;
         }
         MagicRestoreUtils.writeObjsToMagicRestorePipe(
@@ -464,5 +466,12 @@ export class MagicRestoreUtils {
         });
         assert.commandWorked(res);
         assert.eq(res.cursor.firstBatch.length, expectedNumDocs);
+    }
+
+    /**
+     * Get the UUID for a given collection.
+     */
+    getCollUuid(node, dbName, collName) {
+        return node.getDB(dbName).getCollectionInfos({name: collName})[0].info.uuid;
     }
 }

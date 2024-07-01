@@ -271,8 +271,11 @@ private:
 
 class FakeReadKmipKey : public ReadKmipKey {
 public:
-    FakeReadKmipKey(FakeKmipServer& server, const KmipKeyId& id, bool verifyState)
-        : ReadKmipKey(id, verifyState), _server(server) {}
+    FakeReadKmipKey(FakeKmipServer& server,
+                    const KmipKeyId& id,
+                    bool verifyState,
+                    bool toleratePreActiveKeys)
+        : ReadKmipKey(id, verifyState, toleratePreActiveKeys), _server(server) {}
 
     std::variant<KeyEntry, NotFound, BadKeyState> operator()() const override {
         std::optional<std::pair<Key, KeyState>> keyKeyStatePair = _server.readKey(_id);
@@ -280,8 +283,9 @@ public:
             return NotFound();
         }
         auto [key, keyState] = *keyKeyStatePair;
-        if (!_verifyState || keyState == KeyState::kActive) {
-            return KeyEntry{key, _id.clone()};
+        if (!_verifyState || keyState == KeyState::kActive ||
+            (_toleratePreActiveKeys && keyState == KeyState::kPreActive)) {
+            return KeyEntry{key, _id.clone(), keyState};
         }
         return BadKeyState(keyState);
     }
@@ -322,14 +326,20 @@ public:
                                 bool rotateMasterKey,
                                 const std::string& providedKeyId,
                                 bool activateKeys,
+                                bool toleratePreActiveKeys,
                                 Seconds keyStatePollingPeriod)
-        : KmipKeyOperationFactory(
-              rotateMasterKey, providedKeyId, activateKeys, keyStatePollingPeriod),
+        : KmipKeyOperationFactory(rotateMasterKey,
+                                  providedKeyId,
+                                  activateKeys,
+                                  toleratePreActiveKeys,
+                                  keyStatePollingPeriod),
           _server(server) {}
 
 private:
-    std::unique_ptr<ReadKey> _doCreateRead(const KmipKeyId& id, bool verifyState) const override {
-        return std::make_unique<FakeReadKmipKey>(_server, id, verifyState);
+    std::unique_ptr<ReadKey> _doCreateRead(const KmipKeyId& id,
+                                           bool verifyState,
+                                           bool toleratePreActiveKeys) const override {
+        return std::make_unique<FakeReadKmipKey>(_server, id, verifyState, toleratePreActiveKeys);
     }
     std::unique_ptr<SaveKey> _doCreateSave(bool activate) const override {
         return std::make_unique<FakeSaveKmipKey>(_server, activate);
@@ -352,7 +362,8 @@ public:
         return std::make_unique<MasterKeyProvider>(
             createFakeKeyOperationFactory(_vaultServer, _kmipServer, params),
             WtKeyIds::instance(),
-            logComponent);
+            logComponent,
+            params.kmipToleratePreActiveKeys());
     }
 
 private:
@@ -372,7 +383,8 @@ private:
                 kmipServer,
                 params.kmipRotateMasterKey,
                 params.kmipKeyIdentifier,
-                params.kmipActivateKeys,
+                params.kmipActivateKeys(),
+                params.kmipToleratePreActiveKeys(),
                 Seconds(params.kmipKeyStatePollingSeconds));
         }
         invariant(false && "Should not reach this point");
@@ -1007,7 +1019,7 @@ protected:
 TEST_F(WiredTigerKVEngineEncryptionKeyKmipVerifyStateOnStartUpTest,
        KeyStateVerificationIsOffNewKeyIsOk) {
     encryptionGlobalParams = encryptionParamsKmip();
-    encryptionGlobalParams.kmipActivateKeys = false;
+    encryptionGlobalParams.kmipActivateKeys(false);
 
     _engine = _createWiredTigerKVEngine();
 
@@ -1021,7 +1033,7 @@ TEST_F(WiredTigerKVEngineEncryptionKeyKmipVerifyStateOnStartUpTest,
        KeyStateVerificationIsOffExistingActiveKeyIsOk) {
     KmipKeyId id = _kmipServer.saveKey(*_key, /* activate = */ true);
     encryptionGlobalParams = encryptionParamsKmip(id);
-    encryptionGlobalParams.kmipActivateKeys = false;
+    encryptionGlobalParams.kmipActivateKeys(false);
 
     _engine = _createWiredTigerKVEngine();
 
@@ -1033,7 +1045,7 @@ TEST_F(WiredTigerKVEngineEncryptionKeyKmipVerifyStateOnStartUpTest,
        KeyStateVerificationIsOffExistingPreActiveKeyIsOk) {
     KmipKeyId id = _kmipServer.saveKey(*_key, /* activate = */ false);
     encryptionGlobalParams = encryptionParamsKmip(id);
-    encryptionGlobalParams.kmipActivateKeys = false;
+    encryptionGlobalParams.kmipActivateKeys(false);
 
     _engine = _createWiredTigerKVEngine();
 
@@ -1046,7 +1058,7 @@ TEST_F(WiredTigerKVEngineEncryptionKeyKmipVerifyStateOnStartUpTest,
     KmipKeyId id = _kmipServer.saveKey(*_key, /* activate = */ true);
     _kmipServer.deactivateKey(id);
     encryptionGlobalParams = encryptionParamsKmip(id);
-    encryptionGlobalParams.kmipActivateKeys = false;
+    encryptionGlobalParams.kmipActivateKeys(false);
 
     _engine = _createWiredTigerKVEngine();
 
@@ -1057,7 +1069,7 @@ TEST_F(WiredTigerKVEngineEncryptionKeyKmipVerifyStateOnStartUpTest,
 TEST_F(WiredTigerKVEngineEncryptionKeyKmipVerifyStateOnStartUpTest,
        KeyStateVerificationIsOnNewKeyIsOk) {
     encryptionGlobalParams = encryptionParamsKmip();
-    encryptionGlobalParams.kmipActivateKeys = true;
+    encryptionGlobalParams.kmipActivateKeys(true);
 
     _engine = _createWiredTigerKVEngine();
 
@@ -1071,7 +1083,7 @@ TEST_F(WiredTigerKVEngineEncryptionKeyKmipVerifyStateOnStartUpTest,
        KeyStateVerificationIsOnExistingActiveKeyIsOk) {
     KmipKeyId id = _kmipServer.saveKey(*_key, /* activate = */ true);
     encryptionGlobalParams = encryptionParamsKmip(id);
-    encryptionGlobalParams.kmipActivateKeys = true;
+    encryptionGlobalParams.kmipActivateKeys(true);
 
     _engine = _createWiredTigerKVEngine();
 
@@ -1083,7 +1095,7 @@ TEST_F(WiredTigerKVEngineEncryptionKeyKmipVerifyStateOnStartUpTest,
        KeyStateVerificationIsOnExistingPreActiveKeyIsNotOk) {
     KmipKeyId id = _kmipServer.saveKey(*_key, /* activate = */ false);
     encryptionGlobalParams = encryptionParamsKmip(id);
-    encryptionGlobalParams.kmipActivateKeys = true;
+    encryptionGlobalParams.kmipActivateKeys(true);
 
     // clang-format off
     ASSERT_THROWS_WITH_CHECK(
@@ -1111,7 +1123,7 @@ TEST_F(WiredTigerKVEngineEncryptionKeyKmipVerifyStateOnStartUpTest,
     KmipKeyId id = _kmipServer.saveKey(*_key, /* activate = */ true);
     _kmipServer.deactivateKey(id);
     encryptionGlobalParams = encryptionParamsKmip(id);
-    encryptionGlobalParams.kmipActivateKeys = true;
+    encryptionGlobalParams.kmipActivateKeys(true);
 
     // clang-format off
     ASSERT_THROWS_WITH_CHECK(
@@ -1158,28 +1170,13 @@ TEST_F(WiredTigerKVEngineEncryptionKeyKmipVerifyStateOnStartUpTest,
 }
 
 TEST_F(WiredTigerKVEngineEncryptionKeyKmipVerifyStateOnStartUpTest,
-       KeyStateVerificationIsDefaultExistingPreActiveKeyIsNotOk) {
+       KeyStateVerificationIsDefaultExistingPreActiveKeyIsOk) {
     KmipKeyId id = _kmipServer.saveKey(*_key, /* activate = */ false);
     encryptionGlobalParams = encryptionParamsKmip(id);
 
-    // clang-format off
-    ASSERT_THROWS_WITH_CHECK(
-        _createWiredTigerKVEngine(),
-        encryption::Error,
-        ([this, &id](const encryption::Error& e) {
-            auto expected = BSON(
-                "what" << "Can't create encryption key database" <<
-                "reason" << BSON(
-                    "what" << "key reading failed" <<
-                    "reason" << "Master encryption key is not in the active state "
-                                "on the key management facility." <<
-                    "keyManagementFacilityType" << "KMIP server" <<
-                    "keyIdentifier" << BSON("kmipKeyIdentifier" << id.toString()) <<
-                    "keyState" << encryption::toString(encryption::KeyState::kPreActive)) <<
-                "encryptionKeyDatabaseDirectory" << _tempDir->path() + "/key.db");
-            ASSERT_BSONOBJ_EQ(e.toBSON(), expected);
-        }));
-    // clang-format on
+    _engine = _createWiredTigerKVEngine();
+
+    ASSERT_EQ(_engine->getEncryptionKeyDB()->masterKey(), _kmipServer.readKey(id)->first);
     ASSERT_KEY_STATE_POLLING_DISABLED();
 }
 
@@ -1235,7 +1232,7 @@ class WiredTigerKVEngineEncryptionKeyKmipVerifyStateOnRotationDisabledActivation
 public:
     void setUp() override {
         WiredTigerKVEngineEncryptionKeyKmipVerifyStateOnRotationTest::setUp();
-        encryptionGlobalParams.kmipActivateKeys = false;
+        encryptionGlobalParams.kmipActivateKeys(false);
     }
 };
 
@@ -1311,7 +1308,7 @@ class WiredTigerKVEngineEncryptionKeyKmipVerifyStateOnRotationEnabledActivationT
 public:
     void setUp() override {
         WiredTigerKVEngineEncryptionKeyKmipVerifyStateOnRotationTest::setUp();
-        encryptionGlobalParams.kmipActivateKeys = true;
+        encryptionGlobalParams.kmipActivateKeys(true);
     }
 };
 
@@ -1463,28 +1460,12 @@ TEST_F(WiredTigerKVEngineEncryptionKeyKmipVerifyStateOnRotationDefaultedActivati
 }
 
 TEST_F(WiredTigerKVEngineEncryptionKeyKmipVerifyStateOnRotationDefaultedActivationTest,
-       ReplacingExistingInactiveWithExistingPreActiveKeyIsNotOk) {
+       ReplacingExistingInactiveWithExistingPreActiveKeyIsOk) {
     _kmipServer.deactivateKey(_oldId);
     KmipKeyId id = _kmipServer.saveKey(Key(), /* activate = */ false);
     encryptionGlobalParams.kmipKeyIdentifier = id.toString();
 
-    // clang-format off
-    ASSERT_THROWS_WITH_CHECK(
-        _createWiredTigerKVEngine(),
-        encryption::Error,
-        ([this, &id](const encryption::Error& e) {
-            auto expected = BSON(
-                "what" << "Can't rotate master encryption key" <<
-                "reason" << BSON(
-                    "what" << "key reading failed" <<
-                    "reason" << "Master encryption key is not in the active state "
-                                "on the key management facility." <<
-                    "keyManagementFacilityType" << "KMIP server" <<
-                    "keyIdentifier" << BSON("kmipKeyIdentifier" << id.toString()) <<
-                    "keyState" << encryption::toString(encryption::KeyState::kPreActive)));
-            ASSERT_BSONOBJ_EQ(e.toBSON(), expected);
-        }));
-    // clang-format on
+    ASSERT_THROWS(_createWiredTigerKVEngine(), MasterKeyRotationCompleted);
 }
 
 TEST_F(WiredTigerKVEngineEncryptionKeyKmipVerifyStateOnRotationDefaultedActivationTest,
@@ -1529,27 +1510,11 @@ TEST_F(WiredTigerKVEngineEncryptionKeyKmipVerifyStateOnRotationDefaultedActivati
 }
 
 TEST_F(WiredTigerKVEngineEncryptionKeyKmipVerifyStateOnRotationDefaultedActivationTest,
-       ReplacingExistingActiveKeyWithExistingPreActiveKeyIsNotOk) {
+       ReplacingExistingActiveKeyWithExistingPreActiveKeyIsOk) {
     KmipKeyId id = _kmipServer.saveKey(Key(), /* activate = */ false);
     encryptionGlobalParams.kmipKeyIdentifier = id.toString();
 
-    // clang-format off
-    ASSERT_THROWS_WITH_CHECK(
-        _createWiredTigerKVEngine(),
-        encryption::Error,
-        ([this, &id](const encryption::Error& e) {
-            auto expected = BSON(
-                "what" << "Can't rotate master encryption key" <<
-                "reason" << BSON(
-                    "what" << "key reading failed" <<
-                    "reason" << "Master encryption key is not in the active state "
-                                "on the key management facility." <<
-                    "keyManagementFacilityType" << "KMIP server" <<
-                    "keyIdentifier" << BSON("kmipKeyIdentifier" << id.toString()) <<
-                    "keyState" << encryption::toString(encryption::KeyState::kPreActive)));
-            ASSERT_BSONOBJ_EQ(e.toBSON(), expected);
-        }));
-    // clang-format on
+    ASSERT_THROWS(_createWiredTigerKVEngine(), MasterKeyRotationCompleted);
 }
 
 TEST_F(WiredTigerKVEngineEncryptionKeyKmipVerifyStateOnRotationDefaultedActivationTest,
@@ -1602,7 +1567,7 @@ TEST_F(WiredTigerKVEngineEncryptionKeyKmipPollStateTest, KeyStatePollingIsEnable
 TEST_F(WiredTigerKVEngineEncryptionKeyKmipPollStateTest,
        TrueActivateKeysAndPositivePollingSecondsEnableKeyStatePolling) {
     encryptionGlobalParams = encryptionParamsKmip();
-    encryptionGlobalParams.kmipActivateKeys = true;
+    encryptionGlobalParams.kmipActivateKeys(true);
     encryptionGlobalParams.kmipKeyStatePollingSeconds = 1;
 
     _engine = _createWiredTigerKVEngine();
@@ -1620,7 +1585,7 @@ TEST_F(WiredTigerKVEngineEncryptionKeyKmipPollStateTest,
 
 TEST_F(WiredTigerKVEngineEncryptionKeyKmipPollStateTest, FalseActivateKeysDisablesKeyStatePolling) {
     encryptionGlobalParams = encryptionParamsKmip();
-    encryptionGlobalParams.kmipActivateKeys = false;
+    encryptionGlobalParams.kmipActivateKeys(false);
     encryptionGlobalParams.kmipKeyStatePollingSeconds = 1;
 
     _engine = _createWiredTigerKVEngine();
@@ -1631,7 +1596,7 @@ TEST_F(WiredTigerKVEngineEncryptionKeyKmipPollStateTest, FalseActivateKeysDisabl
 TEST_F(WiredTigerKVEngineEncryptionKeyKmipPollStateTest,
        ZeroPollingSecondsDisablesKeyStatePolling) {
     encryptionGlobalParams = encryptionParamsKmip();
-    encryptionGlobalParams.kmipActivateKeys = true;
+    encryptionGlobalParams.kmipActivateKeys(true);
     encryptionGlobalParams.kmipKeyStatePollingSeconds = 0;
 
     _engine = _createWiredTigerKVEngine();
@@ -1642,7 +1607,7 @@ TEST_F(WiredTigerKVEngineEncryptionKeyKmipPollStateTest,
 TEST_F(WiredTigerKVEngineEncryptionKeyKmipPollStateTest,
        NegativePollingSecondsDisablesKeyStatePolling) {
     encryptionGlobalParams = encryptionParamsKmip();
-    encryptionGlobalParams.kmipActivateKeys = true;
+    encryptionGlobalParams.kmipActivateKeys(true);
     encryptionGlobalParams.kmipKeyStatePollingSeconds = -1;
 
     _engine = _createWiredTigerKVEngine();
@@ -1653,7 +1618,7 @@ TEST_F(WiredTigerKVEngineEncryptionKeyKmipPollStateTest,
 TEST_F(WiredTigerKVEngineEncryptionKeyKmipPollStateTest,
        FalseActivateKeysAndZeroPollingSecondsDisablesKeyStatePolling) {
     encryptionGlobalParams = encryptionParamsKmip();
-    encryptionGlobalParams.kmipActivateKeys = false;
+    encryptionGlobalParams.kmipActivateKeys(false);
     encryptionGlobalParams.kmipKeyStatePollingSeconds = 0;
 
     _engine = _createWiredTigerKVEngine();
@@ -1664,7 +1629,7 @@ TEST_F(WiredTigerKVEngineEncryptionKeyKmipPollStateTest,
 TEST_F(WiredTigerKVEngineEncryptionKeyKmipPollStateTest,
        FalseActivateKeysAndNegativePollingSecondsDisablesKeyStatePolling) {
     encryptionGlobalParams = encryptionParamsKmip();
-    encryptionGlobalParams.kmipActivateKeys = false;
+    encryptionGlobalParams.kmipActivateKeys(false);
     encryptionGlobalParams.kmipKeyStatePollingSeconds = -1;
 
     _engine = _createWiredTigerKVEngine();

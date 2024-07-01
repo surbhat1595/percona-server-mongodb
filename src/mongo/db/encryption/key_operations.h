@@ -218,8 +218,12 @@ private:
 
 class ReadKmipKey : public ReadKey {
 public:
-    ReadKmipKey(const KmipKeyId& id, bool verifyState) : _id(id), _verifyState(verifyState) {}
-    ReadKmipKey(KmipKeyId&& id, bool verifyState) : _id(std::move(id)), _verifyState(verifyState) {}
+    ReadKmipKey(const KmipKeyId& id, bool verifyState, bool toleratePreActiveKeys)
+        : _id(id), _verifyState(verifyState), _toleratePreActiveKeys(toleratePreActiveKeys) {}
+    ReadKmipKey(KmipKeyId&& id, bool verifyState, bool toleratePreActiveKeys)
+        : _id(std::move(id)),
+          _verifyState(verifyState),
+          _toleratePreActiveKeys(toleratePreActiveKeys) {}
 
     std::variant<KeyEntry, NotFound, BadKeyState> operator()() const override;
 
@@ -231,6 +235,7 @@ public:
 protected:
     KmipKeyId _id;
     bool _verifyState;
+    bool _toleratePreActiveKeys;
 };
 
 class SaveKmipKey : public SaveKey {
@@ -409,6 +414,7 @@ public:
     KmipKeyOperationFactory(bool rotateMasterKey,
                             const std::string& providedKeyId,
                             bool activateKey,
+                            bool toleratePreActiveKeys,
                             Seconds keyStatePollingPeriod);
     std::unique_ptr<ReadKey> createProvidedRead() const override;
     std::unique_ptr<ReadKey> createRead(const KeyId* configured) const override;
@@ -421,18 +427,21 @@ private:
     friend class detail::CreateReadImpl<KmipKeyOperationFactory>;
 
     std::unique_ptr<ReadKey> _doCreateProvidedRead(const KmipKeyId& id) const {
-        return _doCreateRead(id, /* verifyState = */ _activateKeys);
+        return _doCreateRead(id, /* verifyState = */ _activateKeys, _toleratePreActiveKeys);
     }
     std::unique_ptr<ReadKey> _doCreateRead(const KmipKeyId& id) const {
-        return _doCreateRead(id, /* verifyState = */ _activateKeys && !_rotateMasterKey);
+        return _doCreateRead(
+            id, /* verifyState = */ _activateKeys && !_rotateMasterKey, _toleratePreActiveKeys);
     }
     std::unique_ptr<SaveKey> _doCreateSave() const {
         return _doCreateSave(_activateKeys);
     }
 
     // allow overriding to enable unit testing
-    virtual std::unique_ptr<ReadKey> _doCreateRead(const KmipKeyId& id, bool verifyState) const {
-        return std::make_unique<ReadKmipKey>(id, verifyState);
+    virtual std::unique_ptr<ReadKey> _doCreateRead(const KmipKeyId& id,
+                                                   bool verifyState,
+                                                   bool toleratePreActiveKeys) const {
+        return std::make_unique<ReadKmipKey>(id, verifyState, toleratePreActiveKeys);
     }
     virtual std::unique_ptr<SaveKey> _doCreateSave(bool activate) const {
         return std::make_unique<SaveKmipKey>(activate);
@@ -444,6 +453,7 @@ private:
 
     bool _rotateMasterKey;
     bool _activateKeys;
+    bool _toleratePreActiveKeys;
     Seconds _keyStatePollingPeriod;
     std::optional<KmipKeyId> _provided;
     mutable const KmipKeyId* _configured;

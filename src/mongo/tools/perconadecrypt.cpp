@@ -218,7 +218,7 @@ int decryptGCM(const encryption::Key& masterKey,
 encryption::Key readMasterKey() {
     using namespace encryption;
     EncryptionGlobalParams params = encryptionGlobalParams;
-    params.kmipActivateKeys = false;
+    params.kmipActivateKeys(false);
     auto factory = KeyOperationFactory::create(params);
     std::unique_ptr<ReadKey> read = factory->createProvidedRead();
     std::cout << "Loading encryption key from the " << read->facilityType() << std::endl;

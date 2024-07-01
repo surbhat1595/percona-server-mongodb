@@ -32,13 +32,16 @@ Copyright (C) 2024-present Percona and/or its affiliates. All rights reserved.
 #pragma once
 
 #include <memory>
+#include <optional>
 
 #include "mongo/db/encryption/key.h"
 #include "mongo/db/encryption/key_id.h"
+#include "mongo/db/encryption/key_state.h"
 
 namespace mongo::encryption {
 struct KeyEntry {
     Key key;
     std::unique_ptr<KeyId> keyId;
+    std::optional<KeyState> keyState;
 };
 }  // namespace mongo::encryption

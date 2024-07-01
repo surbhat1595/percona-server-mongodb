@@ -81,8 +81,8 @@ public:
     ///     returns a `KeyIsNotActive` object via the unique pointer.
     ///
     /// @throws `std::runtime_error` if any other error occurs
-    std::pair<std::optional<Key>, std::optional<KeyState>> getSymmetricKey(const std::string& keyId,
-                                                                           bool verifyState = true);
+    std::pair<std::optional<Key>, std::optional<KeyState>> getSymmetricKey(
+        const std::string& keyId, bool verifyState = true, bool toleratePreActiveKeys = true);
 
     /// @brief Reads the state of an encryption key.
     ///

@@ -55,7 +55,8 @@ public:
     ~MasterKeyProvider();
     MasterKeyProvider(std::unique_ptr<const KeyOperationFactory>&& factory,
                       WtKeyIds& wtKeyIds,
-                      logv2::LogComponent logComponent);
+                      logv2::LogComponent logComponent,
+                      bool toleratePreActiveKeys);
 
     /// @brief Creates the master key provider.
     ///
@@ -130,6 +131,7 @@ private:
     std::unique_ptr<const KeyOperationFactory> _factory;
     WtKeyIds& _wtKeyIds;
     logv2::LogComponent _logComponent;
+    bool _toleratePreActiveKeys;
 };
 
 using MasterKeyProviderFactory = std::function<std::unique_ptr<MasterKeyProvider>(

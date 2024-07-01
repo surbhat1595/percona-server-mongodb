@@ -128,11 +128,11 @@ std::unique_ptr<KeyId> SaveVaultSecret::operator()(const Key& k) const try {
 
 std::variant<KeyEntry, NotFound, BadKeyState> ReadKmipKey::operator()() const try {
     auto op = [this](KmipClient& client) {
-        return client.getSymmetricKey(_id.toString(), _verifyState);
+        return client.getSymmetricKey(_id.toString(), _verifyState, _toleratePreActiveKeys);
     };
     auto [key, keyState] = retryKmipOperation(op);
     if (key) {
-        return KeyEntry{*key, _id.clone()};
+        return KeyEntry{*key, _id.clone(), keyState};
     }
     if (keyState) {
         return BadKeyState(*keyState);
@@ -177,7 +177,8 @@ std::unique_ptr<KeyOperationFactory> KeyOperationFactory::create(
         return std::make_unique<KmipKeyOperationFactory>(
             params.kmipRotateMasterKey,
             params.kmipKeyIdentifier,
-            params.kmipActivateKeys,
+            params.kmipActivateKeys(),
+            params.kmipToleratePreActiveKeys(),
             Seconds(params.kmipKeyStatePollingSeconds));
     }
     invariant(false && "Should not reach this point");
@@ -205,9 +206,11 @@ VaultSecretOperationFactory::VaultSecretOperationFactory(
 KmipKeyOperationFactory::KmipKeyOperationFactory(bool rotateMasterKey,
                                                  const std::string& providedKeyId,
                                                  bool activateKeys,
+                                                 bool toleratePreActiveKeys,
                                                  Seconds keyStatePollingPeriod)
     : _rotateMasterKey(rotateMasterKey),
       _activateKeys(activateKeys),
+      _toleratePreActiveKeys(toleratePreActiveKeys),
       _keyStatePollingPeriod(keyStatePollingPeriod),
       _configured(nullptr) {
     if (!providedKeyId.empty()) {

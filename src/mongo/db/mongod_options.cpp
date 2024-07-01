@@ -558,7 +558,7 @@ Status storeMongodOptions(const moe::Environment& params) {
     }
 
     if (params.count("security.kmip.activateKeys")) {
-        encryptionGlobalParams.kmipActivateKeys = params["security.kmip.activateKeys"].as<bool>();
+        encryptionGlobalParams.kmipActivateKeys(params["security.kmip.activateKeys"].as<bool>());
     }
 
     if (params.count("security.kmip.keyStatePollingSeconds")) {

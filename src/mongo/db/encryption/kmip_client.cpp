@@ -79,8 +79,8 @@ public:
     Impl& operator=(Impl&&) = default;
 
     std::string registerSymmetricKey(const Key& key, bool activate);
-    std::pair<std::optional<Key>, std::optional<KeyState>> getSymmetricKey(const std::string& keyId,
-                                                                           bool verifyState);
+    std::pair<std::optional<Key>, std::optional<KeyState>> getSymmetricKey(
+        const std::string& keyId, bool verifyState, bool toleratePreActiveKeys);
     std::optional<KeyState> getKeyState(const std::string& keyId);
 
 private:
@@ -209,8 +209,9 @@ std::string KmipClient::Impl::registerSymmetricKey(const Key& key, bool activate
 }
 
 std::pair<std::optional<Key>, std::optional<KeyState>> KmipClient::Impl::getSymmetricKey(
-    const std::string& keyId, bool verifyState) {
-    auto session = std::make_shared<detail::KmipSessionGetSymmetricKey>(keyId, verifyState);
+    const std::string& keyId, bool verifyState, bool toleratePreActiveKeys) {
+    auto session = std::make_shared<detail::KmipSessionGetSymmetricKey>(
+        keyId, verifyState, toleratePreActiveKeys);
     conductSession(session);
     return {session->key(), session->keyState()};
 }
@@ -387,8 +388,8 @@ std::string KmipClient::registerSymmetricKey(const Key& key, bool activate) {
 }
 
 std::pair<std::optional<Key>, std::optional<KeyState>> KmipClient::getSymmetricKey(
-    const std::string& keyId, bool verifyState) {
-    return _impl->getSymmetricKey(keyId, verifyState);
+    const std::string& keyId, bool verifyState, bool toleratePreActiveKeys) {
+    return _impl->getSymmetricKey(keyId, verifyState, toleratePreActiveKeys);
 }
 
 std::optional<KeyState> KmipClient::getKeyState(const std::string& keyId) {

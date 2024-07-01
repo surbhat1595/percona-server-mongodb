@@ -124,8 +124,13 @@ private:
     enum class State : std::uint8_t { kNotStarted, kVerifying, kRetrieving, kFinished };
 
 public:
-    KmipSessionGetSymmetricKey(const std::string& keyId, bool verifyState)
-        : _keyId(keyId), _verifyState(verifyState), _state(State::kNotStarted) {}
+    KmipSessionGetSymmetricKey(const std::string& keyId,
+                               bool verifyState,
+                               bool toleratePreActiveKeys)
+        : _keyId(keyId),
+          _verifyState(verifyState),
+          _toleratePreActiveKeys(toleratePreActiveKeys),
+          _state(State::kNotStarted) {}
 
     std::shared_ptr<KmipExchange> nextExchange() override {
         auto transitionToRetrievingState = [this]() {
@@ -150,8 +155,9 @@ public:
                 return transitionToRetrievingState();
             case State::kVerifying:
                 invariant(_getKeyState->state() == KmipExchange::State::kResponseReceived);
-                if (_keyState = _getKeyState->decodeKeyState();
-                    _keyState && *_keyState == KeyState::kActive) {
+                if (_keyState = _getKeyState->decodeKeyState(); _keyState &&
+                    (*_keyState == KeyState::kActive ||
+                     (_toleratePreActiveKeys && *_keyState == KeyState::kPreActive))) {
                     return transitionToRetrievingState();
                 }
                 return transitionToFinishedState();
@@ -179,6 +185,7 @@ public:
 private:
     std::string _keyId;
     bool _verifyState;
+    bool _toleratePreActiveKeys;
     State _state;
     std::shared_ptr<KmipExchangeGetKeyState> _getKeyState;
     std::shared_ptr<KmipExchangeGetSymmetricKey> _getKey;

@@ -600,7 +600,7 @@ void validateRotationIsPossible(const std::string& keyDbDir,
 }
 
 template <typename KeyDbDirHook>
-std::pair<std::unique_ptr<EncryptionKeyDB>, std::unique_ptr<encryption::KeyId>> createKeyDb(
+std::pair<std::unique_ptr<EncryptionKeyDB>, encryption::KeyEntry> createKeyDb(
     const boost::filesystem::path& dbPath,
     KeyDbDirHook keyDbDirHook,
     const encryption::MasterKeyProvider& keyProvider,
@@ -623,11 +623,11 @@ std::pair<std::unique_ptr<EncryptionKeyDB>, std::unique_ptr<encryption::KeyId>> 
     keyDbDirHook(keyDbDir.string(), keyDbDirIsFresh);
 
     try {
-        auto [masterKey, masterKeyId] =
+        encryption::KeyEntry keyEntry =
             keyDbDirIsFresh ? keyProvider.obtainMasterKey() : keyProvider.readMasterKey();
-        auto keyDb = EncryptionKeyDB::create(keyDbDir.string(), masterKey);
+        auto keyDb = EncryptionKeyDB::create(keyDbDir.string(), keyEntry.key);
         keyDbDirGuard.dismiss();
-        return {std::move(keyDb), std::move(masterKeyId)};
+        return {std::move(keyDb), std::move(keyEntry)};
     } catch (const encryption::Error& e) {
         throw encryption::ErrorBuilder("Can't create encryption key database", e)
             .append("encryptionKeyDatabaseDirectory", keyDbDir.string())
@@ -658,7 +658,7 @@ void keyDbRotateMasterKey(std::unique_ptr<const EncryptionKeyDB> keyDb,
     }
     ScopeGuard rotationKeyDbDirGuard([&] { fs::remove_all(rotationKeyDbDir); });
 
-    auto [masterKey, masterKeyId] = keyProvider.obtainMasterKey(/* saveKey = */ false);
+    auto [masterKey, masterKeyId, _] = keyProvider.obtainMasterKey(/* saveKey = */ false);
     std::unique_ptr<EncryptionKeyDB> rotationKeyDb =
         keyDb->clone(rotationKeyDbDir.string(), masterKey);
     if (!masterKeyId) {
@@ -749,17 +749,21 @@ WiredTigerKVEngine::DataAtRestEncryption::create(
                     const std::string& keyDbDir, bool keyDbDirIsFresh) {
         validateRotationIsPossible(keyDbDir, keyDbDirIsFresh, dbPath.string(), vault, kmip);
     };
-    auto [keyDb, masterKeyId] = createKeyDb(dbPath, hook, *keyProvider, directoryPerDb);
-    invariant(keyDb && masterKeyId);
+    auto [keyDb, masterKeyEntry] = createKeyDb(dbPath, hook, *keyProvider, directoryPerDb);
+    invariant(keyDb && masterKeyEntry.keyId);
     if (params.shouldRotateMasterKey()) {
         keyDbRotateMasterKey(std::move(keyDb), dbPath, *keyProvider);
         throw MasterKeyRotationCompleted();
     }
     setUpWiredTigerEncryption(params.encryptionCipherMode, keyDb.get());
 
-    return std::make_unique<DataAtRestEncryption>(
-        std::move(keyDb),
-        keyProvider->registerKeyStateVerificationJob((invariant(pr), *pr), *masterKeyId));
+    PeriodicJobAnchor keyStatePollingJobAnchor =
+        (params.kmipToleratePreActiveKeys() &&
+         masterKeyEntry.keyState == encryption::KeyState::kPreActive)
+        ? PeriodicJobAnchor()
+        : keyProvider->registerKeyStateVerificationJob((invariant(pr), *pr), *masterKeyEntry.keyId);
+    return std::make_unique<DataAtRestEncryption>(std::move(keyDb),
+                                                  std::move(keyStatePollingJobAnchor));
 }
 
 StringData WiredTigerKVEngine::kTableUriPrefix = "table:"_sd;

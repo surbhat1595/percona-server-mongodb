@@ -53,13 +53,19 @@ MasterKeyProvider::~MasterKeyProvider() = default;
 
 MasterKeyProvider::MasterKeyProvider(std::unique_ptr<const KeyOperationFactory>&& factory,
                                      WtKeyIds& wtKeyIds,
-                                     logv2::LogComponent logComponent)
-    : _factory(std::move(factory)), _wtKeyIds(wtKeyIds), _logComponent(logComponent) {}
+                                     logv2::LogComponent logComponent,
+                                     bool toleratePreActiveKeys)
+    : _factory(std::move(factory)),
+      _wtKeyIds(wtKeyIds),
+      _logComponent(logComponent),
+      _toleratePreActiveKeys(toleratePreActiveKeys) {}
 
 std::unique_ptr<MasterKeyProvider> MasterKeyProvider::create(const EncryptionGlobalParams& params,
                                                              logv2::LogComponent logComponent) {
-    return std::make_unique<MasterKeyProvider>(
-        KeyOperationFactory::create(params), WtKeyIds::instance(), logComponent);
+    return std::make_unique<MasterKeyProvider>(KeyOperationFactory::create(params),
+                                               WtKeyIds::instance(),
+                                               logComponent,
+                                               params.kmipToleratePreActiveKeys());
 }
 
 KeyEntry MasterKeyProvider::_readMasterKey(const ReadKey& read, bool updateKeyIds) const {
@@ -91,6 +97,18 @@ KeyEntry MasterKeyProvider::_readMasterKey(const ReadKey& read, bool updateKeyId
                   "Master encryption key has been read from the key management facility.",
                   "keyManagementFacilityType"_attr = read.facilityType(),
                   "keyIdentifier"_attr = *keyEntry.keyId);
+    if (_toleratePreActiveKeys && keyEntry.keyState && *keyEntry.keyState == KeyState::kPreActive) {
+        LOGV2_WARNING_OPTIONS(
+            29124,
+            logv2::LogOptions(_logComponent),
+            "Data-at-rest encryption was initialized with a pre-active master key. Since "
+            "version 8.0.0, an active key will be required. Please either activate the "
+            "master encryption keys manually, do a key rotation, or disable the "
+            "`security.kmip.activateKeys` option (the latter is not recommended though)",
+            "keyManagementFacilityType"_attr = read.facilityType(),
+            "keyIdentifier"_attr = *keyEntry.keyId,
+            "keyState"_attr = toString(*keyEntry.keyState));
+    }
     return keyEntry;
 }
 

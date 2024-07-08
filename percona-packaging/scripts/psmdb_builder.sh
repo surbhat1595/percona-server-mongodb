@@ -200,10 +200,6 @@ get_sources(){
                 git clean -xdf
                 git checkout 1.9.379
                 git submodule update --init --recursive
-                if [[ x"${RHEL}" =~ ^x[7,8,9]$ ]]; then
-                    sed -i 's:v0.4.42:v0.6.10:' third-party/CMakeLists.txt
-                    sed -i 's:"-Werror" ::' cmake/compiler_settings.cmake
-                fi
                 mkdir build
     cd ../../
     tar --owner=0 --group=0 --exclude=.* -czf ${PRODUCT}-${PSM_VER}-${PSM_RELEASE}.tar.gz ${PRODUCT}-${PSM_VER}-${PSM_RELEASE}
@@ -290,10 +286,6 @@ aws_sdk_build(){
             git clean -xdf
             git checkout 1.9.379
             git submodule update --init --recursive
-            if [[ x"${RHEL}" =~ ^x[7,8,9]$ ]]; then
-                sed -i 's:v0.4.42:v0.6.10:' third-party/CMakeLists.txt
-                sed -i 's:"-Werror" ::' cmake/compiler_settings.cmake
-            fi
             mkdir build
             cd build
             CMAKE_CMD="cmake"
@@ -641,8 +633,7 @@ build_rpm(){
     # PyYAML pkg installation fix, more info: https://github.com/yaml/pyyaml/issues/724
     pip install pyyaml==5.4.1 --no-build-isolation
 
-    pip install --user -r etc/pip/dev-requirements.txt
-    pip install --user -r etc/pip/evgtest-requirements.txt
+    pip install 'poetry==1.5.1' 'pyproject-hooks==1.0.0'
     #
     cd $WORKDIR
 
@@ -734,8 +725,7 @@ build_source_deb(){
     # PyYAML pkg installation fix, more info: https://github.com/yaml/pyyaml/issues/724
     pip install pyyaml==5.4.1 --no-build-isolation
 
-    pip install -r etc/pip/dev-requirements.txt
-    pip install -r etc/pip/evgtest-requirements.txt
+    pip install 'poetry==1.5.1' 'pyproject-hooks==1.0.0'
 
     set_compiler
     fix_rules
@@ -831,8 +821,7 @@ build_deb(){
     # PyYAML pkg installation fix, more info: https://github.com/yaml/pyyaml/issues/724
     pip install pyyaml==5.4.1 --no-build-isolation
 
-    pip install -r etc/pip/dev-requirements.txt
-    pip install -r etc/pip/evgtest-requirements.txt
+    pip install 'poetry==1.5.1' 'pyproject-hooks==1.0.0'
     #
     cp -av percona-packaging/debian/rules debian/
     set_compiler
@@ -985,8 +974,8 @@ build_tarball(){
     # PyYAML pkg installation fix, more info: https://github.com/yaml/pyyaml/issues/724
     pip install pyyaml==5.4.1 --no-build-isolation
 
-    pip install --user -r etc/pip/dev-requirements.txt
-    pip install --user -r etc/pip/evgtest-requirements.txt
+    pip install 'poetry==1.5.1' 'pyproject-hooks==1.0.0'
+
     if [ -f /etc/redhat-release ]; then
         RHEL=$(rpm --eval %rhel)
         if [ $RHEL = 7 -o $RHEL = 8 ]; then

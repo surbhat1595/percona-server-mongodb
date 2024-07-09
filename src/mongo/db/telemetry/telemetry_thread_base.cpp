@@ -211,9 +211,10 @@ Status TelemetryThreadBase::_initParameters(ServiceContext* serviceContext) try 
     auto initialId = OID::gen();
 
     // load/create instance id
-    if (auto status = _initInstanceId(initialId, &pfx); !status.isOK()) {
+    if (auto status = _initInstanceId(initialId); !status.isOK()) {
         return status;
     }
+    pfx.append(kDbInstanceId, _instid.toString());
     LOGV2_DEBUG(29123,
                 1,
                 "Initialized telemetry instance id: {db_instance_id}",
@@ -230,8 +231,11 @@ Status TelemetryThreadBase::_initParameters(ServiceContext* serviceContext) try 
     auto* opCtx = opCtxObj.get();
 
     // load/create db id
-    if (auto status = _initDbId(serviceContext, opCtx, initialId, &pfx); !status.isOK()) {
+    if (auto status = _initDbId(serviceContext, opCtx, initialId); !status.isOK()) {
         return status;
+    }
+    if (_dbid.isSet()) {
+        pfx.append(kDbInternalId, _dbid.toString());
     }
 
     _prefix = pfx.obj();

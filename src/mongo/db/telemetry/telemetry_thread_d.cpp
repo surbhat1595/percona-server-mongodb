@@ -82,7 +82,7 @@ constexpr StringData kTelemetryNamespace = "local.percona.telemetry"_sd;
 constexpr StringData kId = "_id"_sd;
 constexpr StringData kScheduledAt = "scheduledAt"_sd;
 
-constexpr StringData kEncryptionVault = "encryption_vault"_sd;
+constexpr StringData kEncryptionKeyStorage = "tde_key_storage"_sd;
 constexpr StringData kVaultKeyFile = "keyfile"_sd;
 constexpr StringData kVaultVault = "vault"_sd;
 constexpr StringData kVaultKmip = "kmip"_sd;
@@ -92,7 +92,7 @@ constexpr StringData kPBMVersionField = "v"_sd;
 constexpr StringData kPBMActive = "pbm_active"_sd;
 
 
-StringData vaultType() {
+StringData keyStorageType() {
     if (!encryptionGlobalParams.encryptionKeyFile.empty()) {
         return kVaultKeyFile;
     }
@@ -292,7 +292,7 @@ private:
         }
         // data at rest encryption
         if (encryptionGlobalParams.enableEncryption) {
-            builder->append(kEncryptionVault, vaultType());
+            builder->append(kEncryptionKeyStorage, keyStorageType());
         }
 
         // operation context is necessary for following operations

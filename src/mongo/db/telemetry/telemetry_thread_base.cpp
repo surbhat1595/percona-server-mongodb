@@ -303,6 +303,7 @@ Status TelemetryThreadBase::_cleanupTelemetryDir() try {
 
 // write metrics file
 Status TelemetryThreadBase::_writeMetrics(ServiceContext* serviceContext) try {
+    namespace fs = boost::filesystem;
     const auto ts = Date_t::now().toMillisSinceEpoch() / 1000;
     const auto telePath = sdPath(getTelemetryPath());
 
@@ -320,11 +321,8 @@ Status TelemetryThreadBase::_writeMetrics(ServiceContext* serviceContext) try {
     ofs << obj.jsonString(ExtendedCanonicalV2_0_0, 1 /* pretty */) << "\n";
     ofs.close();
     // set file permissions tp 660 to allow telemetry agent access
-    boost::filesystem::permissions(tmpName,
-                                   boost::filesystem::owner_read | boost::filesystem::owner_write |
-                                       boost::filesystem::group_read |
-                                       boost::filesystem::group_write);
-    boost::filesystem::rename(tmpName, telePath / fmt::format("{}-{}.json", ts, _metricFileSuffix));
+    fs::permissions(tmpName, fs::owner_read | fs::owner_write | fs::group_read | fs::group_write);
+    fs::rename(tmpName, telePath / fmt::format("{}-{}.json", ts, _metricFileSuffix));
     return Status::OK();
 } catch (...) {
     return exceptionToStatus();

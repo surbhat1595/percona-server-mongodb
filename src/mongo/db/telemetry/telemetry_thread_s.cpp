@@ -65,16 +65,14 @@ private:
         return kSourceName;
     }
 
-    Status _initInstanceId(const OID& initialId, BSONObjBuilder* pfx) override {
+    Status _initInstanceId(const OID& initialId) override {
         _instid = initialId;
-        pfx->append(kDbInstanceId, _instid.toString());
         return Status::OK();
     }
 
     Status _initDbId(ServiceContext* serviceContext,
                      OperationContext* opCtx,
-                     const OID& initialId,
-                     BSONObjBuilder* pfx) override {
+                     const OID& initialId) override {
         // mongos has no internal db Id
         return Status::OK();
     }

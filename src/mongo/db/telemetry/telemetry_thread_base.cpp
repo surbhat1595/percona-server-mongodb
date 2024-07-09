@@ -282,10 +282,10 @@ Status TelemetryThreadBase::_cleanupTelemetryDir() try {
                 }
             } catch (std::invalid_argument const&) {  // NOLINT(*-empty-catch)
                 // possible exception from std::stoll
-                // means file name does not match pattern
+                // means file name does not match pattern of valid metrics file name
             } catch (std::out_of_range const&) {  // NOLINT(*-empty-catch)
                 // possible exception from std::stoll
-                // means file name does not match pattern
+                // means file name does not match pattern of valid metrics file name
             } catch (const fs::filesystem_error& e) {
                 LOGV2_DEBUG(29130,
                             1,

@@ -12,10 +12,12 @@ env.Library(
         'telemetry_path.cpp',
         'telemetry_thread_base.cpp',
     ],
+    LIBDEPS=[
+        '$BUILD_DIR/mongo/util/background_job',
+    ],
     LIBDEPS_PRIVATE=[
         '$BUILD_DIR/mongo/db/server_base',
         '$BUILD_DIR/mongo/db/service_context',
-        '$BUILD_DIR/mongo/util/background_job',
     ],
 )
 
@@ -31,7 +33,6 @@ env.Library(
         '$BUILD_DIR/mongo/db/catalog/collection_options',
         '$BUILD_DIR/mongo/db/repl/storage_interface',
         '$BUILD_DIR/mongo/s/grid',
-        '$BUILD_DIR/mongo/util/background_job',
     ],
 )
 
@@ -45,6 +46,5 @@ env.Library(
     ],
     LIBDEPS_PRIVATE=[
         '$BUILD_DIR/mongo/s/grid',
-        '$BUILD_DIR/mongo/util/background_job',
     ],
 )

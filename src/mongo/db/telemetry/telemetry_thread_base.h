@@ -74,11 +74,10 @@ protected:
 
     // methods called from _initParameters
     virtual StringData _sourceName() = 0;
-    virtual Status _initInstanceId(const OID& initialId, BSONObjBuilder* pfx) = 0;
+    virtual Status _initInstanceId(const OID& initialId) = 0;
     virtual Status _initDbId(ServiceContext* serviceContext,
                              OperationContext* opCtx,
-                             const OID& initalId,
-                             BSONObjBuilder* pfx) = 0;
+                             const OID& initalId) = 0;
 
     // methods called from _advance
     virtual Status _advancePersist(ServiceContext* serviceContext) = 0;

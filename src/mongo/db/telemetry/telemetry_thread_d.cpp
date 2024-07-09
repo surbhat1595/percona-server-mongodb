@@ -115,7 +115,7 @@ private:
         return kSourceName;
     }
 
-    Status _initInstanceId(const OID& initialId, BSONObjBuilder* pfx) override {
+    Status _initInstanceId(const OID& initialId) override {
         auto fileName =
             boost::filesystem::path(storageGlobalParams.dbpath) / sdPath(kTelemetryFileName);
         if (boost::filesystem::exists(fileName)) {
@@ -154,14 +154,12 @@ private:
                 fileName, std::ios_base::out | std::ios_base::binary | std::ios_base::trunc);
             dataFile.write(obj.objdata(), obj.objsize());
         }
-        pfx->append(kDbInstanceId, _instid.toString());
         return Status::OK();
     }
 
     Status _initDbId(ServiceContext* serviceContext,
                      OperationContext* opCtx,
-                     const OID& initialId,
-                     BSONObjBuilder* pfx) override {
+                     const OID& initialId) override {
         // see StorageInterfaceImpl::initializeRollbackID
         // see ReplicationConsistencyMarkersImpl::setInitialSyncIdIfNotSet
         repl::UnreplicatedWritesBlock uwb(opCtx);
@@ -204,7 +202,6 @@ private:
                 return status;
             }
         }
-        pfx->append(kDbInternalId, _dbid.toString());
         return Status::OK();
     }
 

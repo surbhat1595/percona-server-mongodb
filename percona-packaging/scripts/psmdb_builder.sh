@@ -324,9 +324,6 @@ install_deps() {
       yum -y install perl
       install_mongodbtoolchain
       if [ x"$ARCH" = "xx86_64" ]; then
-      #  if [ "$RHEL" -lt 9 ]; then
-      #    add_percona_yum_repo
-      #  fi
         yum install -y https://repo.percona.com/yum/percona-release-latest.noarch.rpm
         percona-release enable tools testing
         yum clean all
@@ -399,7 +396,7 @@ install_deps() {
       DEBIAN_FRONTEND=noninteractive apt-get -y install curl lsb-release wget apt-transport-https software-properties-common
       export DEBIAN=$(lsb_release -sc)
       export ARCH=$(echo $(uname -m) | sed -e 's:i686:i386:g')
-      wget https://repo.percona.com/prel/apt/pool/main/p/percona-release/percona-release_1.0-28.generic_all.deb && dpkg -i percona-release_1.0-28.generic_all.deb
+      wget https://repo.percona.com/prel/apt/pool/main/p/percona-release/percona-release_1.0-29.generic_all.deb && dpkg -i percona-release_1.0-29.generic_all.deb
       percona-release enable tools testing
       apt-get update
       if [ x"${DEBIAN}" = "xfocal" ]; then
@@ -442,7 +439,7 @@ install_mongodbtoolchain(){
     fi
     export USER=$(whoami)
     #bash -x ./toolchain_installer.sh -k --download-url https://jenkins.percona.com/downloads/mongodbtoolchain/${OS_CODE_NAME}_mongodbtoolchain_${ARCH}.tar.gz || exit 1
-    bash -x ./installer.sh -k --download-url https://downloads.percona.com/downloads/packaging/${OS_CODE_NAME}_mongodbtoolchain_${ARCH}.tar.gz || exit 1
+    bash -x ./installer.sh --keep-download --download-dir /tmp/ --download-url https://downloads.percona.com/downloads/packaging/${OS_CODE_NAME}_mongodbtoolchain_${ARCH}.tar.gz || exit 1
     export PATH=/opt/mongodbtoolchain/v4/bin/:$PATH
 }
 
@@ -626,7 +623,7 @@ build_rpm(){
     fi
     RHEL=$(rpm --eval %rhel)
     ARCH=$(echo $(uname -m) | sed -e 's:i686:i386:g')
-    PATH=/opt/mongodbtoolchain/v4/bin/:$PATH
+    export PATH=/opt/mongodbtoolchain/v4/bin/:$PATH
 
     pip install --upgrade pip
 
@@ -635,6 +632,13 @@ build_rpm(){
 
     pip install 'poetry==1.5.1' 'pyproject-hooks==1.0.0'
     pip install 'mongo_tooling_metrics==1.0.8' 'retry' 'psutil' 'Cheetah3'
+
+    #update toolchain pathes to know about installed poetry
+    toolchain_revision=$(tar -ztf /tmp/mongodbtoolchain.tar.gz | head -1 | sed 's/\/$//')
+    /opt/mongodbtoolchain/revisions/${toolchain_revision}/scripts/install.sh
+    poetry env use /opt/mongodbtoolchain/v4/bin/python3
+    poetry install --no-root --sync
+
     #
     cd $WORKDIR
 
@@ -720,7 +724,7 @@ build_source_deb(){
     fi
     cd ${BUILDDIR}
 
-    PATH=/opt/mongodbtoolchain/v4/bin/:$PATH
+    export PATH=/opt/mongodbtoolchain/v4/bin/:$PATH
     pip install --upgrade pip
 
     # PyYAML pkg installation fix, more info: https://github.com/yaml/pyyaml/issues/724
@@ -728,6 +732,12 @@ build_source_deb(){
 
     pip install 'poetry==1.5.1' 'pyproject-hooks==1.0.0'
     pip install 'mongo_tooling_metrics==1.0.8' 'retry' 'psutil' 'Cheetah3'
+
+    #update toolchain pathes to know about installed poetry
+    toolchain_revision=$(tar -ztf /tmp/mongodbtoolchain.tar.gz | head -1 | sed 's/\/$//')
+    /opt/mongodbtoolchain/revisions/${toolchain_revision}/scripts/install.sh
+    poetry env use /opt/mongodbtoolchain/v4/bin/python3
+    poetry install --no-root --sync
 
     set_compiler
     fix_rules
@@ -816,7 +826,7 @@ build_deb(){
     else
         cd ${PRODUCT}-${VERSION}
     fi
-    PATH=/opt/mongodbtoolchain/v4/bin/:$PATH
+    export PATH=/opt/mongodbtoolchain/v4/bin/:$PATH
 
     pip install --upgrade pip
 
@@ -825,6 +835,13 @@ build_deb(){
 
     pip install 'poetry==1.5.1' 'pyproject-hooks==1.0.0'
     pip install 'mongo_tooling_metrics==1.0.8' 'retry' 'psutil' 'Cheetah3'
+
+    #update toolchain pathes to know about installed poetry
+    toolchain_revision=$(tar -ztf /tmp/mongodbtoolchain.tar.gz | head -1 | sed 's/\/$//')
+    /opt/mongodbtoolchain/revisions/${toolchain_revision}/scripts/install.sh
+    poetry env use /opt/mongodbtoolchain/v4/bin/python3
+    poetry install --no-root --sync
+
     #
     cp -av percona-packaging/debian/rules debian/
     set_compiler
@@ -971,7 +988,7 @@ build_tarball(){
     # Finally build Percona Server for MongoDB with SCons
     cd ${PSMDIR_ABS}
     install_mongodbtoolchain
-    PATH=/opt/mongodbtoolchain/v4/bin/:$PATH
+    export PATH=/opt/mongodbtoolchain/v4/bin/:$PATH
     pip install --upgrade pip
 
     # PyYAML pkg installation fix, more info: https://github.com/yaml/pyyaml/issues/724
@@ -979,6 +996,12 @@ build_tarball(){
 
     pip install 'poetry==1.5.1' 'pyproject-hooks==1.0.0'
     pip install 'mongo_tooling_metrics==1.0.8' 'retry' 'psutil' 'Cheetah3'
+
+    #update toolchain pathes to know about installed poetry
+    toolchain_revision=$(tar -ztf /tmp/mongodbtoolchain.tar.gz | head -1 | sed 's/\/$//')
+    /opt/mongodbtoolchain/revisions/${toolchain_revision}/scripts/install.sh
+    poetry env use /opt/mongodbtoolchain/v4/bin/python3
+    poetry install --no-root --sync
 
     if [ -f /etc/redhat-release ]; then
         RHEL=$(rpm --eval %rhel)

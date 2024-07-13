@@ -89,15 +89,6 @@ check_workdir(){
     return
 }
 
-add_percona_yum_repo(){
-    if [ ! -f /etc/yum.repos.d/percona-dev.repo ]
-    then
-      wget http://jenkins.percona.com/yum-repo/percona-dev.repo
-      mv -f percona-dev.repo /etc/yum.repos.d/
-    fi
-    return
-}
-
 get_sources(){
     cd "${WORKDIR}"
     if [ "${SOURCE}" = 0 ]
@@ -636,8 +627,6 @@ build_rpm(){
     #update toolchain pathes to know about installed poetry
     toolchain_revision=$(tar -ztf /tmp/mongodbtoolchain.tar.gz | head -1 | sed 's/\/$//')
     /opt/mongodbtoolchain/revisions/${toolchain_revision}/scripts/install.sh
-    poetry env use /opt/mongodbtoolchain/v4/bin/python3
-    poetry install --no-root --sync
 
     #
     cd $WORKDIR

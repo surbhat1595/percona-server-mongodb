@@ -165,6 +165,8 @@ mv ${INSTALLDIR_AWS}/lib*/* ${INSTALLDIR}/lib/
 # Build PSfMDB with SCons
 echo ${enable_fipsmode}
 pushd $RPM_BUILD_DIR/%{src_dir}
+poetry env use /opt/mongodbtoolchain/v4/bin/python3
+poetry install --no-root --sync
 buildscripts/scons.py CC=${CC} CXX=${CXX} --disable-warnings-as-errors --audit --release --ssl --opt=on  \
 %{?_smp_mflags} --use-sasl-client CPPPATH=${INSTALLDIR}/include LIBPATH="${INSTALLDIR}/lib ${AWS_LIBS}/lib ${AWS_LIBS}/lib64" \
 %if 0%{?enable_fipsmode}

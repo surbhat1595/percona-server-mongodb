@@ -11,9 +11,10 @@ fi
 QUIET=0
 CONF_FORMAT="yaml"
 AUTH_SECTION_EXISTS=0
+PARAM_USERNAME=0
 
 SCRIPT_PWD=$(cd `dirname $0` && pwd)
-MONGO_CLIENT_BIN="${SCRIPT_PWD}/mongo"
+MONGO_CLIENT_BIN="${SCRIPT_PWD}/mongosh"
 
 if [ "${SCRIPT_PWD}" = "/usr/bin" ]; then
     TARBALL=0
@@ -45,6 +46,7 @@ while getopts ":hqc:u:p:" arg; do
       ;;
     u) # Username to use instead of 'dba'.
       USERNAME="${OPTARG}"
+      PARAM_USERNAME=1
       ;;
     p) # Password to use instead of auto generation.
       PASSWORD="${OPTARG}"
@@ -63,7 +65,7 @@ done
 
 [[ "$EUID" -ne 0 ]] && { echo "Please run as root" >&2; exit 1; }
 
-[[ -z "$USERNAME" ]] && USERNAME='dba'
+[[ -z "$USERNAME" || "$USERNAME" = "root" && "$PARAM_USERNAME" = 0 ]] && USERNAME='dba'
 [[ -z "$PASSWORD" ]] && PASSWORD="$( tr -dc 'a-zA-Z0-9' < /dev/urandom | head -c 32 )"
 USERNAME="${USERNAME%%\\n}"
 PASSWORD="${PASSWORD%%\\n}"
@@ -146,7 +148,7 @@ add_user_to_mongo() {
     port="$(get_value_from_yaml net port)"
     user="$USERNAME"
     password="$PASSWORD"
-    echo "db.createUser({user: \"$user\", pwd: \"$password\", roles: [ \"root\" ] });" | ${MONGO_CLIENT_BIN} -p $port localhost/admin
+    echo "db.createUser({user: \"$user\", pwd: \"$password\", roles: [ \"root\" ] });" | ${MONGO_CLIENT_BIN} admin --port 27017 --eval > /dev/null 2>&1
     if [ $? -eq 0 ];then
         echo -e "User has been created successfully!\nUser:${user}\nPassword:${password}"
     else

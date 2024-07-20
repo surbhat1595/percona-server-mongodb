@@ -43,7 +43,6 @@
 #include "mongo/db/encryption/master_key_provider.h"
 #include "mongo/db/storage/kv/kv_engine.h"
 #include "mongo/db/storage/storage_engine.h"
-#include "mongo/db/storage/wiredtiger/encryption_keydb.h"
 #include "mongo/db/storage/wiredtiger/wiredtiger_oplog_manager.h"
 #include "mongo/db/storage/wiredtiger/wiredtiger_session_cache.h"
 #include "mongo/db/storage/wiredtiger/wiredtiger_util.h"
@@ -55,6 +54,7 @@
 namespace mongo {
 
 class ClockSource;
+class EncryptionKeyDB;
 class JournalListener;
 class WiredTigerRecordStore;
 class WiredTigerSessionCache;
@@ -94,6 +94,11 @@ class WiredTigerKVEngine final : public KVEngine {
 public:
     static StringData kTableUriPrefix;
 
+    /// @brief Constructor.
+    ///
+    /// @param periodicRuner pointer to a `PeriodicRunner`. Must be a valid
+    ///     pointer if both data-at-rest encryption and key state polling are
+    ///     enabled in `encryptionGlobalParams`.
     WiredTigerKVEngine(const std::string& canonicalName,
                        const std::string& path,
                        ClockSource* cs,
@@ -104,6 +109,7 @@ public:
                        bool ephemeral,
                        bool repair,
                        bool readOnly,
+                       PeriodicRunner* periodicRunner = nullptr,
                        const encryption::MasterKeyProviderFactory& keyProviderFactory =
                            encryption::MasterKeyProvider::create);
 
@@ -295,9 +301,7 @@ public:
         return _canonicalName;
     }
 
-    EncryptionKeyDB* getEncryptionKeyDB() {
-        return _encryptionKeyDB.get();
-    }
+    EncryptionKeyDB* getEncryptionKeyDB() noexcept;
 
     /*
      * The oplog manager is always accessible, but this method will start the background thread to
@@ -392,6 +396,7 @@ public:
 
 private:
     class WiredTigerSessionSweeper;
+    class DataAtRestEncryption;
 
     struct IdentToDrop {
         std::string uri;
@@ -471,7 +476,7 @@ private:
     StorageEngine::OldestActiveTransactionTimestampCallback
         _oldestActiveTransactionTimestampCallback;
 
-    std::unique_ptr<EncryptionKeyDB> _encryptionKeyDB;
+    std::unique_ptr<DataAtRestEncryption> _restEncr;
     WT_CONNECTION* _conn;
     WiredTigerFileVersion _fileVersion;
     WiredTigerEventHandler _eventHandler;

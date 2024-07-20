@@ -84,6 +84,7 @@
 #include "mongo/db/encryption/error.h"
 #include "mongo/db/encryption/error_builder.h"
 #include "mongo/db/encryption/key.h"
+#include "mongo/db/encryption/key_entry.h"
 #include "mongo/db/encryption/key_id.h"
 #include "mongo/db/encryption/master_key_provider.h"
 #include "mongo/db/global_settings.h"
@@ -579,10 +580,11 @@ void validateRotationIsPossible(const std::string& keyDbDir,
 }
 
 template <typename KeyDbDirHook>
-std::unique_ptr<EncryptionKeyDB> createKeyDb(const boost::filesystem::path& dbPath,
-                                             KeyDbDirHook keyDbDirHook,
-                                             const encryption::MasterKeyProvider& keyProvider,
-                                             bool directoryPerDb) {
+std::pair<std::unique_ptr<EncryptionKeyDB>, encryption::KeyEntry> createKeyDb(
+    const boost::filesystem::path& dbPath,
+    KeyDbDirHook keyDbDirHook,
+    const encryption::MasterKeyProvider& keyProvider,
+    bool directoryPerDb) {
     namespace fs = boost::filesystem;
     fs::path keyDbDir = dbPath / kKeyDbDirBasename;
     bool keyDbDirIsFresh = prepareKeyDbDir(keyDbDir, dbPath / "keydb", directoryPerDb);
@@ -601,11 +603,11 @@ std::unique_ptr<EncryptionKeyDB> createKeyDb(const boost::filesystem::path& dbPa
     keyDbDirHook(keyDbDir.string(), keyDbDirIsFresh);
 
     try {
-        auto keyDb = EncryptionKeyDB::create(keyDbDir.string(),
-                                             keyDbDirIsFresh ? keyProvider.obtainMasterKey().first
-                                                             : keyProvider.readMasterKey());
+        encryption::KeyEntry keyEntry =
+            keyDbDirIsFresh ? keyProvider.obtainMasterKey() : keyProvider.readMasterKey();
+        auto keyDb = EncryptionKeyDB::create(keyDbDir.string(), keyEntry.key);
         keyDbDirGuard.dismiss();
-        return keyDb;
+        return {std::move(keyDb), std::move(keyEntry)};
     } catch (const encryption::Error& e) {
         throw encryption::ErrorBuilder("Can't create encryption key database", e)
             .append("encryptionKeyDatabaseDirectory", keyDbDir.string())
@@ -636,7 +638,7 @@ void keyDbRotateMasterKey(std::unique_ptr<const EncryptionKeyDB> keyDb,
     }
     auto rotationKeyDbDirGuard = makeGuard([&] { fs::remove_all(rotationKeyDbDir); });
 
-    auto [masterKey, masterKeyId] = keyProvider.obtainMasterKey(/* saveKey = */ false);
+    auto [masterKey, masterKeyId, _] = keyProvider.obtainMasterKey(/* saveKey = */ false);
     std::unique_ptr<EncryptionKeyDB> rotationKeyDb =
         keyDb->clone(rotationKeyDbDir.string(), masterKey);
     if (!masterKeyId) {
@@ -675,13 +677,47 @@ void setUpWiredTigerEncryption(const std::string& cipherMode, EncryptionKeyDB* k
     }
     EncryptionHooks::set(getGlobalServiceContext(), std::move(hooks));
 }
+}  // namespace
 
-/// Creates encryption key database and sets up wiredtiger add-ons
-std::unique_ptr<EncryptionKeyDB> setUpDataAtRestEncryption(
+class WiredTigerKVEngine::DataAtRestEncryption {
+public:
+    static std::unique_ptr<DataAtRestEncryption> create(
+        const EncryptionGlobalParams& params,
+        const boost::filesystem::path& dbPath,
+        const encryption::MasterKeyProviderFactory& keyProviderFactory,
+        bool directoryPerDb,
+        PeriodicRunner* pr);
+
+    DataAtRestEncryption(std::unique_ptr<EncryptionKeyDB>&& keyDb, PeriodicJobAnchor&& pollKeyState)
+        : _keyDb((invariant(keyDb), std::move(keyDb))), _pollKeyState(std::move(pollKeyState)) {
+        if (_pollKeyState) {
+            _pollKeyState.start();
+        }
+    }
+
+    ~DataAtRestEncryption() {
+        if (_pollKeyState) {
+            _pollKeyState.stop();
+        }
+    }
+
+    /// @brief Returns a non-null pointer to the encryption key database
+    EncryptionKeyDB* keyDb() noexcept {
+        return _keyDb.get();
+    }
+
+private:
+    std::unique_ptr<EncryptionKeyDB> _keyDb;
+    PeriodicJobAnchor _pollKeyState;
+};
+
+std::unique_ptr<WiredTigerKVEngine::DataAtRestEncryption>
+WiredTigerKVEngine::DataAtRestEncryption::create(
     const EncryptionGlobalParams& params,
     const boost::filesystem::path& dbPath,
     const encryption::MasterKeyProviderFactory& keyProviderFactory,
-    bool directoryPerDb) {
+    bool directoryPerDb,
+    PeriodicRunner* pr) {
     if (!params.enableEncryption) {
         return nullptr;
     }
@@ -693,15 +729,22 @@ std::unique_ptr<EncryptionKeyDB> setUpDataAtRestEncryption(
                     const std::string& keyDbDir, bool keyDbDirIsFresh) {
         validateRotationIsPossible(keyDbDir, keyDbDirIsFresh, dbPath.string(), vault, kmip);
     };
-    auto keyDb = createKeyDb(dbPath, hook, *keyProvider, directoryPerDb);
+    auto [keyDb, masterKeyEntry] = createKeyDb(dbPath, hook, *keyProvider, directoryPerDb);
+    invariant(keyDb && masterKeyEntry.keyId);
     if (params.shouldRotateMasterKey()) {
         keyDbRotateMasterKey(std::move(keyDb), dbPath, *keyProvider);
         throw MasterKeyRotationCompleted();
     }
     setUpWiredTigerEncryption(params.encryptionCipherMode, keyDb.get());
-    return keyDb;
+
+    PeriodicJobAnchor keyStatePollingJobAnchor =
+        (params.kmipToleratePreActiveKeys() &&
+         masterKeyEntry.keyState == encryption::KeyState::kPreActive)
+        ? PeriodicJobAnchor()
+        : keyProvider->registerKeyStateVerificationJob((invariant(pr), *pr), *masterKeyEntry.keyId);
+    return std::make_unique<DataAtRestEncryption>(std::move(keyDb),
+                                                  std::move(keyStatePollingJobAnchor));
 }
-}  // namespace
 
 StringData WiredTigerKVEngine::kTableUriPrefix = "table:"_sd;
 
@@ -716,11 +759,13 @@ WiredTigerKVEngine::WiredTigerKVEngine(
     bool ephemeral,
     bool repair,
     bool readOnly,
+    PeriodicRunner* periodicRunner,
     const encryption::MasterKeyProviderFactory& keyProviderFactory)
-    : _encryptionKeyDB(setUpDataAtRestEncryption(encryptionGlobalParams,
-                                                 boost::filesystem::path(path),
-                                                 keyProviderFactory,
-                                                 storageGlobalParams.directoryperdb)),
+    : _restEncr(DataAtRestEncryption::create(encryptionGlobalParams,
+                                             boost::filesystem::path(path),
+                                             keyProviderFactory,
+                                             storageGlobalParams.directoryperdb,
+                                             periodicRunner)),
       _clockSource(cs),
       _oplogManager(std::make_unique<WiredTigerOplogManager>()),
       _canonicalName(canonicalName),
@@ -990,7 +1035,7 @@ WiredTigerKVEngine::~WiredTigerKVEngine() {
     cleanShutdown();
 
     _sessionCache.reset(nullptr);
-    _encryptionKeyDB.reset(nullptr);
+    _restEncr.reset(nullptr);
 }
 
 void WiredTigerKVEngine::notifyStartupComplete() {
@@ -1111,7 +1156,7 @@ void WiredTigerKVEngine::_openWiredTiger(const std::string& path, const std::str
 void WiredTigerKVEngine::cleanShutdown() {
     LOGV2(22317, "WiredTigerKVEngine shutting down");
     // Ensure that key db is destroyed on exit
-    ON_BLOCK_EXIT([&] { _encryptionKeyDB.reset(nullptr); });
+    ON_BLOCK_EXIT([&] { _restEncr.reset(nullptr); });
 
     if (!_conn) {
         return;
@@ -1205,8 +1250,8 @@ void WiredTigerKVEngine::cleanShutdown() {
     LOGV2(4795901, "WiredTiger closed", "duration"_attr = Date_t::now() - startTime);
     _conn = nullptr;
 
-    if (_encryptionKeyDB && downgrade) {
-        _encryptionKeyDB->reconfigure(_fileVersion.getDowngradeString().c_str());
+    if (_restEncr && downgrade) {
+        _restEncr->keyDb()->reconfigure(_fileVersion.getDowngradeString().c_str());
     }
 }
 
@@ -1941,7 +1986,7 @@ Status WiredTigerKVEngine::_hotBackupPopulateLists(OperationContext* opCtx,
 
     // Prevent any DB writes between two backup cursors
     std::unique_ptr<Lock::GlobalRead> global;
-    if (_encryptionKeyDB) {
+    if (_restEncr) {
         global = std::make_unique<decltype(global)::element_type>(opCtx);
     }
 
@@ -1963,8 +2008,8 @@ Status WiredTigerKVEngine::_hotBackupPopulateLists(OperationContext* opCtx,
     }
 
     // Open backup cursor for keyDB
-    if (_encryptionKeyDB) {
-        auto session = std::make_shared<WiredTigerSession>(_encryptionKeyDB->getConnection());
+    if (_restEncr) {
+        auto session = std::make_shared<WiredTigerSession>(_restEncr->keyDb()->getConnection());
         WT_SESSION* s = session->getSession();
         ret = s->log_flush(s, "sync=off");
         if (ret != 0) {
@@ -3108,8 +3153,8 @@ void WiredTigerKVEngine::dropIdentForImport(OperationContext* opCtx, StringData 
 }
 
 void WiredTigerKVEngine::keydbDropDatabase(const std::string& db) {
-    if (_encryptionKeyDB) {
-        int res = _encryptionKeyDB->delete_key_by_id(db);
+    if (_restEncr) {
+        int res = _restEncr->keyDb()->delete_key_by_id(db);
         if (res) {
             // we cannot throw exceptions here because we are inside WUOW::commit
             // every other part of DB is already dropped so we just log error message
@@ -3982,4 +4027,7 @@ BSONObj WiredTigerKVEngine::getSanitizedStorageOptionsForSecondaryReplication(
     return WiredTigerUtil::getSanitizedStorageOptionsForSecondaryReplication(options);
 }
 
+EncryptionKeyDB* WiredTigerKVEngine::getEncryptionKeyDB() noexcept {
+    return _restEncr ? _restEncr->keyDb() : nullptr;
+}
 }  // namespace mongo

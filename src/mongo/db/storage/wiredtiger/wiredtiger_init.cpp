@@ -112,7 +112,8 @@ public:
                                                  params.dur,
                                                  ephemeral,
                                                  params.repair,
-                                                 params.readOnly);
+                                                 params.readOnly,
+                                                 opCtx->getServiceContext()->getPeriodicRunner());
         kv->setRecordStoreExtraOptions(wiredTigerGlobalOptions.collectionConfig);
         kv->setSortedDataInterfaceExtraOptions(wiredTigerGlobalOptions.indexConfig);
 

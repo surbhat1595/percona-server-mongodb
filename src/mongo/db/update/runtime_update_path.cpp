@@ -1,5 +1,5 @@
 /**
- *    Copyright (C) 2018-present MongoDB, Inc.
+ *    Copyright (C) 2024-present MongoDB, Inc.
  *
  *    This program is free software: you can redistribute it and/or modify
  *    it under the terms of the Server Side Public License, version 1,
@@ -27,26 +27,40 @@
  *    it in the license file.
  */
 
-#include "mongo/platform/basic.h"
+#include "mongo/db/update/runtime_update_path.h"
 
-#include "mongo/db/commands.h"
-#include "mongo/db/commands/shutdown.h"
+#include "mongo/bson/util/builder.h"
 
 namespace mongo {
-namespace {
-
-class ClusterShutdownCmd : public CmdShutdown<ClusterShutdownCmd> {
-public:
-    std::string help() const override {
-        return "Shuts down the mongos. Must be run against the admin database and either (1) run "
-               "from localhost or (2) run while authenticated with the shutdown privilege. Spends "
-               "'timeoutSecs' in quiesce mode, where the mongos continues to allow operations to "
-               "run, but directs clients to route new operations to other mongos nodes.";
+void RuntimeUpdatePath::reportError() const {
+    StringBuilder fieldRefInfo;
+    for (FieldIndex i = 0; i < _fieldRef.numParts(); ++i) {
+        auto ref = _fieldRef.getPart(i);
+        if (FieldRef::isNumericPathComponentStrict(ref)) {
+            fieldRefInfo << "numeric strict,";
+        } else if (FieldRef::isNumericPathComponentLenient(ref)) {
+            fieldRefInfo << "numeric lenient,";
+        } else {
+            fieldRefInfo << "not numeric,";
+        }
     }
-
-    static void beginShutdown(OperationContext* opCtx, bool force, Milliseconds timeout) {}
-
-} clusterShutdownCmd;
-
-}  // namespace
+    StringBuilder typeInfo;
+    for (auto type : _types) {
+        switch (type) {
+            case kFieldName:
+                typeInfo << "field name,";
+                break;
+            case kArrayIndex:
+                typeInfo << "array index";
+                break;
+        }
+    }
+    tasserted(9123700,
+              fmt::format("FieldRef and type vector size not matched. FieldRef size: {}, "
+                          "type size: {}, _types is [{}], ref is [{}]",
+                          _fieldRef.numParts(),
+                          _types.size(),
+                          typeInfo.str(),
+                          fieldRefInfo.str()));
+}
 }  // namespace mongo

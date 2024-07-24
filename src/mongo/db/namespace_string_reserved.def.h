@@ -258,6 +258,9 @@ NSS_CONSTANT(kAdminRolesNamespace, DatabaseName::kAdmin, "system.roles"_sd)
 // Namespace used to store users.
 NSS_CONSTANT(kAdminUsersNamespace, DatabaseName::kAdmin, "system.users"_sd)
 
+// Namespace used to store PBM agents.
+NSS_CONSTANT(kAdminPBMAgents, DatabaseName::kAdmin, "PBMAgents"_sd)
+
 // Namespace used by mms-automation.
 NSS_CONSTANT(kLocalClusterManagerNamespace, DatabaseName::kLocal, "clustermanager"_sd)
 

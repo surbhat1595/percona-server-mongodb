@@ -53,6 +53,7 @@ env.SConscript(
         'sorter',
         'stats',
         'storage',
+        'telemetry',
         'timeseries',
         'transaction',
         'update',
@@ -2700,6 +2701,7 @@ env.Library(
         # private libdep of mongod_initializers.
         '$BUILD_DIR/mongo/client/clientdriver_minimal',
         '$BUILD_DIR/mongo/db/auth/user_cache_invalidator',
+        '$BUILD_DIR/mongo/db/telemetry/telemetry_d',
         '$BUILD_DIR/mongo/idl/cluster_server_parameter',
         '$BUILD_DIR/mongo/idl/cluster_server_parameter_initializer',
         '$BUILD_DIR/mongo/idl/cluster_server_parameter_op_observer',

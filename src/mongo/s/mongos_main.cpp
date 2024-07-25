@@ -69,6 +69,7 @@
 #include "mongo/db/service_liaison_mongos.h"
 #include "mongo/db/session_killer.h"
 #include "mongo/db/startup_warnings_common.h"
+#include "mongo/db/telemetry/telemetry_thread.h"
 #include "mongo/db/vector_clock_metadata_hook.h"
 #include "mongo/db/wire_version.h"
 #include "mongo/executor/task_executor_pool.h"
@@ -290,6 +291,9 @@ void cleanupTask(const ShutdownTaskArgs& shutdownArgs) {
             invariant(!shutdownArgs.isUserInitiated);
             quiesceTime = Milliseconds(mongosShutdownTimeoutMillisForSignaledShutdown.load());
         }
+
+        // stop Percona telemetry
+        shutdownPerconaTelemetry(serviceContext);
 
         // Enter quiesce mode so that existing and new short operations are allowed to finish.
         // At this point, we will start responding to any hello request with ShutdownInProgress
@@ -852,6 +856,9 @@ ExitCode runMongosServer(ServiceContext* serviceContext) {
                     "error"_attr = redact(status));
         return EXIT_NET_ERROR;
     }
+
+    // Initialize Percona telemetry
+    initPerconaTelemetry(serviceContext);
 
     serviceContext->notifyStartupComplete();
 

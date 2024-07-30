@@ -370,6 +370,8 @@ install_deps() {
 
         yum -y install centos-release-scl
         yum-config-manager --enable centos-sclo-rh-testing
+        sed -i 's/mirrorlist/#mirrorlist/g' /etc/yum.repos.d/CentOS-*
+        sed -i 's|#\s*baseurl=http://mirror.centos.org|baseurl=http://vault.centos.org|g' /etc/yum.repos.d/CentOS-*
         yum -y install rh-python38-python rh-python38-python-devel rh-python38-python-pip
         yum -y install devtoolset-9
         yum -y install devtoolset-11-elfutils devtoolset-11-dwz
@@ -442,7 +444,7 @@ install_deps() {
       fi
       percona-release enable tools testing
       apt-get update
-      if [ x"${DEBIAN}" = "xbullseye" -o x"${DEBIAN}" = "xjammy"]; then
+      if [ x"${DEBIAN}" = "xbullseye" -o x"${DEBIAN}" = "xjammy" ]; then
         INSTALL_LIST="python3 python3-dev python3-pip"
       elif [ x"${DEBIAN}" = "xnoble" ]; then
         INSTALL_LIST="python3.11 python3.11-dev"
@@ -912,6 +914,8 @@ build_deb(){
             cat call-home.sh >> percona-server-mongodb-server-pro.postinst
             echo "CALLHOME" >> percona-server-mongodb-server-pro.postinst
             echo 'bash +x /tmp/call-home.sh -f "PRODUCT_FAMILY_PSMDB" -v '"${PSM_VER}-${PSM_RELEASE}"' -d "PACKAGE" &>/dev/null || :' >> percona-server-mongodb-server-pro.postinst
+	    echo "chgrp percona-telemetry /usr/local/percona/telemetry_uuid &>/dev/null || :" >> percona-server-mongodb-server-pro.postinst
+            echo "chmod 664 /usr/local/percona/telemetry_uuid &>/dev/null || :" >> percona-server-mongodb-server-pro.postinst
             echo "rm -rf /tmp/call-home.sh" >> percona-server-mongodb-server-pro.postinst
             echo "exit 0" >> percona-server-mongodb-server-pro.postinst
         else
@@ -920,6 +924,8 @@ build_deb(){
             cat call-home.sh >> percona-server-mongodb-server.postinst
             echo "CALLHOME" >> percona-server-mongodb-server.postinst
             echo 'bash +x /tmp/call-home.sh -f "PRODUCT_FAMILY_PSMDB" -v '"${PSM_VER}-${PSM_RELEASE}"' -d "PACKAGE" &>/dev/null || :' >> percona-server-mongodb-server.postinst
+	    echo "chgrp percona-telemetry /usr/local/percona/telemetry_uuid &>/dev/null || :" >> percona-server-mongodb-server.postinst
+            echo "chmod 664 /usr/local/percona/telemetry_uuid &>/dev/null || :" >> percona-server-mongodb-server.postinst
             echo "rm -rf /tmp/call-home.sh" >> percona-server-mongodb-server.postinst
             echo "exit 0" >> percona-server-mongodb-server.postinst
         fi
@@ -1139,15 +1145,15 @@ build_tarball(){
 
     # Patch needed libraries
     cd "${PSMDIR_ABS}/${PSMDIR}"
-    if [ ! -d lib/private ]; then
-        mkdir -p lib/private
-    fi
-    if [[ "x${FIPSMODE}" == "x1" ]]; then
+#    if [ ! -d lib/private ]; then
+#        mkdir -p lib/private
+#    fi
+#    if [[ "x${FIPSMODE}" == "x1" ]]; then
         LIBLIST=""
-    else
-        LIBLIST="libsasl2.so.3 libcrypto.so libssl.so librtmp.so libssl3.so libsmime3.so libnss3.so libnssutil3.so libplds4.so libplc4.so libnspr4.so liblzma.so libidn.so"
-    fi
-    DIRLIST="bin lib/private"
+#    else
+#        LIBLIST="libsasl2.so.3 libcrypto.so libssl.so librtmp.so libssl3.so libsmime3.so libnss3.so libnssutil3.so libplds4.so libplc4.so libnspr4.so liblzma.so libidn.so"
+#    fi
+    DIRLIST="bin"
 
     LIBPATH=""
 
@@ -1293,11 +1299,6 @@ build_tarball(){
         create_sparse bin
         replace_binaries bin
 
-        # Add hmac files that are required for fips mode
-        if [[ "x${FIPSMODE}" == "x0" ]]; then
-            add_hmac_files
-        fi
-
         # Make final check in order to determine any error after linkage
         for DIR in ${DIRLIST}; do
             check_libs ${DIR}
@@ -1306,12 +1307,13 @@ build_tarball(){
 
     PSMDIR_ORIGINAL=${PSMDIR}
     if [[ "x${FIPSMODE}" == "x1" ]]; then
-        if [[ x"${OS}" == "xrpm" ]]; then
-            GLIBC_VER=".ol"${RHEL}
-        else
-            GLIBC_VER="."${DEBIAN}
-        fi
         PSMDIR=$(echo ${PSMDIR} | sed "s/-mongodb-/-mongodb-pro-/g")
+    fi
+
+    if [[ x"${OS}" == "xrpm" ]]; then
+        GLIBC_VER=".ol"${RHEL}
+    else
+        GLIBC_VER="."${DEBIAN}
     fi
 
     cd ${PSMDIR_ABS}

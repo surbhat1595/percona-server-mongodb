@@ -137,6 +137,7 @@ export PORTABLE=1
 export USE_SSE=1
 export PATH=/usr/local/go/bin:$PATH
 export OPT_LINKFLAGS="${LINKFLAGS} -Wl,--build-id=sha1 -B/opt/mongodbtoolchain/v4/bin"
+export GLIBC_TUNABLES=${GLIBC_TUNABLES}
 
 export PATH=/usr/local/go/bin:${PATH}
 export GOROOT="/usr/local/go/"

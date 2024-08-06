@@ -218,6 +218,15 @@ get_system(){
         OS="deb"
     fi
     export GLIBC_VER=".glibc${GLIBC_VER_TMP}"
+
+    local major="$(echo ${GLIBC_VER_TMP} | cut -d '.' -f 1)"
+    local minor="$(echo ${GLIBC_VER_TMP} | cut -d '.' -f 2)"
+    if [ "$major" -gt 2 ] || [ "$major" -eq 2 -a "$minor" -ge 34 ]; then
+      echo "${GLIBC_TUNABLES}"
+      export GLIBC_TUNABLES="glibc.pthread.rseq=0"
+      echo "glibc version is ${GLIBC_VER_TMP} >= 2.34, setting env variable GLIBC_TUNABLES=glibc.pthread.rseq=0"
+    fi
+
     return
 }
 

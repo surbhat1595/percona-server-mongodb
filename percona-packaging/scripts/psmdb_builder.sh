@@ -299,7 +299,7 @@ aws_sdk_build(){
             CMAKE_CMD="cmake"
             set_compiler
             CMAKE_CXX_FLAGS=""
-            if [ x"${DEBIAN}" = xjammy -o x"${DEBIAN}" = xbookworm ]; then
+            if [ x"${DEBIAN}" = xjammy -o x"${DEBIAN}" = xbookworm -o x"${DEBIAN}" = xnoble ]; then
                 CMAKE_CXX_FLAGS=" -Wno-error=maybe-uninitialized -Wno-error=deprecated-declarations -Wno-error=uninitialized "
                 CMAKE_C_FLAGS=" -Wno-error=maybe-uninitialized -Wno-error=maybe-uninitialized -Wno-error=uninitialized "
             fi
@@ -444,7 +444,7 @@ install_deps() {
 }
 
 install_mongodbtoolchain(){
-    curl -O https://downloads.percona.com/downloads/TESTING/issue-CUSTO83/toolchain_installer.tar.gz
+    curl -O https://downloads.percona.com/downloads/packaging/toolchain_installer.tar.gz
     tar -zxvf toolchain_installer.tar.gz
     if [ ! -z "${RHEL}" ]; then
         OS_CODE_NAME=${RHEL}
@@ -452,7 +452,7 @@ install_mongodbtoolchain(){
         OS_CODE_NAME=${DEBIAN}
     fi
     export USER=$(whoami)
-    bash -x ./installer.sh -k --download-url https://downloads.percona.com/downloads/TESTING/issue-CUSTO83/${OS_CODE_NAME}_mongodbtoolchain_${ARCH}.tar.gz || exit 1
+    bash -x ./installer.sh -k --download-url https://downloads.percona.com/downloads/packaging/${OS_CODE_NAME}_mongodbtoolchain_${ARCH}.tar.gz || exit 1
     export PATH=/opt/mongodbtoolchain/v4/bin/:$PATH
 }
 
@@ -711,7 +711,7 @@ build_source_deb(){
     sed -i 's:@@LOGDIR@@:mongodb:g' ${BUILDDIR}/debian/mongod.default
     sed -i 's:@@LOGDIR@@:mongodb:g' ${BUILDDIR}/debian/percona-server-mongodb-helper.sh
     #
-    if [ x"${DEBIAN}" = "xbullseye" -o x"${DEBIAN}" = "xbookworm" -o x"${DEBIAN}" = "xjammy" ]; then
+    if [ x"${DEBIAN}" = "xbullseye" -o x"${DEBIAN}" = "xbookworm" -o x"${DEBIAN}" = "xjammy" -o x"${DEBIAN}" = "xnoble" ]; then
         sed -i 's:dh-systemd,::' ${BUILDDIR}/debian/control
     fi
     #
@@ -848,7 +848,7 @@ build_deb(){
         sed -i "s:percona-server-mongodb-dbg:percona-server-mongodb-pro-dbg:g" debian/rules
     fi
 
-    if [ x"${DEBIAN}" = "xbullseye" -o x"${DEBIAN}" = "xbookworm" -o x"${DEBIAN}" = "xjammy" ]; then
+    if [ x"${DEBIAN}" = "xbullseye" -o x"${DEBIAN}" = "xbookworm" -o x"${DEBIAN}" = "xjammy" -o x"${DEBIAN}" = "xnoble" ]; then
         sed -i 's:dh-systemd,::' debian/control
     fi
     sed -i 's|VersionStr="$(go run release/release.go get-version)"|VersionStr="$PSMDB_TOOLS_REVISION"|' mongo-tools/set_goenv.sh
@@ -1091,15 +1091,15 @@ build_tarball(){
 
     # Patch needed libraries
     cd "${PSMDIR_ABS}/${PSMDIR}"
-    if [ ! -d lib/private ]; then
-        mkdir -p lib/private
-    fi
-    if [[ "x${FIPSMODE}" == "x1" ]]; then
+#    if [ ! -d lib/private ]; then
+#        mkdir -p lib/private
+#    fi
+#    if [[ "x${FIPSMODE}" == "x1" ]]; then
         LIBLIST=""
-    else
-        LIBLIST="libsasl2.so.3 libcrypto.so libssl.so librtmp.so libssl3.so libsmime3.so libnss3.so libnssutil3.so libplds4.so libplc4.so libnspr4.so liblzma.so libidn.so"
-    fi
-    DIRLIST="bin lib/private"
+#    else
+#        LIBLIST="libsasl2.so.3 libcrypto.so libssl.so librtmp.so libssl3.so libsmime3.so libnss3.so libnssutil3.so libplds4.so libplc4.so libnspr4.so liblzma.so libidn.so"
+#    fi
+    DIRLIST="bin"
 
     LIBPATH=""
 
@@ -1242,12 +1242,13 @@ build_tarball(){
 
     PSMDIR_ORIGINAL=${PSMDIR}
     if [[ "x${FIPSMODE}" == "x1" ]]; then
-        if [[ x"${OS}" == "xrpm" ]]; then
-            GLIBC_VER=".ol"${RHEL}
-        else
-            GLIBC_VER="."${DEBIAN}
-        fi
         PSMDIR=$(echo ${PSMDIR} | sed "s/-mongodb-/-mongodb-pro-/g")
+    fi
+
+    if [[ x"${OS}" == "xrpm" ]]; then
+        GLIBC_VER=".ol"${RHEL}
+    else
+        GLIBC_VER="."${DEBIAN}
     fi
 
     cd ${PSMDIR_ABS}

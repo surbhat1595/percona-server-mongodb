@@ -291,7 +291,7 @@ aws_sdk_build(){
             CMAKE_CMD="cmake"
             set_compiler
             CMAKE_CXX_FLAGS=""
-            if [ x"${DEBIAN}" = xjammy -o x"${DEBIAN}" = xbookworm ]; then
+            if [ x"${DEBIAN}" = xjammy -o x"${DEBIAN}" = xbookworm -o x"${DEBIAN}" = xnoble ]; then
                 CMAKE_CXX_FLAGS=" -Wno-error=maybe-uninitialized -Wno-error=deprecated-declarations -Wno-error=uninitialized "
                 CMAKE_C_FLAGS=" -Wno-error=maybe-uninitialized -Wno-error=maybe-uninitialized -Wno-error=uninitialized "
             fi
@@ -396,6 +396,12 @@ install_deps() {
       DEBIAN_FRONTEND=noninteractive apt-get -y install curl lsb-release wget apt-transport-https software-properties-common
       export DEBIAN=$(lsb_release -sc)
       export ARCH=$(echo $(uname -m) | sed -e 's:i686:i386:g')
+      if [ x"${DEBIAN}" = "xnoble" ]; then
+        until DEBIAN_FRONTEND=noninteractive apt-get -y install gnupg2; do
+          sleep 1
+          echo "waiting"
+        done
+      fi
       wget https://repo.percona.com/prel/apt/pool/main/p/percona-release/percona-release_1.0-29.generic_all.deb && dpkg -i percona-release_1.0-29.generic_all.deb
       percona-release enable tools testing
       apt-get update
@@ -703,7 +709,7 @@ build_source_deb(){
     sed -i 's:@@LOGDIR@@:mongodb:g' ${BUILDDIR}/debian/mongod.default
     sed -i 's:@@LOGDIR@@:mongodb:g' ${BUILDDIR}/debian/percona-server-mongodb-helper.sh
     #
-    if [ x"${DEBIAN}" = "xbullseye" -o x"${DEBIAN}" = "xbookworm" -o x"${DEBIAN}" = "xjammy" ]; then
+    if [ x"${DEBIAN}" = "xbullseye" -o x"${DEBIAN}" = "xbookworm" -o x"${DEBIAN}" = "xjammy" -o x"${DEBIAN}" = "xnoble" ]; then
         sed -i 's:dh-systemd,::' ${BUILDDIR}/debian/control
     fi
     #
@@ -853,7 +859,7 @@ build_deb(){
         sed -i "s:percona-server-mongodb-dbg:percona-server-mongodb-pro-dbg:g" debian/rules
     fi
 
-    if [ x"${DEBIAN}" = "xbullseye" -o x"${DEBIAN}" = "xbookworm" -o x"${DEBIAN}" = "xjammy" ]; then
+    if [ x"${DEBIAN}" = "xbullseye" -o x"${DEBIAN}" = "xbookworm" -o x"${DEBIAN}" = "xjammy" -o x"${DEBIAN}" = "xnoble" ]; then
         sed -i 's:dh-systemd,::' debian/control
     fi
     sed -i 's|VersionStr="$(go run release/release.go get-version)"|VersionStr="$PSMDB_TOOLS_REVISION"|' mongo-tools/set_goenv.sh

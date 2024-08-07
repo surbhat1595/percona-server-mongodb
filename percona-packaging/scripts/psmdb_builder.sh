@@ -1105,15 +1105,15 @@ build_tarball(){
 
     # Patch needed libraries
     cd "${PSMDIR_ABS}/${PSMDIR}"
-    if [ ! -d lib/private ]; then
-        mkdir -p lib/private
-    fi
-    if [[ "x${FIPSMODE}" == "x1" ]]; then
+#    if [ ! -d lib/private ]; then
+#        mkdir -p lib/private
+#    fi
+#    if [[ "x${FIPSMODE}" == "x1" ]]; then
         LIBLIST=""
-    else
-        LIBLIST="libsasl2.so.3 libcrypto.so libssl.so librtmp.so libssl3.so libsmime3.so libnss3.so libnssutil3.so libplds4.so libplc4.so libnspr4.so liblzma.so libidn.so"
-    fi
-    DIRLIST="bin lib/private"
+#    else
+#        LIBLIST="libsasl2.so.3 libcrypto.so libssl.so librtmp.so libssl3.so libsmime3.so libnss3.so libnssutil3.so libplds4.so libplc4.so libnspr4.so liblzma.so libidn.so"
+#    fi
+    DIRLIST="bin"
 
     LIBPATH=""
 
@@ -1256,12 +1256,13 @@ build_tarball(){
 
     PSMDIR_ORIGINAL=${PSMDIR}
     if [[ "x${FIPSMODE}" == "x1" ]]; then
-        if [[ x"${OS}" == "xrpm" ]]; then
-            GLIBC_VER=".ol"${RHEL}
-        else
-            GLIBC_VER="."${DEBIAN}
-        fi
         PSMDIR=$(echo ${PSMDIR} | sed "s/-mongodb-/-mongodb-pro-/g")
+    fi
+
+    if [[ x"${OS}" == "xrpm" ]]; then
+        GLIBC_VER=".ol"${RHEL}
+    else
+        GLIBC_VER="."${DEBIAN}
     fi
 
     cd ${PSMDIR_ABS}

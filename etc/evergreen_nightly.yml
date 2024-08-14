@@ -5,7 +5,6 @@ include:
 - filename: etc/evergreen_yml_components/variants/task_generation.yml
 - filename: etc/evergreen_yml_components/variants/atlas.yml
 - filename: etc/evergreen_yml_components/variants/misc_release.yml
-- filename: etc/evergreen_yml_components/variants/openssl_111.yml
 ### Comment out when using this file for a LTS or Rapid release branch. ###
 - filename: etc/evergreen_yml_components/variants/ibm.yml
 ### Uncomment when using this file for a LTS release branch. ###
@@ -163,13 +162,13 @@ buildvariants:
   - name: snmp
   - name: unittest_shell_hang_analyzer_gen
 
-- &enterprise-rhel-80-64-bit-dynamic-required-template
-  name: enterprise-rhel-80-64-bit-dynamic-required
-  display_name: "! Shared Library Enterprise RHEL 8.0"
+- &enterprise-rhel-8-64-bit-dynamic-required-template
+  name: enterprise-rhel-8-64-bit-dynamic-required
+  display_name: "! Shared Library Enterprise RHEL 8"
   cron: "0 */4 * * *" # Every 4 hours starting at midnight
   run_on:
   - rhel80-small
-  expansions: &enterprise-rhel-80-64-bit-dynamic-required-expansions
+  expansions: &enterprise-rhel-8-64-bit-dynamic-required-expansions
     additional_package_targets: archive-mongocryptd archive-mongocryptd-debug archive-mh archive-mh-debug
     compile_flags: --ssl MONGO_DISTMOD=rhel80 -j$(grep -c ^processor /proc/cpuinfo) --variables-files=etc/scons/mongodbtoolchain_v3_gcc.vars --link-model=dynamic
     crypt_task_compile_flags: SHLINKFLAGS_EXTRA="-Wl,-Bsymbolic -Wl,--no-gnu-unique" CCFLAGS="-fno-gnu-unique"
@@ -253,6 +252,10 @@ buildvariants:
   - name: multi_stmt_txn_jscore_passthrough_with_migration_gen
   - name: multiversion_gen
   - name: .query_fuzzer
+  - name: query_stats_aggregation_passthrough
+  - name: query_stats_mongos_aggregation_passthrough
+  - name: query_stats_mongos_passthrough
+  - name: query_stats_passthrough
   - name: .random_multiversion_ds
   - name: .read_write_concern .large
     distros:
@@ -361,7 +364,7 @@ buildvariants:
   - name: jsCore_txns
   - name: unittest_shell_hang_analyzer_gen
 
-- <<: *enterprise-rhel-80-64-bit-dynamic-required-template
+- <<: *enterprise-rhel-8-64-bit-dynamic-required-template
   name: commit-queue
   display_name: "~ Commit Queue"
   cron: "0 4 * * 0" # From the ${project_weekly_cron} parameter
@@ -385,12 +388,12 @@ buildvariants:
   - name: check_feature_flag_tags
 
 # Temporary variant to stress a component and gather more data.
-- <<: *enterprise-rhel-80-64-bit-dynamic-required-template
-  name: enterprise-rhel-80-64-bit-dynamic-stress-initialsyncid  # For BF-25011
-  display_name: "~ Shared Library Enterprise RHEL 8.0 (initialSyncId stress test)"
+- <<: *enterprise-rhel-8-64-bit-dynamic-required-template
+  name: enterprise-rhel-8-64-bit-dynamic-stress-initialsyncid  # For BF-25011
+  display_name: "~ Shared Library Enterprise RHEL 8 (initialSyncId stress test)"
   cron: "0 */1 * * *" # Every hour starting at midnight
   expansions:
-    <<: *enterprise-rhel-80-64-bit-dynamic-required-expansions
+    <<: *enterprise-rhel-8-64-bit-dynamic-required-expansions
     max_sub_suites: 10
     # Set a low target time to run only 1 test per generated Evergreen task. Increase timeout.
     target_resmoke_time: 1
@@ -405,8 +408,8 @@ buildvariants:
         - rhel80-xlarge
     - name: .sharding
 
-- name: enterprise-rhel-80-64-bit-large-txns-format
-  display_name: "Enterprise RHEL 8.0 (large transactions format)"
+- name: enterprise-rhel-8-64-bit-large-txns-format
+  display_name: "Enterprise RHEL 8 (large transactions format)"
   run_on:
   - rhel80-small
   cron: "0 4 * * 0"
@@ -477,9 +480,9 @@ buildvariants:
     - rhel80-medium
   - name: generate_buildid_to_debug_symbols_mapping
 
-- &enterprise-rhel-80-64-bit-dynamic-classic-engine
-  name: enterprise-rhel-80-64-bit-dynamic-classic-engine
-  display_name: "Shared Library Enterprise RHEL 8.0 (Classic Engine)"
+- &enterprise-rhel-8-64-bit-dynamic-classic-engine
+  name: enterprise-rhel-8-64-bit-dynamic-classic-engine
+  display_name: "Shared Library Enterprise RHEL 8 (Classic Engine)"
   cron: "0 4 * * 0"
   run_on:
   - rhel80-small
@@ -517,6 +520,10 @@ buildvariants:
   - name: .misc_js
   - name: .multi_shard
   - name: .query_fuzzer
+  - name: query_stats_aggregation_passthrough
+  - name: query_stats_mongos_aggregation_passthrough
+  - name: query_stats_mongos_passthrough
+  - name: query_stats_passthrough
   - name: .random_multiversion_ds
   - name: .read_only
   - name: .read_write_concern !.large
@@ -572,220 +579,6 @@ buildvariants:
   - name: session_jscore_passthrough
   - name: sharding_api_version_jscore_passthrough_gen
   - name: snmp
-  - name: test_api_version_compatibility
-  - name: vector_search
-  - name: vector_search_auth
-  - name: vector_search_ssl
-
-- &enterprise-rhel-80-64-bit-dynamic-query-stats
-  name: enterprise-rhel-80-64-bit-dynamic-query-stats
-  display_name: "Shared Library Enterprise RHEL 8.0 (Query Stats)"
-  cron: "0 */4 * * *" # From the ${project_required_suggested_cron} parameter
-  run_on:
-  - rhel80-small
-  expansions:
-    # additional_package_targets: archive-mongocryptd archive-mongocryptd-debug archive-mh archive-mh-debug
-    compile_flags: --ssl MONGO_DISTMOD=rhel80 -j$(grep -c ^processor /proc/cpuinfo) --variables-files=etc/scons/mongodbtoolchain_stable_gcc.vars --link-model=dynamic
-    multiversion_platform: rhel80
-    multiversion_edition: enterprise
-    has_packages: false
-    scons_cache_scope: shared
-    scons_cache_mode: all
-    jstestfuzz_num_generated_files: 40
-    jstestfuzz_concurrent_num_files: 10
-    target_resmoke_time: 10
-    max_sub_suites: 5
-    large_distro_name: rhel80-medium
-    num_scons_link_jobs_available: 0.99
-    test_flags: >-
-      --additionalFeatureFlags=featureFlagQueryStats
-      --excludeWithAnyTags=requires_latch_analyzer
-  tasks:
-  - name: .aggfuzzer
-  - name: .aggregation
-  - name: .auth
-  - name: .causally_consistent !.sharding
-  - name: .change_stream_fuzzer
-  - name: .change_streams
-  - name: .concurrency !.large !.ubsan !.no_txns !.debug_only
-  - name: .concurrency .large !.ubsan !.no_txns !.debug_only
-    distros:
-    - rhel80-medium
-  - name: .encrypt
-  - name: .jscore .common !jsCore
-  - name: .jstestfuzz !.flow_control
-  - name: .misc_js
-  - name: .multi_shard
-  - name: .query_fuzzer
-  - name: .random_multiversion_ds
-  - name: .read_only
-  - name: .read_write_concern !.large
-  - name: .read_write_concern .large
-    distros:
-    - rhel80-medium
-  - name: .replica_sets !.encrypt !.auth
-    distros:
-    - rhel80-xlarge
-  - name: .rollbackfuzzer
-  - name: .sharding .common
-  - name: .sharding .jscore !.wo_snapshot !.multi_stmt
-  - name: .sharding .txns
-  - name: .serverless
-    distros:
-    - rhel80-xlarge
-  - name: .updatefuzzer
-  - name: audit
-  - name: compile_test_and_package_parallel_core_stream_TG
-    distros:
-    - rhel80-xlarge
-  - name: compile_integration_and_test_parallel_stream_TG
-    distros:
-    - rhel80-xlarge
-  - name: disk_wiredtiger
-  - name: initial_sync_fuzzer_gen
-  - name: jsCore
-    distros:
-    - rhel80-xlarge
-  - name: jsCore_minimum_batch_size
-  - name: jsCore_txns_large_txns_format
-  - name: json_schema
-  - name: lint_fuzzer_sanity_patch
-  - name: multi_stmt_txn_jscore_passthrough_with_migration_gen
-  - name: multiversion_gen
-  # This doesn't really make sense since we are explicitly enabling a feature flag which is new in 6.0.
-  # - name: .multiversion_sanity_check
-  - name: replica_sets_api_version_jscore_passthrough_gen
-  - name: replica_sets_reconfig_jscore_passthrough_gen
-  - name: replica_sets_reconfig_jscore_stepdown_passthrough_gen
-    distros:
-    - rhel80-xlarge
-  - name: replica_sets_reconfig_kill_primary_jscore_passthrough_gen
-    distros:
-    - rhel80-xlarge
-  - name: retryable_writes_jscore_passthrough_gen
-  - name: retryable_writes_jscore_stepdown_passthrough_gen
-  - name: sasl
-  - name: search
-  - name: search_auth
-  - name: search_pinned_connections_auth
-  - name: search_ssl
-  - name: secondary_reads_passthrough_gen
-  - name: session_jscore_passthrough
-  - name: sharding_api_version_jscore_passthrough_gen
-  - name: snmp
-  - name: query_stats_passthrough
-  - name: query_stats_mongos_passthrough
-  - name: query_stats_aggregation_passthrough
-  - name: query_stats_mongos_aggregation_passthrough
-  - name: test_api_version_compatibility
-  - name: vector_search
-  - name: vector_search_auth
-  - name: vector_search_ssl
-
-# A "Quick" version of the above which only lists out the suites which we think might be impacted by
-# the query stats project.
--
-  name: enterprise-rhel-80-dynamic-quick-query-stats
-  display_name: "Shared Library Enterprise RHEL 8.0 (Quick Query Stats)"
-  cron: "0 4 * * 0"
-  run_on:
-  - rhel80-small
-  expansions:
-    # additional_package_targets: archive-mongocryptd archive-mongocryptd-debug archive-mh archive-mh-debug
-    compile_flags: --ssl MONGO_DISTMOD=rhel80 -j$(grep -c ^processor /proc/cpuinfo) --variables-files=etc/scons/mongodbtoolchain_stable_gcc.vars --link-model=dynamic
-    multiversion_platform: rhel80
-    multiversion_edition: enterprise
-    has_packages: false
-    scons_cache_scope: shared
-    scons_cache_mode: all
-    jstestfuzz_num_generated_files: 40
-    jstestfuzz_concurrent_num_files: 10
-    target_resmoke_time: 10
-    max_sub_suites: 5
-    large_distro_name: rhel80-medium
-    num_scons_link_jobs_available: 0.99
-    test_flags: >-
-      --additionalFeatureFlags=featureFlagQueryStats
-      --excludeWithAnyTags=requires_latch_analyzer
-  tasks:
-  # - name: .aggfuzzer
-  - name: .aggregation
-  # - name: .auth
-  # - name: .causally_consistent !.sharding
-  # - name: .change_stream_fuzzer
-  # - name: .change_streams
-  # TODO SERVER-77736 (v7.0's batch #4) we add a concurrency test
-  # - name: .concurrency !.large !.ubsan !.no_txns !.debug_only
-  # - name: .concurrency .large !.ubsan !.no_txns !.debug_only
-    # distros:
-    # - rhel80-medium
-  # - name: .encrypt
-  # TODO SERVER-78867 (v7.0's batch #5) we add a passthrough suite.
-  - name: .jscore .common !jsCore
-  # - name: .jstestfuzz !.flow_control
-  # - name: .misc_js
-  # - name: .multi_shard
-  # - name: .query_fuzzer
-  # - name: .random_multiversion_ds
-  # - name: .read_only
-  # - name: .read_write_concern !.large
-  # - name: .read_write_concern .large
-  #   distros:
-  #   - rhel80-medium
-  # - name: .replica_sets !.encrypt !.auth
-  #   distros:
-  #   - rhel80-xlarge
-  # - name: .rollbackfuzzer
-  # - name: .sharding .common
-  # - name: .sharding .jscore !.wo_snapshot !.multi_stmt
-  # - name: .sharding .txns
-  # - name: .serverless
-  #   distros:
-  #   - rhel80-xlarge
-  # - name: .updatefuzzer
-  # - name: audit
-  - name: compile_test_and_package_parallel_core_stream_TG
-    distros:
-    - rhel80-xlarge
-  - name: compile_integration_and_test_parallel_stream_TG
-    distros:
-    - rhel80-xlarge
-  # - name: disk_wiredtiger
-  # - name: initial_sync_fuzzer_gen
-  - name: jsCore
-    distros:
-    - rhel80-xlarge
-  # - name: jsCore_minimum_batch_size
-  # - name: jsCore_txns_large_txns_format
-  # - name: json_schema
-  # - name: lint_fuzzer_sanity_patch
-  # - name: multi_stmt_txn_jscore_passthrough_with_migration_gen
-  # - name: multiversion_gen
-  # - name: .multiversion_sanity_check
-  - name: noPassthrough_gen
-  # - name: replica_sets_api_version_jscore_passthrough_gen
-  # - name: replica_sets_reconfig_jscore_passthrough_gen
-  # - name: replica_sets_reconfig_jscore_stepdown_passthrough_gen
-  #   distros:
-  #   - rhel80-xlarge
-  # - name: replica_sets_reconfig_kill_primary_jscore_passthrough_gen
-  #   distros:
-  #   - rhel80-xlarge
-  # - name: retryable_writes_jscore_passthrough_gen
-  # - name: retryable_writes_jscore_stepdown_passthrough_gen
-  # - name: sasl
-  # - name: search
-  # - name: search_auth
-  # - name: search_pinned_connections_auth
-  # - name: search_ssl
-  # - name: secondary_reads_passthrough_gen
-  # - name: session_jscore_passthrough
-  # - name: sharding_api_version_jscore_passthrough_gen
-  # - name: snmp
-  - name: query_stats_passthrough
-  - name: query_stats_mongos_passthrough
-  - name: query_stats_aggregation_passthrough
-  - name: query_stats_mongos_aggregation_passthrough
   - name: test_api_version_compatibility
   - name: vector_search
   - name: vector_search_auth

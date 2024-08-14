@@ -38,6 +38,7 @@
 
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/db/batched_write_context.h"
+#include "mongo/db/catalog/backwards_compatible_collection_options_util.h"
 #include "mongo/db/catalog/collection_options.h"
 #include "mongo/db/catalog/database.h"
 #include "mongo/db/catalog/database_holder.h"
@@ -666,6 +667,19 @@ void OpObserverImpl::onInserts(OperationContext* opCtx,
                 bucketsColl->setRequiresTimeseriesExtendedRangeSupport(opCtx);
             }
         }
+
+        uassert(
+            ErrorCodes::CannotInsertTimeseriesBucketsWithMixedSchema,
+            "Cannot write time-series bucket containing mixed schema data, please ensure all nodes "
+            "are upgraded to the latest v6.0 release, run collMod with "
+            "timeseriesBucketsMayHaveMixedSchemaData, and retry your insert",
+            !opCtx->isEnforcingConstraints() ||
+                bucketsColl->getTimeseriesBucketsMayHaveMixedSchemaData().value_or(false) ||
+                std::none_of(first, last, [bucketsColl](auto&& insert) {
+                    auto mixedSchema =
+                        bucketsColl->doesTimeseriesBucketsDocContainMixedSchemaData(insert.doc);
+                    return mixedSchema.isOK() && mixedSchema.getValue();
+                }));
     }
 }
 
@@ -865,6 +879,26 @@ void OpObserverImpl::onUpdate(OperationContext* opCtx, const OplogUpdateEntryArg
             opCtx, args.updateArgs->updatedDoc["_id"], args.updateArgs->updatedDoc);
     } else if (args.nss.isTimeseriesBucketsCollection()) {
         if (args.updateArgs->source != OperationSource::kTimeseriesInsert) {
+            invariant(opCtx->lockState()->isCollectionLockedForMode(args.nss, MODE_IX));
+            auto bucketsColl =
+                CollectionCatalog::get(opCtx)->lookupCollectionByNamespaceForRead(opCtx, args.nss);
+            tassert(8453101, "Could not find collection for write", bucketsColl);
+
+            auto mixedSchema = [&args, &bucketsColl] {
+                auto result = bucketsColl->doesTimeseriesBucketsDocContainMixedSchemaData(
+                    args.updateArgs->updatedDoc);
+                return result.isOK() && result.getValue();
+            };
+
+            uassert(
+                ErrorCodes::CannotInsertTimeseriesBucketsWithMixedSchema,
+                "Cannot write time-series bucket containing mixed schema data, please ensure all "
+                "nodes are upgraded to the latest v6.0 release, run collMod with "
+                "timeseriesBucketsMayHaveMixedSchemaData, and retry your update",
+                !opCtx->isEnforcingConstraints() ||
+                    bucketsColl->getTimeseriesBucketsMayHaveMixedSchemaData().value_or(false) ||
+                    !mixedSchema());
+
             auto& bucketCatalog = BucketCatalog::get(opCtx);
             bucketCatalog.clear(args.updateArgs->updatedDoc["_id"].OID());
         }
@@ -1121,6 +1155,8 @@ void OpObserverImpl::onCollMod(OperationContext* opCtx,
                                const BSONObj& collModCmd,
                                const CollectionOptions& oldCollOptions,
                                boost::optional<IndexCollModInfo> indexInfo) {
+    const auto [collModOplogCmd, additionalO2Field] =
+        backwards_compatible_collection_options::getCollModCmdAndAdditionalO2Field(collModCmd);
 
     if (!nss.isSystemDotProfile()) {
         // do not replicate system.profile modifications
@@ -1128,6 +1164,10 @@ void OpObserverImpl::onCollMod(OperationContext* opCtx,
         // Create the 'o2' field object. We save the old collection metadata and TTL expiration.
         BSONObjBuilder o2Builder;
         o2Builder.append("collectionOptions_old", oldCollOptions.toBSON());
+        if (!additionalO2Field.isEmpty()) {
+            o2Builder.append(backwards_compatible_collection_options::additionalCollModO2Field,
+                             additionalO2Field);
+        }
         if (indexInfo) {
             BSONObjBuilder oldIndexOptions;
             if (indexInfo->oldExpireAfterSeconds) {
@@ -1150,7 +1190,7 @@ void OpObserverImpl::onCollMod(OperationContext* opCtx,
         oplogEntry.setOpType(repl::OpTypeEnum::kCommand);
         oplogEntry.setNss(nss.getCommandNS());
         oplogEntry.setUuid(uuid);
-        oplogEntry.setObject(repl::makeCollModCmdObj(collModCmd, oldCollOptions, indexInfo));
+        oplogEntry.setObject(repl::makeCollModCmdObj(collModOplogCmd, oldCollOptions, indexInfo));
         oplogEntry.setObject2(o2Builder.done());
         logOperation(opCtx, &oplogEntry);
     }

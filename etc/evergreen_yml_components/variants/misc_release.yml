@@ -234,6 +234,10 @@ buildvariants:
   - name: .multi_shard
   - name: multi_stmt_txn_jscore_passthrough_with_migration_gen
   - name: .query_fuzzer
+  - name: query_stats_aggregation_passthrough
+  - name: query_stats_mongos_aggregation_passthrough
+  - name: query_stats_mongos_passthrough
+  - name: query_stats_passthrough
   - name: .read_write_concern .large
     distros:
     - amazon2-arm64-latest-large
@@ -769,8 +773,8 @@ buildvariants:
   - name: sharding_gen
   - name: replica_sets_gen
 
-- name: rhel80
-  display_name: RHEL 8.0
+- name: rhel8
+  display_name: RHEL 8
   cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
   run_on:
   - rhel80-build
@@ -778,7 +782,7 @@ buildvariants:
     push_path: linux
     push_bucket: downloads.mongodb.org
     push_name: linux
-    push_arch: x86_64-rhel80
+    push_arch: x86_64-rhel8
     compile_flags: --ssl MONGO_DISTMOD=rhel80 -j$(grep -c ^processor /proc/cpuinfo) --variables-files=etc/scons/mongodbtoolchain_v3_gcc.vars --modules=
     test_flags: --enableEnterpriseTests=off --excludeWithAnyTags=requires_latch_analyzer
     multiversion_platform: rhel80
@@ -820,17 +824,17 @@ buildvariants:
   - name: .publish
   - name: generate_buildid_to_debug_symbols_mapping
 
-- name: enterprise-rhel-80-64-bit
-  display_name: "Enterprise RHEL 8.0"
+- name: enterprise-rhel-8-64-bit
+  display_name: "Enterprise RHEL 8"
   cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
   run_on:
   - rhel80-small
-  expansions: &enterprise-rhel-80-64-bit-expansions
+  expansions: &enterprise-rhel-8-64-bit-expansions
     additional_package_targets: archive-mongocryptd archive-mongocryptd-debug archive-mh archive-mh-debug
     push_path: linux
     push_bucket: downloads.10gen.com
     push_name: linux
-    push_arch: x86_64-enterprise-rhel80
+    push_arch: x86_64-enterprise-rhel8
     compile_flags: --ssl MONGO_DISTMOD=rhel80 -j$(grep -c ^processor /proc/cpuinfo) --variables-files=etc/scons/mongodbtoolchain_v3_gcc.vars
     crypt_task_compile_flags: SHLINKFLAGS_EXTRA="-Wl,-Bsymbolic -Wl,--no-gnu-unique" CCFLAGS="-fno-gnu-unique"
     multiversion_platform: rhel80
@@ -884,6 +888,10 @@ buildvariants:
   - name: multi_stmt_txn_jscore_passthrough_with_migration_gen
   - name: multiversion_gen
   - name: .query_fuzzer
+  - name: query_stats_aggregation_passthrough
+  - name: query_stats_mongos_aggregation_passthrough
+  - name: query_stats_mongos_passthrough
+  - name: query_stats_passthrough
   - name: .random_multiversion_ds
   - name: .read_write_concern .large
     distros:
@@ -937,8 +945,8 @@ buildvariants:
   - name: vector_search_auth
   - name: vector_search_ssl
 
-- name: rhel-82-arm64
-  display_name: RHEL 8.2 arm64
+- name: rhel-8-arm64
+  display_name: RHEL 8 arm64
   cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
   run_on:
   - rhel82-arm64-small
@@ -946,7 +954,7 @@ buildvariants:
     push_path: linux
     push_bucket: downloads.mongodb.org
     push_name: linux
-    push_arch: aarch64-rhel82
+    push_arch: aarch64-rhel8
     compile_flags: --ssl MONGO_DISTMOD=rhel82 -j$(grep -c ^processor /proc/cpuinfo) --variables-files=etc/scons/mongodbtoolchain_v3_gcc.vars --modules=
     has_packages: true
     packager_script: packager.py
@@ -984,8 +992,8 @@ buildvariants:
   - name: .publish
   - name: generate_buildid_to_debug_symbols_mapping
 
-- name: enterprise-rhel-82-arm64
-  display_name: "Enterprise RHEL 8.2 arm64"
+- name: enterprise-rhel-8-arm64
+  display_name: "Enterprise RHEL 8 arm64"
   cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
   run_on:
   - rhel82-arm64-small
@@ -994,7 +1002,7 @@ buildvariants:
     push_path: linux
     push_bucket: downloads.10gen.com
     push_name: linux
-    push_arch: aarch64-enterprise-rhel82
+    push_arch: aarch64-enterprise-rhel8
     compile_flags: --ssl MONGO_DISTMOD=rhel82 -j$(grep -c ^processor /proc/cpuinfo) --variables-files=etc/scons/mongodbtoolchain_v3_gcc.vars
     crypt_task_compile_flags: SHLINKFLAGS_EXTRA="-Wl,-Bsymbolic -Wl,--no-gnu-unique" CCFLAGS="-fno-gnu-unique"
     has_packages: true
@@ -2434,8 +2442,7 @@ buildvariants:
       --ssl
       MONGO_DISTMOD=amazon2023
       -j$(grep -c ^processor /proc/cpuinfo)
-      --variables-files=etc/scons/mongodbtoolchain_stable_gcc.vars
-      --modules=
+      --variables-files=etc/scons/mongodbtoolchain_stable_gcc.vars --enterprise-features="audit,encryptdb,fcbis,fips,fle,hot_backups,inmemory,kerberos,vector_search,ldap,live_import,mongohouse,queryable,sasl,search,serverless"
     test_flags: >-
       --excludeWithAnyTags=incompatible_with_amazon_linux,requires_external_data_source,requires_latch_analyzer
       --enableEnterpriseTests=off

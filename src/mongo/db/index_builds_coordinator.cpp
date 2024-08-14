@@ -93,6 +93,7 @@ MONGO_FAIL_POINT_DEFINE(hangBeforeBuildingIndex);
 MONGO_FAIL_POINT_DEFINE(hangBeforeBuildingIndexSecond);
 MONGO_FAIL_POINT_DEFINE(hangIndexBuildBeforeWaitingUntilMajorityOpTime);
 MONGO_FAIL_POINT_DEFINE(failSetUpResumeIndexBuild);
+MONGO_FAIL_POINT_DEFINE(hangAbortIndexBuildByBuildUUIDAfterLocks);
 
 IndexBuildsCoordinator::ActiveIndexBuildsSSS::ActiveIndexBuildsSSS()
     : ServerStatusSection("activeIndexBuilds"),
@@ -556,81 +557,52 @@ Status IndexBuildsCoordinator::_startIndexBuildForRecovery(OperationContext* opC
 
     CollectionWriter collection(opCtx, nss);
     {
-        // These steps are combined into a single WUOW to ensure there are no commits without
-        // the indexes.
-        // 1) Drop all unfinished indexes.
-        // 2) Start, but do not complete the index build process.
+        // These steps are combined into a single WUOW to ensure there are no commits without the
+        // indexes for repair.
         WriteUnitOfWork wuow(opCtx);
-        auto indexCatalog = collection.getWritableCollection()->getIndexCatalog();
-
-
-        for (size_t i = 0; i < indexNames.size(); i++) {
-            auto descriptor = indexCatalog->findIndexByName(
-                opCtx, indexNames[i], IndexCatalog::InclusionPolicy::kReady);
-            if (descriptor) {
-                Status s =
-                    indexCatalog->dropIndex(opCtx, collection.getWritableCollection(), descriptor);
-                if (!s.isOK()) {
-                    return s;
-                }
-                continue;
-            }
-
-            // If the index is not present in the catalog, then we are trying to drop an already
-            // aborted index. This may happen when rollback-via-refetch restarts an index build
-            // after an abort has been rolled back.
-            if (!collection->isIndexPresent(indexNames[i])) {
-                LOGV2(20652,
-                      "An index was not found in the catalog while trying to drop the index during "
-                      "recovery",
-                      "buildUUID"_attr = buildUUID,
-                      "index"_attr = indexNames[i]);
-                continue;
-            }
-
-            const auto durableBuildUUID = collection->getIndexBuildUUID(indexNames[i]);
-
-            // A build UUID is present if and only if we are rebuilding a two-phase build.
-            invariant((protocol == IndexBuildProtocol::kTwoPhase) ==
-                      durableBuildUUID.is_initialized());
-            // When a buildUUID is present, it must match the build UUID parameter to this
-            // function.
-            invariant(!durableBuildUUID || *durableBuildUUID == buildUUID,
-                      str::stream() << "durable build UUID: " << durableBuildUUID
-                                    << "buildUUID: " << buildUUID);
-
-            // If the unfinished index is in the IndexCatalog, drop it through there, otherwise drop
-            // it from the DurableCatalog. Rollback-via-refetch does not clear any in-memory state,
-            // so we should do it manually here.
-            descriptor = indexCatalog->findIndexByName(
-                opCtx,
-                indexNames[i],
-                IndexCatalog::InclusionPolicy::kReady | IndexCatalog::InclusionPolicy::kUnfinished |
-                    IndexCatalog::InclusionPolicy::kFrozen);
-            if (descriptor) {
-                Status s = indexCatalog->dropUnfinishedIndex(
-                    opCtx, collection.getWritableCollection(), descriptor);
-                if (!s.isOK()) {
-                    return s;
-                }
-            } else {
-                // There are no concurrent users of the index during startup recovery, so it is OK
-                // to pass in a nullptr for the index 'ident', promising that the index is not in
-                // use.
-                catalog::removeIndex(
-                    opCtx, indexNames[i], collection.getWritableCollection(), nullptr /* ident */);
-            }
-        }
 
         // We need to initialize the collection to rebuild the indexes. The collection may already
-        // be initialized when rebuilding indexes with rollback-via-refetch.
+        // be initialized when rebuilding multiple unfinished indexes on the same collection.
         if (!collection->isInitialized()) {
             collection.getWritableCollection()->init(opCtx);
         }
 
-        auto dbName = nss.db().toString();
+        if (storageGlobalParams.repair) {
+            Status status = _dropIndexesForRepair(opCtx, collection, indexNames);
+            if (!status.isOK()) {
+                return status;
+            }
+        } else {
+            // Unfinished index builds that are not resumable will drop and recreate the index table
+            // using the same ident to avoid doing untimestamped writes to the catalog.
+            for (const auto& indexName : indexNames) {
+                auto indexCatalog = collection.getWritableCollection()->getIndexCatalog();
+                auto desc =
+                    indexCatalog->findIndexByName(opCtx,
+                                                  indexName,
+                                                  IndexCatalog::InclusionPolicy::kUnfinished |
+                                                      IndexCatalog::InclusionPolicy::kFrozen);
+                Status status = indexCatalog->resetUnfinishedIndexForRecovery(
+                    opCtx, collection.getWritableCollection(), desc);
+                if (!status.isOK()) {
+                    return status;
+                }
+
+                const auto durableBuildUUID = collection->getIndexBuildUUID(indexName);
+
+                // A build UUID is present if and only if we are rebuilding a two-phase build.
+                invariant((protocol == IndexBuildProtocol::kTwoPhase) ==
+                          durableBuildUUID.has_value());
+                // When a buildUUID is present, it must match the build UUID parameter to this
+                // function.
+                invariant(!durableBuildUUID || *durableBuildUUID == buildUUID,
+                          str::stream() << "durable build UUID: " << durableBuildUUID
+                                        << "buildUUID: " << buildUUID);
+            }
+        }
+
         auto replIndexBuildState = std::make_shared<ReplIndexBuildState>(
-            buildUUID, collection->uuid(), dbName, specs, protocol);
+            buildUUID, collection->uuid(), nss.db().toString(), specs, protocol);
 
         Status status = activeIndexBuilds.registerIndexBuild(replIndexBuildState);
         if (!status.isOK()) {
@@ -639,6 +611,8 @@ Status IndexBuildsCoordinator::_startIndexBuildForRecovery(OperationContext* opC
 
         IndexBuildsManager::SetupOptions options;
         options.protocol = protocol;
+        // All indexes are dropped during repair and should be rebuilt normally.
+        options.forRecovery = !storageGlobalParams.repair;
         status = _indexBuildsManager.setUpIndexBuild(
             opCtx, collection, specs, buildUUID, MultiIndexBlock::kNoopOnInitFn, options);
         if (!status.isOK()) {
@@ -648,6 +622,39 @@ Status IndexBuildsCoordinator::_startIndexBuildForRecovery(OperationContext* opC
         }
 
         wuow.commit();
+    }
+
+    return Status::OK();
+}
+
+Status IndexBuildsCoordinator::_dropIndexesForRepair(OperationContext* opCtx,
+                                                     CollectionWriter& collection,
+                                                     const std::vector<std::string>& indexNames) {
+    invariant(collection->isInitialized());
+    for (const auto& indexName : indexNames) {
+        auto indexCatalog = collection.getWritableCollection()->getIndexCatalog();
+        auto descriptor =
+            indexCatalog->findIndexByName(opCtx, indexName, IndexCatalog::InclusionPolicy::kReady);
+        if (descriptor) {
+            Status s =
+                indexCatalog->dropIndex(opCtx, collection.getWritableCollection(), descriptor);
+            if (!s.isOK()) {
+                return s;
+            }
+            continue;
+        }
+
+        // The index must be unfinished or frozen if it isn't ready.
+        descriptor = indexCatalog->findIndexByName(opCtx,
+                                                   indexName,
+                                                   IndexCatalog::InclusionPolicy::kUnfinished |
+                                                       IndexCatalog::InclusionPolicy::kFrozen);
+        invariant(descriptor);
+        Status s = indexCatalog->dropUnfinishedIndex(
+            opCtx, collection.getWritableCollection(), descriptor);
+        if (!s.isOK()) {
+            return s;
+        }
     }
 
     return Status::OK();
@@ -946,6 +953,16 @@ void IndexBuildsCoordinator::applyStartIndexBuild(OperationContext* opCtx,
 
                 if (auto desc = indexCatalog->findIndexByName(
                         opCtx, name, IndexCatalog::InclusionPolicy::kReady)) {
+                    uassertStatusOK(
+                        indexCatalog->dropIndex(opCtx, coll.getWritableCollection(opCtx), desc));
+                }
+
+                const IndexDescriptor* desc = indexCatalog->findIndexByKeyPatternAndOptions(
+                    opCtx,
+                    spec.getObjectField(IndexDescriptor::kKeyPatternFieldName),
+                    spec,
+                    IndexCatalog::InclusionPolicy::kReady);
+                if (desc) {
                     uassertStatusOK(
                         indexCatalog->dropIndex(opCtx, coll.getWritableCollection(opCtx), desc));
                 }
@@ -1250,6 +1267,8 @@ bool IndexBuildsCoordinator::abortIndexBuildByBuildUUID(OperationContext* opCtx,
         Lock::CollectionLock collLock(opCtx, dbAndUUID, MODE_X);
         AutoGetCollection indexBuildEntryColl(
             opCtx, NamespaceString::kIndexBuildEntryNamespace, MODE_IX);
+
+        hangAbortIndexBuildByBuildUUIDAfterLocks.pauseWhileSet();
 
         // If we are using two-phase index builds and are no longer primary after receiving an
         // abort, we cannot replicate an abortIndexBuild oplog entry. Continue holding the RSTL to
@@ -2248,11 +2267,26 @@ void IndexBuildsCoordinator::_cleanUpSinglePhaseAfterFailure(
     runOnAlternateContext(
         opCtx, "self-abort", [this, replState, status](OperationContext* abortCtx) {
             ShouldNotConflictWithSecondaryBatchApplicationBlock noConflict(abortCtx->lockState());
-            auto autoGetColl = std::move(
-                _autoGetCollectionExclusiveWithTimeout(abortCtx, replState.get()).getValue());
-            AutoGetCollection indexBuildEntryColl(
-                abortCtx, NamespaceString::kIndexBuildEntryNamespace, MODE_IX);
-            _completeSelfAbort(abortCtx, replState, *indexBuildEntryColl, status);
+            // To avoid potential deadlocks with concurrent external aborts, which hold the
+            // collection MODE_X lock while waiting for this thread to signal its exit, the
+            // collection lock is acquired with a timeout, and retried only if the build is not
+            // already aborted (externally).
+            while (!replState->isAborted()) {
+                auto swLocks =
+                    _autoGetCollectionExclusiveWithTimeout(abortCtx, replState.get(), false);
+                if (!swLocks.isOK()) {
+                    LOGV2(7677700,
+                          "Unable to acquire collection lock within the timeout, a concurrent "
+                          "abort might be waiting for the builder thread to exit. Rechecking if "
+                          "self abort is still required.",
+                          "buildUUID"_attr = replState->buildUUID);
+                    continue;
+                }
+
+                AutoGetCollection indexBuildEntryColl(
+                    abortCtx, NamespaceString::kIndexBuildEntryNamespace, MODE_IX);
+                _completeSelfAbort(abortCtx, replState, *indexBuildEntryColl, status);
+            }
         });
 }
 
@@ -2274,23 +2308,40 @@ void IndexBuildsCoordinator::_cleanUpTwoPhaseAfterFailure(
         opCtx, "self-abort", [this, replState, status](OperationContext* abortCtx) {
             ShouldNotConflictWithSecondaryBatchApplicationBlock noConflict(abortCtx->lockState());
 
-            auto autoGetColl = std::move(
-                _autoGetCollectionExclusiveWithTimeout(abortCtx, replState.get()).getValue());
+            // To avoid potential deadlocks with concurrent external aborts, which hold the
+            // collection MODE_X lock while waiting for this thread to signal its exit, the
+            // collection lock is acquired with a timeout, and retried only if the build is not
+            // already aborted (externally).
+            while (!replState->isAborted()) {
+                // Take RSTL to observe and prevent replication state from changing. This is done
+                // with the release/reacquire strategy to avoid deadlock with prepared txns.
+                auto swLocks =
+                    _autoGetCollectionExclusiveWithTimeout(abortCtx, replState.get(), false);
+                if (!swLocks.isOK()) {
+                    LOGV2_DEBUG(7677701,
+                                1,
+                                "Index build: lock acquisition for self-abort failed, will retry.",
+                                "buildUUD"_attr = replState->buildUUID,
+                                "error"_attr = swLocks.getStatus());
+                    continue;
+                }
 
-            // Index builds may not fail on secondaries. If a primary replicated an abortIndexBuild
-            // oplog entry, then this index build would have received an IndexBuildAborted error
-            // code.
-            const NamespaceStringOrUUID dbAndUUID(replState->dbName, replState->collectionUUID);
-            auto replCoord = repl::ReplicationCoordinator::get(abortCtx);
-            if (!replCoord->canAcceptWritesFor(abortCtx, dbAndUUID)) {
-                fassert(51101,
-                        status.withContext(str::stream() << "Index build: " << replState->buildUUID
-                                                         << "; Database: " << replState->dbName));
+                const NamespaceStringOrUUID dbAndUUID(replState->dbName, replState->collectionUUID);
+                auto replCoord = repl::ReplicationCoordinator::get(abortCtx);
+                if (!replCoord->canAcceptWritesFor(abortCtx, dbAndUUID)) {
+                    // Index builds may not fail on secondaries. If a primary replicated an
+                    // abortIndexBuild oplog entry, then this index build would have received an
+                    // IndexBuildAborted error code.
+                    fassert(51101,
+                            status.withContext(str::stream()
+                                               << "Index build: " << replState->buildUUID
+                                               << "; Database: " << replState->dbName));
+                }
+
+                AutoGetCollection indexBuildEntryColl(
+                    abortCtx, NamespaceString::kIndexBuildEntryNamespace, MODE_IX);
+                _completeSelfAbort(abortCtx, replState, *indexBuildEntryColl, status);
             }
-
-            AutoGetCollection indexBuildEntryColl(
-                abortCtx, NamespaceString::kIndexBuildEntryNamespace, MODE_IX);
-            _completeSelfAbort(abortCtx, replState, *indexBuildEntryColl, status);
         });
 }
 
@@ -2347,6 +2398,13 @@ void IndexBuildsCoordinator::_runIndexBuildInner(
             uassertStatusOK(replState->getAbortStatus());
         uassertStatusOK(status);
     }
+
+    // It is also possible for the concurrent abort to happen after the check. This is an issue as
+    // external aborters hold the collection MODE_X lock while waiting for this thread to signal the
+    // promise, but if this thread proceeds beyond this check first it will try to acquire the
+    // collection lock before signaling the promise, potentially creating a deadlock. This is worked
+    // around by adding a timeout to the collection lock in the self-abort path, and rechecking if
+    // the build was aborted externally on timeout.
 
     // We do not hold a collection lock here, but we are protected against the collection being
     // dropped while the index build is still registered for the collection -- until abortIndexBuild

@@ -53,6 +53,10 @@
 #include "mongo/db/storage/execution_context.h"
 #include "mongo/db/storage/key_string.h"
 #include "mongo/db/storage/record_store.h"
+#include "mongo/db/storage/storage_parameters_gen.h"
+#include "mongo/db/timeseries/flat_bson.h"
+#include "mongo/db/timeseries/timeseries_constants.h"
+#include "mongo/db/timeseries/timeseries_options.h"
 #include "mongo/logv2/log.h"
 #include "mongo/rpc/object_check.h"
 #include "mongo/util/fail_point.h"
@@ -74,6 +78,9 @@ const long long kInterruptIntervalNumBytes = 50 * 1024 * 1024;  // 50MB.
 static constexpr const char* kSchemaValidationFailedReason =
     "Detected one or more documents not compliant with the collection's schema. Check logs for log "
     "id 5363500.";
+static constexpr const char* kTimeseriesValidationInconsistencyReason =
+    "Detected one or more documents in this collection incompatible with time-series "
+    "specifications. For more info, see logs with log id 6698300.";
 
 /**
  * Validate that for each record in a clustered RecordStore the record key (RecordId) matches the
@@ -124,7 +131,159 @@ void schemaValidationFailed(CollectionValidation::ValidateState* state,
         results->warnings.push_back(kSchemaValidationFailedReason);
     }
 }
+/**
+ * Checks the value of the bucket's version and if it matches the types of 'data' fields.
+ */
+Status _validateTimeseriesControlVersion(const BSONObj& recordBson) {
+    int controlVersion = recordBson.getField(timeseries::kBucketControlFieldName)
+                             .Obj()
+                             .getField(timeseries::kBucketControlVersionFieldName)
+                             .Number();
+    if (controlVersion != 1 && controlVersion != 2) {
+        return Status(
+            ErrorCodes::BadValue,
+            fmt::format("Invalid value for 'control.version'. Expected 1 or 2, but got {}.",
+                        controlVersion));
+    }
+    auto dataType = controlVersion == 1 ? BSONType::Object : BSONType::BinData;
+    // In addition to checking dataType, make sure that closed buckets have BinData Column subtype
+    auto isCorrectType = [&](BSONElement el) {
+        if (controlVersion == 1) {
+            return el.type() == BSONType::Object;
+        } else {
+            return el.type() == BSONType::BinData && el.binDataType() == BinDataType::Column;
+        }
+    };
+    BSONObj data = recordBson.getField(timeseries::kBucketDataFieldName).Obj();
+    for (BSONObjIterator bi(data); bi.more();) {
+        BSONElement e = bi.next();
+        if (!isCorrectType(e)) {
+            return Status(ErrorCodes::TypeMismatch,
+                          fmt::format("Mismatch between time-series schema version and data field "
+                                      "type. Expected type {}, but got {}.",
+                                      mongo::typeName(dataType),
+                                      mongo::typeName(e.type())));
+        }
+    }
+    return Status::OK();
+}
 
+/**
+ * Checks the equivalence between the min and max fields in 'control' for a bucket and
+ * the corresponding value in 'data'.
+ */
+Status _validateTimeseriesMinMax(const BSONObj& recordBson, const CollectionPtr& coll) {
+    BSONObj data = recordBson.getField(timeseries::kBucketDataFieldName).Obj();
+    BSONObj control = recordBson.getField(timeseries::kBucketControlFieldName).Obj();
+    BSONObj controlMin = control.getField(timeseries::kBucketControlMinFieldName).Obj();
+    BSONObj controlMax = control.getField(timeseries::kBucketControlMaxFieldName).Obj();
+
+    auto dataFields = data.getFieldNames<std::set<std::string>>();
+    auto controlMinFields = controlMin.getFieldNames<std::set<std::string>>();
+    auto controlMaxFields = controlMax.getFieldNames<std::set<std::string>>();
+
+    // Checks that the number of 'control.min' and 'control.max' fields agrees with number of 'data'
+    // fields.
+    if (dataFields.size() != controlMinFields.size() ||
+        dataFields.size() != controlMaxFields.size()) {
+        return Status(
+            ErrorCodes::BadValue,
+            fmt::format(
+                "Mismatch between the number of time-series control fields and the number "
+                "of data fields. "
+                "Control had {} min fields and {} max fields, but observed data had {} fields.",
+                controlMinFields.size(),
+                controlMaxFields.size(),
+                dataFields.size()));
+    };
+
+    // Used when checking min timestamp, which is rounded down by granularity.
+    auto granularity = coll->getTimeseriesOptions()->getGranularity();
+
+    // Validates that the 'control.min' and 'control.max' field values agree with 'data' field
+    // values.
+    for (auto fieldName : dataFields) {
+        timeseries::MinMax minmax;
+        auto field = data.getField(fieldName);
+
+        for (BSONElement el : field.Obj()) {
+            minmax.update(el.wrap(fieldName), boost::none, coll->getDefaultCollator());
+        }
+
+        auto controlFieldMin = controlMin.getField(fieldName);
+        auto controlFieldMax = controlMax.getField(fieldName);
+        auto min = minmax.min();
+        auto max = minmax.max();
+
+        // Checks whether the min and max values between 'control' and 'data' match, taking
+        // timestamp granularity into account.
+        auto checkMinAndMaxMatch = [&]() {
+            if (fieldName == coll->getTimeseriesOptions()->getTimeField()) {
+                return controlFieldMin.Date() ==
+                    timeseries::roundTimestampToGranularity(min.getField(fieldName).Date(),
+                                                            granularity) &&
+                    controlFieldMax.Date() == max.getField(fieldName).Date();
+            } else {
+                return controlFieldMin.wrap().woCompare(min) == 0 &&
+                    controlFieldMax.wrap().woCompare(max) == 0;
+            }
+        };
+
+        if (!checkMinAndMaxMatch()) {
+            return Status(
+                ErrorCodes::BadValue,
+                fmt::format(
+                    "Mismatch between time-series control and observed min or max for field {}. "
+                    "Control had min {} and max {}, but observed data had min {} and max {}.",
+                    fieldName,
+                    controlFieldMin.toString(),
+                    controlFieldMax.toString(),
+                    min.toString(),
+                    max.toString()));
+        }
+    }
+
+    return Status::OK();
+}
+
+/**
+ * Validates the consistency of a time-series bucket.
+ */
+Status _validateTimeSeriesBucketRecord(const CollectionPtr& collection,
+                                       const BSONObj& recordBson,
+                                       ValidateResults* results) {
+
+    if (Status status = _validateTimeseriesControlVersion(recordBson); !status.isOK()) {
+        return status;
+    }
+
+    int version = recordBson.getField(timeseries::kBucketControlFieldName)
+                      .Obj()
+                      .getField(timeseries::kBucketControlVersionFieldName)
+                      .Number();
+
+    // TODO(SERVER-67023): Check closed bucket as part of validation.
+    if (version == 1) {
+        if (Status status = _validateTimeseriesMinMax(recordBson, collection); !status.isOK()) {
+            return status;
+        }
+    }
+
+
+    return Status::OK();
+}
+
+
+void _timeseriesValidationFailed(CollectionValidation::ValidateState* state,
+                                 ValidateResults* results) {
+    if (state->isTimeseriesDataInconsistent()) {
+        // Only report the warning message once.
+        return;
+    }
+    state->setTimeseriesDataInconsistent();
+
+    results->warnings.push_back(kTimeseriesValidationInconsistencyReason);
+}
 
 BSONObj rehydrateKey(const BSONObj& keyPattern, const BSONObj& indexKey) {
     // We need to rehydrate the indexKey for improved readability.
@@ -149,8 +308,9 @@ Status ValidateAdaptor::validateRecord(OperationContext* opCtx,
                                        const RecordId& recordId,
                                        const RecordData& record,
                                        size_t* dataSize,
-                                       ValidateResults* results) {
-    const Status status = validateBSON(record.data(), record.size());
+                                       ValidateResults* results,
+                                       ValidationVersion validationVersion) {
+    const Status status = validateBSON(record.data(), record.size(), validationVersion);
     if (!status.isOK())
         return status;
 
@@ -557,7 +717,8 @@ void ValidateAdaptor::traverseIndex(OperationContext* opCtx,
 
 void ValidateAdaptor::traverseRecordStore(OperationContext* opCtx,
                                           ValidateResults* results,
-                                          BSONObjBuilder* output) {
+                                          BSONObjBuilder* output,
+                                          ValidationVersion validationVersion) {
     _numRecords = 0;  // need to reset it because this function can be called more than once.
     long long dataSizeTotal = 0;
     long long interruptIntervalNumBytes = 0;
@@ -581,9 +742,10 @@ void ValidateAdaptor::traverseRecordStore(OperationContext* opCtx,
 
     // Because the progress meter is intended as an approximation, it's sufficient to get the number
     // of records when we begin traversing, even if this number may deviate from the final number.
+    const auto& coll = _validateState->getCollection();
     const char* curopMessage = "Validate: scanning documents";
-    const auto totalRecords = _validateState->getCollection()->getRecordStore()->numRecords(opCtx);
-    const auto rs = _validateState->getCollection()->getRecordStore();
+    const auto totalRecords = coll->getRecordStore()->numRecords(opCtx);
+    const auto rs = coll->getRecordStore();
     {
         stdx::unique_lock<Client> lk(*opCtx->getClient());
         _progress.set(CurOp::get(opCtx)->setProgress_inlock(curopMessage, totalRecords));
@@ -594,6 +756,9 @@ void ValidateAdaptor::traverseRecordStore(OperationContext* opCtx,
         return;
     }
 
+    bool bucketMixedSchemaDataError = false;
+    bool bucketMinMaxMalformedError = false;
+    bool bucketMixedSchemaDataWarning = false;
     bool corruptRecordsSizeLimitWarning = false;
     const std::unique_ptr<SeekableRecordThrottleCursor>& traverseRecordStoreCursor =
         _validateState->getTraverseRecordStoreCursor();
@@ -607,7 +772,8 @@ void ValidateAdaptor::traverseRecordStore(OperationContext* opCtx,
         interruptIntervalNumBytes += dataSize;
         dataSizeTotal += dataSize;
         size_t validatedSize = 0;
-        Status status = validateRecord(opCtx, record->id, record->data, &validatedSize, results);
+        Status status = validateRecord(
+            opCtx, record->id, record->data, &validatedSize, results, validationVersion);
 
         // Log the out-of-order entries as errors.
         //
@@ -681,18 +847,76 @@ void ValidateAdaptor::traverseRecordStore(OperationContext* opCtx,
             // If the document is not corrupted, validate the document against this collection's
             // schema validator. Don't treat invalid documents as errors since documents can bypass
             // document validation when being inserted or updated.
-            auto result =
-                _validateState->getCollection()->checkValidation(opCtx, record->data.toBson());
+            auto result = coll->checkValidation(opCtx, record->data.toBson());
 
             if (result.first != Collection::SchemaValidationResult::kPass) {
                 LOGV2_WARNING(5363500,
                               "Document is not compliant with the collection's schema",
-                              logAttrs(_validateState->getCollection()->ns()),
+                              logAttrs(coll->ns()),
                               "recordId"_attr = record->id,
                               "reason"_attr = result.second);
 
                 nNonCompliantDocuments++;
                 schemaValidationFailed(_validateState, result.first, results);
+            } else if (coll->getTimeseriesOptions()) {
+                // Checks for time-series collection consistency.
+                Status bucketStatus =
+                    _validateTimeSeriesBucketRecord(coll, record->data.toBson(), results);
+
+                // This log id should be kept in sync with the associated warning messages that are
+                // returned to the client.
+                if (!bucketStatus.isOK()) {
+                    LOGV2_WARNING(6698300,
+                                  "Document is not compliant with time-series specifications",
+                                  logAttrs(coll->ns()),
+                                  "recordId"_attr = record->id,
+                                  "reason"_attr = bucketStatus);
+                    nNonCompliantDocuments++;
+                    _timeseriesValidationFailed(_validateState, results);
+                } else {
+                    auto containsMixedSchemaDataResponse =
+                        coll->doesTimeseriesBucketsDocContainMixedSchemaData(record->data.toBson());
+                    if (!containsMixedSchemaDataResponse.isOK() && !bucketMinMaxMalformedError) {
+                        bucketMinMaxMalformedError = true;
+                        LOGV2_WARNING(8469900,
+                                      "Detected a time-series bucket with malformed min/max values",
+                                      logAttrs(coll->ns()),
+                                      "bucketId"_attr = record->id,
+                                      "error"_attr = containsMixedSchemaDataResponse.getStatus());
+                        results->errors.push_back(
+                            str::stream()
+                            << "Detected a time-series bucket with malformed min/max values");
+                        results->valid = false;
+                    } else if (containsMixedSchemaDataResponse.isOK() &&
+                               containsMixedSchemaDataResponse.getValue()) {
+                        bool mixedSchemaAllowed =
+                            coll->getTimeseriesBucketsMayHaveMixedSchemaData().value_or(true);
+                        if (mixedSchemaAllowed && !bucketMixedSchemaDataWarning) {
+                            bucketMixedSchemaDataWarning = true;
+                            LOGV2_WARNING(8469901,
+                                          "Detected a time-series bucket with mixed schema data",
+                                          logAttrs(coll->ns()),
+                                          "bucketId"_attr = record->id);
+                            results->warnings.push_back(
+                                str::stream()
+                                << "Detected a time-series bucket with mixed schema data");
+                        } else if (!mixedSchemaAllowed && !bucketMixedSchemaDataError) {
+                            bucketMixedSchemaDataError = true;
+                            LOGV2_WARNING(8469902,
+                                          "Detected a time-series bucket with mixed schema data "
+                                          "when timeseriesBucketsMayHaveMixedSchemaData is false. "
+                                          "You can run the collMod command to set this flag",
+                                          logAttrs(coll->ns()),
+                                          "bucketId"_attr = record->id);
+                            results->errors.push_back(
+                                str::stream()
+                                << "Detected a time-series bucket with mixed schema data when "
+                                   "timeseriesBucketsMayHaveMixedSchemaData is false. You can run "
+                                   "the collMod command to set this flag");
+                            results->valid = false;
+                        }
+                    }
+                }
             }
         }
 
@@ -715,20 +939,18 @@ void ValidateAdaptor::traverseRecordStore(OperationContext* opCtx,
                                                   << " invalid documents.");
     }
 
-    const auto fastCount = _validateState->getCollection()->numRecords(opCtx);
+    const auto fastCount = coll->numRecords(opCtx);
     if (_validateState->shouldEnforceFastCount() && fastCount != _numRecords) {
-        results->errors.push_back(str::stream() << "fast count (" << fastCount
-                                                << ") does not match number of records ("
-                                                << _numRecords << ") for collection '"
-                                                << _validateState->getCollection()->ns() << "'");
+        results->errors.push_back(
+            str::stream() << "fast count (" << fastCount << ") does not match number of records ("
+                          << _numRecords << ") for collection '" << coll->ns() << "'");
         results->valid = false;
     }
 
     // Do not update the record store stats if we're in the background as we've validated a
     // checkpoint and it may not have the most up-to-date changes.
     if (results->valid && !_validateState->isBackground()) {
-        _validateState->getCollection()->getRecordStore()->updateStatsAfterRepair(
-            opCtx, _numRecords, dataSizeTotal);
+        coll->getRecordStore()->updateStatsAfterRepair(opCtx, _numRecords, dataSizeTotal);
     }
 }
 

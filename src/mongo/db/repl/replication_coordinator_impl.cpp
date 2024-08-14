@@ -111,7 +111,6 @@
 #include "mongo/util/assert_util.h"
 #include "mongo/util/fail_point.h"
 #include "mongo/util/scopeguard.h"
-#include "mongo/util/stacktrace.h"
 #include "mongo/util/testing_proctor.h"
 #include "mongo/util/time_support.h"
 #include "mongo/util/timer.h"
@@ -443,6 +442,10 @@ boost::optional<Date_t> ReplicationCoordinatorImpl::getCatchupTakeover_forTest()
 executor::TaskExecutor::CallbackHandle ReplicationCoordinatorImpl::getCatchupTakeoverCbh_forTest()
     const {
     return _catchupTakeoverCbh;
+}
+
+int64_t ReplicationCoordinatorImpl::getLastHorizonChange_forTest() const {
+    return _lastHorizonTopologyChange;
 }
 
 OpTime ReplicationCoordinatorImpl::getCurrentCommittedSnapshotOpTime() const {
@@ -2388,6 +2391,10 @@ ReplicationCoordinatorImpl::_getHelloResponseFuture(
             prevCounter <= topologyVersionCounter);
 
     if (prevCounter < topologyVersionCounter) {
+        uassert(ErrorCodes::SplitHorizonChange,
+                "Stale horizon detected, we have since received a reconfig that changed the "
+                "horizon mappings.",
+                prevCounter >= _lastHorizonTopologyChange);
         // The received hello command contains a stale topology version so we respond
         // immediately with a more current topology version.
         return SharedSemiFuture<SharedHelloResponse>(
@@ -2665,19 +2672,10 @@ ReplicationCoordinatorImpl::AutoGetRstlForStepUpStepDown::AutoGetRstlForStepUpSt
         auto lockerInfo = opCtx->lockState()->getLockerInfo(CurOp::get(opCtx)->getLockStatsBase());
         BSONObjBuilder lockRep;
         lockerInfo->stats.report(&lockRep);
-
-        LOGV2_FATAL_CONTINUE(
-            5675600,
-            "Time out exceeded waiting for RSTL, stepUp/stepDown is not possible thus "
-            "calling abort() to allow cluster to progress",
-            "lockRep"_attr = lockRep.obj());
-
-#if defined(MONGO_STACKTRACE_CAN_DUMP_ALL_THREADS)
-        // Dump the stack of each thread.
-        printAllThreadStacksBlocking();
-#endif
-
-        fassertFailed(7152000);
+        LOGV2_FATAL(5675600,
+                    "Time out exceeded waiting for RSTL, stepUp/stepDown is not possible thus "
+                    "calling abort() to allow cluster to progress",
+                    "lockRep"_attr = lockRep.obj());
     });
 };
 
@@ -4464,6 +4462,8 @@ void ReplicationCoordinatorImpl::_errorOnPromisesIfHorizonChanged(WithLock lk,
             promise->setError({ErrorCodes::SplitHorizonChange,
                                "Received a reconfig that changed the horizon mappings."});
         }
+        _topCoord->incrementTopologyVersion();
+        _lastHorizonTopologyChange = _topCoord->getTopologyVersion().getCounter();
         _sniToValidConfigPromiseMap.clear();
         HelloMetrics::get(opCtx)->resetNumAwaitingTopologyChanges();
     }
@@ -4478,6 +4478,10 @@ void ReplicationCoordinatorImpl::_errorOnPromisesIfHorizonChanged(WithLock lk,
                 promise->setError({ErrorCodes::SplitHorizonChange,
                                    "Received a reconfig that changed the horizon mappings."});
             }
+            // Increment topology version to mark a horizon change, since a reconfig doesn't
+            // increment the topology version until the end.
+            _topCoord->incrementTopologyVersion();
+            _lastHorizonTopologyChange = _topCoord->getTopologyVersion().getCounter();
             _createHorizonTopologyChangePromiseMapping(lk);
             HelloMetrics::get(opCtx)->resetNumAwaitingTopologyChanges();
         }

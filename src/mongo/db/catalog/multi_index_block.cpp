@@ -185,7 +185,7 @@ StatusWith<std::vector<BSONObj>> MultiIndexBlock::init(OperationContext* opCtx,
                                                        const BSONObj& spec,
                                                        OnInitFn onInit) {
     const auto indexes = std::vector<BSONObj>(1, spec);
-    return init(opCtx, collection, indexes, onInit, boost::none);
+    return init(opCtx, collection, indexes, onInit, /*forRecovery=*/false, boost::none);
 }
 
 StatusWith<std::vector<BSONObj>> MultiIndexBlock::init(
@@ -193,6 +193,7 @@ StatusWith<std::vector<BSONObj>> MultiIndexBlock::init(
     CollectionWriter& collection,
     const std::vector<BSONObj>& indexSpecs,
     OnInitFn onInit,
+    bool forRecovery,
     const boost::optional<ResumeIndexInfo>& resumeInfo) {
     invariant(opCtx->lockState()->isCollectionLockedForMode(collection->ns(), MODE_X),
               str::stream() << "Collection " << collection->ns() << " with UUID "
@@ -246,27 +247,31 @@ StatusWith<std::vector<BSONObj>> MultiIndexBlock::init(
 
         for (size_t i = 0; i < indexSpecs.size(); i++) {
             BSONObj info = indexSpecs[i];
-            StatusWith<BSONObj> statusWithInfo =
-                collection->getIndexCatalog()->prepareSpecForCreate(
-                    opCtx, collection.get(), info, resumeInfo);
-            Status status = statusWithInfo.getStatus();
-            if (!status.isOK()) {
-                // If we were given two identical indexes to build, we will run into an error trying
-                // to set up the same index a second time in this for-loop. This is the only way to
-                // encounter this error because callers filter out ready/in-progress indexes and
-                // start the build while holding a lock throughout.
-                if (status == ErrorCodes::IndexBuildAlreadyInProgress) {
-                    invariant(indexSpecs.size() > 1,
-                              str::stream()
-                                  << "Collection: " << collection->ns() << " (" << _collectionUUID
-                                  << "), Index spec: " << indexSpecs.front());
-                    return {
-                        ErrorCodes::OperationFailed,
-                        "Cannot build two identical indexes. Try again without duplicate indexes."};
+            if (!forRecovery) {
+                // We skip this step when initializing unfinished index builds during startup
+                // recovery as they are already in the index catalog.
+                StatusWith<BSONObj> statusWithInfo =
+                    collection->getIndexCatalog()->prepareSpecForCreate(
+                        opCtx, collection.get(), info, resumeInfo);
+                Status status = statusWithInfo.getStatus();
+                if (!status.isOK()) {
+                    // If we were given two identical indexes to build, we will run into an error
+                    // trying to set up the same index a second time in this for-loop. This is the
+                    // only way to encounter this error because callers filter out ready/in-progress
+                    // indexes and start the build while holding a lock throughout.
+                    if (status == ErrorCodes::IndexBuildAlreadyInProgress) {
+                        invariant(indexSpecs.size() > 1,
+                                  str::stream() << "Collection: " << collection->ns() << " ("
+                                                << _collectionUUID
+                                                << "), Index spec: " << indexSpecs.front());
+                        return {ErrorCodes::OperationFailed,
+                                "Cannot build two identical indexes. Try again without duplicate "
+                                "indexes."};
+                    }
+                    return status;
                 }
-                return status;
+                info = statusWithInfo.getValue();
             }
-            info = statusWithInfo.getValue();
             indexInfoObjs.push_back(info);
 
             boost::optional<TimeseriesOptions> options = collection->getTimeseriesOptions();
@@ -302,7 +307,7 @@ StatusWith<std::vector<BSONObj>> MultiIndexBlock::init(
                 status = index.block->initForResume(
                     opCtx, collection.getWritableCollection(), *stateInfo, resumeInfo->getPhase());
             } else {
-                status = index.block->init(opCtx, collection.getWritableCollection());
+                status = index.block->init(opCtx, collection.getWritableCollection(), forRecovery);
             }
             if (!status.isOK())
                 return status;
@@ -685,10 +690,10 @@ Status MultiIndexBlock::_insert(OperationContext* opCtx,
     // collection to have it.
     if (_containsIndexBuildOnTimeseriesMeasurement &&
         *collection->getTimeseriesBucketsMayHaveMixedSchemaData()) {
-        bool docHasMixedSchemaData =
+        auto docHasMixedSchemaData =
             collection->doesTimeseriesBucketsDocContainMixedSchemaData(doc);
 
-        if (docHasMixedSchemaData) {
+        if (docHasMixedSchemaData.isOK() && docHasMixedSchemaData.getValue()) {
             LOGV2(6057700,
                   "Detected mixed-schema data in time-series bucket collection",
                   logAttrs(collection->ns()),
@@ -704,7 +709,8 @@ Status MultiIndexBlock::_insert(OperationContext* opCtx,
         auto replCoord = repl::ReplicationCoordinator::get(opCtx);
         const bool replSetAndNotPrimary = !replCoord->canAcceptWritesFor(opCtx, collection->ns());
 
-        if (docHasMixedSchemaData && !replSetAndNotPrimary) {
+        if (docHasMixedSchemaData.isOK() && docHasMixedSchemaData.getValue() &&
+            !replSetAndNotPrimary) {
             return timeseriesMixedSchemaDataFailure(collection.get());
         }
     }
@@ -972,15 +978,21 @@ Status MultiIndexBlock::commit(OperationContext* opCtx,
 
     onCommit();
 
-    // Update the 'timeseriesBucketsMayHaveMixedSchemaData' catalog entry flag to false in order to
-    // allow subsequent index builds to skip checking bucket documents for mixed-schema data.
+    // We can't update the 'timeseriesBucketsMayHaveMixedSchemaData' catalog entry flag here as it
+    // requires the change to be driven by the router role. It means that subsequent index builds
+    // and other systems needs to treat this collection as-if it contains mixed-schema data even if
+    // it might not. We log a warning that can be used to initiate changing the flag. Note: just
+    // because this node doesn't contain mixed-schema it doesn't mean that other shards can't have
+    // mixed schema data. This flag needs to be consistent across the shards.
     if (_containsIndexBuildOnTimeseriesMeasurement && !_timeseriesBucketContainsMixedSchemaData) {
         boost::optional<bool> mayContainMixedSchemaData =
             collection->getTimeseriesBucketsMayHaveMixedSchemaData();
         invariant(mayContainMixedSchemaData);
 
         if (*mayContainMixedSchemaData) {
-            collection->setTimeseriesBucketsMayHaveMixedSchemaData(opCtx, false);
+            LOGV2_WARNING(9301400,
+                          "Index build finished for time-series collection marked as containing "
+                          "mixed schema buckets without detecting any buckets with mixed schema.");
         }
     }
 

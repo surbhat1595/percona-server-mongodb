@@ -40,6 +40,7 @@
 #include "mongo/bson/simple_bsonobj_comparator.h"
 #include "mongo/crypto/fle_crypto.h"
 #include "mongo/db/auth/security_token.h"
+#include "mongo/db/catalog/backwards_compatible_collection_options_util.h"
 #include "mongo/db/catalog/catalog_stats.h"
 #include "mongo/db/catalog/collection_catalog.h"
 #include "mongo/db/catalog/collection_options.h"
@@ -48,6 +49,7 @@
 #include "mongo/db/catalog/index_consistency.h"
 #include "mongo/db/catalog/index_key_validate.h"
 #include "mongo/db/catalog/local_oplog_info.h"
+#include "mongo/db/catalog/storage_engine_collection_options_flags_parser.h"
 #include "mongo/db/catalog/uncommitted_multikey.h"
 #include "mongo/db/clientcursor.h"
 #include "mongo/db/commands/server_status_metric.h"
@@ -352,35 +354,42 @@ bool indexTypeSupportsPathLevelMultikeyTracking(StringData accessMethod) {
     return accessMethod == IndexNames::BTREE || accessMethod == IndexNames::GEO_2DSPHERE;
 }
 
-bool doesMinMaxHaveMixedSchemaData(const BSONObj& min, const BSONObj& max) {
+StatusWith<bool> doesMinMaxHaveMixedSchemaData(const BSONObj& min, const BSONObj& max) {
     auto minIt = min.begin();
     auto minEnd = min.end();
     auto maxIt = max.begin();
     auto maxEnd = max.end();
 
     while (minIt != minEnd && maxIt != maxEnd) {
-        bool typeMatch = minIt->canonicalType() == maxIt->canonicalType();
-        if (!typeMatch) {
+        // The 'control.min' and 'control.max' fields have the same ordering.
+        if (minIt->fieldNameStringData() != maxIt->fieldNameStringData()) {
+            return Status{
+                ErrorCodes::BadValue,
+                "Encountered inconsistent field name ordering in time-series bucket min/max"};
+        }
+
+        if (minIt->canonicalType() != maxIt->canonicalType()) {
             return true;
         } else if (minIt->type() == Object) {
-            // The 'control.min' and 'control.max' fields have the same ordering.
-            invariant(minIt->fieldNameStringData() == maxIt->fieldNameStringData());
-            if (doesMinMaxHaveMixedSchemaData(minIt->Obj(), maxIt->Obj())) {
-                return true;
+            auto result = doesMinMaxHaveMixedSchemaData(minIt->Obj(), maxIt->Obj());
+            if (!result.isOK() || result.getValue()) {
+                return result;
             }
         } else if (minIt->type() == Array) {
-            if (doesMinMaxHaveMixedSchemaData(minIt->Obj(), maxIt->Obj())) {
-                return true;
+            auto result = doesMinMaxHaveMixedSchemaData(minIt->Obj(), maxIt->Obj());
+            if (!result.isOK() || result.getValue()) {
+                return result;
             }
         }
 
-        invariant(typeMatch);
         minIt++;
         maxIt++;
     }
 
-    // The 'control.min' and 'control.max' fields have the same cardinality.
-    invariant(minIt == minEnd && maxIt == maxEnd);
+    if (minIt != minEnd || maxIt != maxEnd) {
+        return Status{ErrorCodes::BadValue,
+                      "Encountered extra field(s) in time-series bucket min/max"};
+    }
 
     return false;
 }
@@ -1589,6 +1598,19 @@ bool CollectionImpl::isTemporary() const {
 }
 
 boost::optional<bool> CollectionImpl::getTimeseriesBucketsMayHaveMixedSchemaData() const {
+    if (!getTimeseriesOptions()) {
+        return boost::none;
+    }
+
+    // If present, reuse storageEngine options to work around the issue described in SERVER-91194
+    boost::optional<bool> optBackwardsCompatibleFlag = getFlagFromStorageEngineBson(
+        _metadata->options.storageEngine,
+        backwards_compatible_collection_options::kTimeseriesBucketsMayHaveMixedSchemaData);
+    if (optBackwardsCompatibleFlag) {
+        return *optBackwardsCompatibleFlag;
+    }
+
+    // Else, fallback to legacy parameter
     return _metadata->timeseriesBucketsMayHaveMixedSchemaData;
 }
 
@@ -1604,11 +1626,21 @@ void CollectionImpl::setTimeseriesBucketsMayHaveMixedSchemaData(OperationContext
                 "setting"_attr = setting);
 
     _writeMetadata(opCtx, [&](BSONCollectionCatalogEntry::MetaData& md) {
+        // Reuse storageEngine options to work around the issue described in SERVER-91194
+        if (setting.has_value()) {
+            md.options.storageEngine = setFlagToStorageEngineBson(
+                md.options.storageEngine,
+                backwards_compatible_collection_options::kTimeseriesBucketsMayHaveMixedSchemaData,
+                *setting);
+        }
+
+        // Also update legacy parameter for compatibility when downgrading to older sub-versions
+        // only relying on this option (best-effort because it may be lost due to SERVER-91194)
         md.timeseriesBucketsMayHaveMixedSchemaData = setting;
     });
 }
 
-bool CollectionImpl::doesTimeseriesBucketsDocContainMixedSchemaData(
+StatusWith<bool> CollectionImpl::doesTimeseriesBucketsDocContainMixedSchemaData(
     const BSONObj& bucketsDoc) const {
     if (!getTimeseriesOptions()) {
         return false;

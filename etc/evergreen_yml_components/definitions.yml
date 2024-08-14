@@ -14,22 +14,6 @@ pre_error_fails_task: true
 stepback: true
 
 
-# Files that match an ignore-list pattern will not trigger a build, if they're the only modified
-# files in the patch.
-ignore:
-- ".*"
-- "!.clang-format"
-- "!.eslintrc.yml"
-- "*.md"
-- "*.rst"
-- "*.txt"
-- "/distsrc/**"
-- "/docs/**"
-- "/etc/*.yml"
-- "!/etc/evergreen.yml"
-- "README"
-
-
 ## Parameters for parameterized builds (see https://github.com/evergreen-ci/evergreen/wiki/Parameterized-Builds)
 parameters:
 - key: patch_compile_flags
@@ -294,9 +278,7 @@ variables:
 # If a variant is listed here and has a push task, mongocryptd is pushed
 - mongocryptd_variants: &mongocryptd_variants
   - enterprise-amazon2
-  - enterprise-amazon2-openssl111
   - enterprise-amazon2-arm64
-  - enterprise-amazon2-arm64-openssl111
   - enterprise-amazon2023
   - enterprise-amazon2023-arm64
   - enterprise-debian10-64
@@ -310,12 +292,12 @@ variables:
   - enterprise-rhel-71-ppc64le
   - enterprise-rhel-81-ppc64le
   - enterprise-rhel-72-s390x
-  - enterprise-rhel-80-64-bit
-  - enterprise-rhel-80-64-bit-coverage
-  - enterprise-rhel-80-64-bit-inmem
-  - enterprise-rhel-80-64-bit-multiversion
-  - enterprise-rhel-80-64-bit-suggested
-  - enterprise-rhel-82-arm64
+  - enterprise-rhel-8-64-bit
+  - enterprise-rhel-8-64-bit-coverage
+  - enterprise-rhel-8-64-bit-inmem
+  - enterprise-rhel-8-64-bit-multiversion
+  - enterprise-rhel-8-64-bit-suggested
+  - enterprise-rhel-8-arm64
   - enterprise-rhel-83-s390x
   - enterprise-rhel-90-64-bit
   - enterprise-rhel-90-arm64
@@ -343,10 +325,10 @@ variables:
 - mh_variants: &mh_variants
   - enterprise-macos
   - enterprise-macos-arm64
-  - enterprise-rhel-80-64-bit
-  - enterprise-rhel-80-64-bit-dynamic-required
+  - enterprise-rhel-8-64-bit
+  - enterprise-rhel-8-64-bit-dynamic-required
   - enterprise-rhel-70-64-bit
-  - enterprise-rhel-82-arm64
+  - enterprise-rhel-8-arm64
   - enterprise-rhel-90-64-bit
   - enterprise-rhel-90-arm64
   - enterprise-amazon2-arm64
@@ -365,9 +347,7 @@ variables:
   - amazon2023
   - amazon2023-arm64
   - enterprise-amazon2
-  - enterprise-amazon2-openssl111
   - enterprise-amazon2-arm64
-  - enterprise-amazon2-arm64-openssl111
   - enterprise-amazon2023
   - enterprise-amazon2023-arm64
   - debian10
@@ -381,13 +361,13 @@ variables:
   - enterprise-rhel-81-ppc64le
   - enterprise-rhel-72-s390x
   - ubi8
-  - rhel80
-  - rhel-82-arm64
+  - rhel8
+  - rhel-8-arm64
   - rhel90
   - rhel90-arm64
-  - enterprise-rhel-80-64-bit
-  - enterprise-rhel-80-64-bit-suggested  # For testing selinux.
-  - enterprise-rhel-82-arm64
+  - enterprise-rhel-8-64-bit
+  - enterprise-rhel-8-64-bit-suggested  # For testing selinux.
+  - enterprise-rhel-8-arm64
   - enterprise-rhel-83-s390x
   - enterprise-rhel-90-64-bit
   - enterprise-rhel-90-arm64
@@ -5397,7 +5377,13 @@ tasks:
 
 - <<: *gen_task_template
   name: noPassthrough_gen
-  tags: ["misc_js"]
+  tags:
+    [
+      "incompatible_mac",
+      "incompatible_ppc",
+      "incompatible_s390x",
+      "misc_js"
+    ]
   commands:
   - func: "generate resmoke tasks"
     vars:

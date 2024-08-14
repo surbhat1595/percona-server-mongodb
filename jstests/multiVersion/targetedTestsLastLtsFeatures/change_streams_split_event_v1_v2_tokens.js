@@ -20,7 +20,11 @@ const st = new ShardingTest({
         rsOptions: {
             binVersion: "last-lts",
         },
-        rs: {nodes: 2},
+        rs: {
+            nodes: 2,
+            // Reserving enough of oplog space to accommodate 4 nearly 16MB-large changes.
+            oplogSize: 16 * 5
+        }
     }
 });
 
@@ -122,11 +126,7 @@ expectedEvents.push({operationType: "dropDatabase"},
 // be skipped when resuming from such a token.
 // TODO SERVER-90266: Remove this workaround when no longer needed.
 {
-    const csCursor = testDB.watch([], {
-        showExpandedEvents: true,
-        startAfter: testStartV1HWMToken,
-        $_generateV2ResumeTokens: false
-    });
+    const csCursor = testDB.watch([], {startAfter: testStartV1HWMToken});
 
     // The 'drop' and 'rename' events coming from different shards are likely to get identical
     // resume tokens in v5.0.

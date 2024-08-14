@@ -93,7 +93,7 @@ db-contrib-tool setup-repro-env \
   --fallbackToMaster \
   --resmokeCmd "python buildscripts/resmoke.py" \
   --debug \
-  $last_continuous_arg 4.4
+  $last_continuous_arg 4.4 5.0.28
 
 # Certain build variants define additional multiversion_*_last_lts expansions in order to
 # be able to fetch a complete set of versions.

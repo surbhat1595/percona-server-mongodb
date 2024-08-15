@@ -465,10 +465,13 @@ bool QueryPlannerIXSelect::_compatible(const BSONElement& keyPatternElt,
             const auto* child = node->getChild(0);
             const MatchExpression::MatchType childtype = child->matchType();
 
-            // Can't index negations of MOD, REGEX, TYPE_OPERATOR, or ELEM_MATCH_VALUE.
+            // Can't index negations of MOD, REGEX, TYPE_OPERATOR, or ELEM_MATCH_VALUE; and, as
+            // above, we can't use a btree-indexed field for geo expressions (or their negations).
             if (MatchExpression::REGEX == childtype || MatchExpression::MOD == childtype ||
                 MatchExpression::TYPE_OPERATOR == childtype ||
-                MatchExpression::ELEM_MATCH_VALUE == childtype) {
+                MatchExpression::ELEM_MATCH_VALUE == childtype ||
+                MatchExpression::GEO == childtype || MatchExpression::GEO_NEAR == childtype ||
+                MatchExpression::INTERNAL_BUCKET_GEO_WITHIN == childtype) {
                 return false;
             }
 
@@ -677,8 +680,8 @@ bool QueryPlannerIXSelect::nodeIsSupportedBySparseIndex(const MatchExpression* q
     // equality-to-null semantics are that only literal nulls match. Sparse indexes contain
     // index keys for literal nulls, but not for missing elements.
     const auto typ = queryExpr->matchType();
-    if (typ == MatchExpression::EQ) {
-        const auto* queryExprEquality = static_cast<const EqualityMatchExpression*>(queryExpr);
+    if (typ == MatchExpression::EQ || typ == MatchExpression::GTE || typ == MatchExpression::LTE) {
+        const auto* queryExprEquality = static_cast<const ComparisonMatchExpression*>(queryExpr);
         // Equality to null inside an $elemMatch implies a match on literal 'null'.
         return isInElemMatch || !queryExprEquality->getData().isNull();
     } else if (queryExpr->matchType() == MatchExpression::MATCH_IN) {

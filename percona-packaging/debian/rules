@@ -11,7 +11,7 @@ export TOOLS_TAGS=ssl sasl
 export PORTABLE=1
 export USE_SSE=1
 export PATH := /usr/local/go/bin:$(PATH)
-export FULL_FEATURED=0
+export FIPSMODE=0
 CC = gcc-5
 CXX = g++-5
 #
@@ -25,9 +25,9 @@ override_dh_auto_clean:
 	dh_auto_clean
 	rm -fr $(PSMSRC)/bin
 	#rm -fr $(INSTALLDIR)
-ifeq ($(FULL_FEATURED),1)
+ifeq ($(FIPSMODE),1)
 	buildscripts/scons.py CC=$(CC) CXX=$(CXX) -C $(PSMSRC) -c --disable-warnings-as-errors --audit --release --ssl --opt -j$(NJOBS) --use-sasl-client CPPPATH=$(INSTALLDIR)/include \
-	--full-featured \
+	--enable-fipsmode \
 	LIBPATH=$(INSTALLDIR)/lib LINKFLAGS="$(LINKFLAGS)" --wiredtiger --inmemory --hotbackup $(PSM_TARGETS) || exit $?
 else
 	buildscripts/scons.py CC=$(CC) CXX=$(CXX) -C $(PSMSRC) -c --disable-warnings-as-errors --audit --release --ssl --opt -j$(NJOBS) --use-sasl-client CPPPATH=$(INSTALLDIR)/include \
@@ -38,9 +38,9 @@ endif
 
 # Finally PSMDB
 percona-server-mongodb:
-ifeq ($(FULL_FEATURED),1)
+ifeq ($(FIPSMODE),1)
 	buildscripts/scons.py CC=${CC} CXX=${CXX} --disable-warnings-as-errors --audit --release --ssl --opt=on -j$(NJOBS) \
-	--full-featured \
+	--enable-fipsmode \
 	--use-sasl-client --wiredtiger --inmemory --hotbackup \
 	CPPPATH=${INSTALLDIR}/include LIBPATH=${INSTALLDIR}/lib LINKFLAGS="${LINKFLAGS}" ${PSM_TARGETS} || exit $?
 else

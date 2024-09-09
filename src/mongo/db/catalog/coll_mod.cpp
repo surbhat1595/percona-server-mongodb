@@ -635,20 +635,9 @@ StatusWith<std::pair<ParsedCollModRequest, BSONObj>> parseCollModRequest(
     }
 
     if (auto mixedSchema = cmr.getTimeseriesBucketsMayHaveMixedSchemaData()) {
-        if (!gCollModTimeseriesBucketsMayHaveMixedSchemaData.isEnabled(
-                serverGlobalParams.featureCompatibility.acquireFCVSnapshot())) {
-            return {ErrorCodes::InvalidOptions,
-                    "The timeseriesBucketsMayHaveMixedSchemaData parameter is not enabled"};
-        }
-
         if (!isTimeseries) {
             return getOnlySupportedOnTimeseriesError(
                 CollMod::kTimeseriesBucketsMayHaveMixedSchemaDataFieldName);
-        }
-
-        if (!*mixedSchema) {
-            return {ErrorCodes::InvalidOptions,
-                    "Cannot set timeseriesBucketsMayHaveMixedSchemaData to false"};
         }
 
         parsed.timeseriesBucketsMayHaveMixedSchemaData = mixedSchema;
@@ -1066,7 +1055,7 @@ Status _collModInternal(OperationContext* opCtx,
             writableColl->repairInvalidIndexOptions(opCtx);
         for (const auto& indexWithInvalidOptions : indexesWithInvalidOptions) {
             const IndexDescriptor* desc =
-                coll->getIndexCatalog()->findIndexByName(opCtx, indexWithInvalidOptions);
+                writableColl->getIndexCatalog()->findIndexByName(opCtx, indexWithInvalidOptions);
             invariant(desc);
 
             // Notify the index catalog that the definition of this index changed.

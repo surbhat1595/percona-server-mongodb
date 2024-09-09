@@ -4,6 +4,7 @@
  * documents.
  *
  * @tags: [
+ *  resource_intensive,
  *  requires_sharding,
  *  assumes_balancer_off,
  *  uses_change_streams
@@ -12,7 +13,7 @@
 import {extendWorkload} from "jstests/concurrency/fsm_libs/extend_workload.js";
 import {fsm} from "jstests/concurrency/fsm_libs/fsm.js";
 import {
-    runWithManualRetriesIfInStepdownSuite,
+    runWithManualRetries,
     withSkipRetryOnNetworkError
 } from "jstests/concurrency/fsm_workload_helpers/stepdown_suite_helpers.js";
 import {$config as $baseConfig} from "jstests/concurrency/fsm_workloads/random_moveChunk_base.js";
@@ -33,11 +34,17 @@ export const $config = extendWorkload($baseConfig, function($config, $super) {
         const id = this.getIdForThread(collName);
 
         const doMultiUpdate = () => {
-            const result = db.runCommand(
-                {update: collName, updates: [{q: {x: id}, u: {$inc: {counter: 1}}, multi: true}]});
-            assert.commandWorked(result);
-            jsTest.log("tid:" + this.tid + " multiUpdate _id: " + id +
-                       " at operationTime: " + tojson(result.operationTime));
+            // moveChunk can kill the multiupdate command and return QueryPlanKilled, so retry in
+            // that case.
+            retryOnRetryableError(() => {
+                const result = db.runCommand({
+                    update: collName,
+                    updates: [{q: {x: id}, u: {$inc: {counter: 1}}, multi: true}]
+                });
+                assert.commandWorked(result);
+                jsTest.log("tid:" + this.tid + " multiUpdate _id: " + id +
+                           " at operationTime: " + tojson(result.operationTime));
+            }, 100, undefined, [ErrorCodes.QueryPlanKilled]);
         };
 
         if (TestData.runningWithShardStepdowns && !TestData.runInsideTransaction) {
@@ -121,7 +128,7 @@ export const $config = extendWorkload($baseConfig, function($config, $super) {
 
         if (TestData.runningWithShardStepdowns) {
             fsm.forceRunningOutsideTransaction(this);
-            runWithManualRetriesIfInStepdownSuite(() => {
+            runWithManualRetries(() => {
                 $super.states.init.apply(this, arguments);
             });
         } else {

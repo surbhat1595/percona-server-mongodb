@@ -4,7 +4,6 @@
  * @tags: [
  *   # We need a timeseries collection.
  *   requires_timeseries,
- *   featureFlagAggOutTimeseries,
  *   requires_persistence,
  * ]
  */
@@ -39,7 +38,7 @@ function runOut(dbName, sourceCollName, targetCollName, expectCommandWorked, tim
 }
 
 function getTempCollections() {
-    return testDB.getCollectionNames().filter(coll => coll.startsWith('tmp.agg_out'));
+    return testDB.getCollectionNames().filter(coll => coll.includes('tmp.agg_out'));
 }
 
 function failFn_sigkill() {

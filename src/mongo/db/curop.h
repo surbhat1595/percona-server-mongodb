@@ -355,7 +355,9 @@ public:
     BSONObj mongotCountVal = BSONObj();
     BSONObj mongotSlowQueryLog = BSONObj();
 
-    long long sortSpills{0};           // The total number of spills to disk from sort stages
+    long long sortSpills{0};      // The total number of spills from sort stages
+    long long sortSpillBytes{0};  // The total number of bytes spilled from sort stages.
+    // The spilled storage size after compression might be different from the bytes spilled.
     size_t sortTotalDataSizeBytes{0};  // The amount of data we've sorted in bytes
     long long keysSorted{0};           // The number of keys that we've sorted.
     long long collectionScans{0};      // The number of collection scans during query execution.
@@ -439,6 +441,10 @@ public:
 
     // Tracks the amount of spills by hash lookup in a pushed down lookup stage.
     int hashLookupSpillToDisk{0};
+
+    // Tracks the number of spilled bytes by hash lookup in a pushed down lookup stage. The spilled
+    // storage size after compression might be different from the bytes spilled.
+    long long hashLookupSpillToDiskBytes{0};
 
     // Details of any error (whether from an exception or a command returning failure).
     Status errInfo = Status::OK();
@@ -1029,13 +1035,15 @@ public:
 
     /**
      * Captures stats on the locker after transaction resources are unstashed to the operation
-     * context to be able to correctly ignore stats from outside this CurOp instance.
+     * context to be able to correctly ignore stats from outside this CurOp instance. Assumes that
+     * operation will only unstash transaction resources once.
      */
     void updateStatsOnTransactionUnstash();
 
     /**
      * Captures stats on the locker that happened during this CurOp instance before transaction
      * resources are stashed. Also cleans up stats taken when transaction resources were unstashed.
+     * Assumes that operation will only stash transaction resources once.
      */
     void updateStatsOnTransactionStash();
 
@@ -1095,10 +1103,10 @@ public:
     void setGenericCursor_inlock(GenericCursor gc);
 
     boost::optional<SingleThreadedLockStats> getLockStatsBase() const {
-        if (!_lockerStatsBase) {
+        if (!_resourceStatsBase) {
             return boost::none;
         }
-        return _lockerStatsBase->lockStats;
+        return _resourceStatsBase->lockStats;
     }
 
     void setTickSource_forTest(TickSource* tickSource) {
@@ -1126,9 +1134,18 @@ private:
     /**
      * A set of additive locker stats that CurOp tracks during it's lifecycle.
      */
-    struct AdditiveLockerStats {
-        void append(const AdditiveLockerStats& other);
-        void subtract(const AdditiveLockerStats& other);
+    struct AdditiveResourceStats {
+        /**
+         * Add stats that have accrued before unstashing the Locker for a transaction.
+         * Does not add timeQueuedForTickets, which is handled separately.
+         */
+        void addForUnstash(const AdditiveResourceStats& other);
+
+        /**
+         * Subtract stats that have accrued on this transaction's Locker since unstashing.
+         * Does not subtract timeQueuedForTickets, which is handled separately.
+         */
+        void subtractForStash(const AdditiveResourceStats& other);
 
         /**
          * Snapshot of locker lock stats.
@@ -1164,13 +1181,13 @@ private:
     /**
      * Collects and returns additive lockers stats
      */
-    static AdditiveLockerStats getAdditiveLockerStats(const Locker* locker);
+    static AdditiveResourceStats getAdditiveResourceStats(
+        const Locker* locker, const boost::optional<ExecutionAdmissionContext>& admCtx);
 
     /**
-     * Returns the time operation spends blocked waiting for locks and tickets. Also returns the
-     * retrieved time waiting for locks.
+     * Returns the time operation spends blocked waiting for locks and tickets.
      */
-    std::tuple<Milliseconds, Milliseconds> _getAndSumBlockedTimeTotal();
+    Milliseconds _sumBlockedTimeTotal();
 
     /**
      * Handles failpoints that check whether a command has completed or not.
@@ -1245,15 +1262,16 @@ private:
 
     std::string _planSummary;
 
-    // The lock stats being reported on the locker that accrued outside of this operation. This
-    // includes:
-    // * the snapshot of lock stats taken when this CurOp instance is pushed to a CurOpStack
-    // or the snapshot of lock stats taken when transaction resources are unstashed to this
+    // The resource stats being reported on the locker and admission context that accrued outside of
+    // this operation. This includes:
+    // * the snapshot of lock and admission stats taken when this CurOp instance is pushed to
+    // a CurOpStack
+    // * the snapshot of lock stats taken when transaction resources are unstashed to this
     // operation context (as positive)
     // * the snapshot of lock stats taken when transactions resources are stashed (as negative).
     //   This captures the locker activity that happened on this operation before the locker is
     //   released back to transaction resources.
-    boost::optional<AdditiveLockerStats> _lockerStatsBase;
+    boost::optional<AdditiveResourceStats> _resourceStatsBase;
 
     // _shouldDBProfileWithRateLimit can be called several times by shouldDBProfile and
     // completeAndLogOperation so to be consistent we need to cache random generated bool value.

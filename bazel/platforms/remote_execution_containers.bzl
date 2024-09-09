@@ -27,12 +27,6 @@ REMOTE_EXECUTION_CONTAINERS = {
         "dockerfile": "bazel/remote_execution_container/amazon_linux_2/dockerfile",
         "web-url": "https://quay.io/repository/mongodb/bazel-remote-execution/manifest/sha256:309525376d94d86406ea6e4f6e6ecb0bf9f5b678402516ca0ce286eed27887b9",
     },
-    "rhel7": {
-        "_COMMENT": "Uses rhel89 container",
-        "container-url": "docker://quay.io/mongodb/bazel-remote-execution@sha256:63d038364801f57030b875ffed6ab0b1a4e495d520fa08620048c6230d80eaf9",
-        "dockerfile": "bazel/remote_execution_container/rhel89/dockerfile",
-        "web-url": "https://quay.io/repository/mongodb/bazel-remote-execution/manifest/sha256:63d038364801f57030b875ffed6ab0b1a4e495d520fa08620048c6230d80eaf9",
-    },
     "rhel8": {
         "container-url": "docker://quay.io/mongodb/bazel-remote-execution@sha256:d712b0093205bbcb96d6c3dcea615b9fc4af7fd32ae68cf4d0ffbfc1d36533c2",
         "dockerfile": "bazel/remote_execution_container/rhel89/dockerfile",
@@ -62,5 +56,10 @@ REMOTE_EXECUTION_CONTAINERS = {
         "container-url": "docker://quay.io/mongodb/bazel-remote-execution@sha256:6c130acbd9016cf56a3c8bac8b6836663da93542dd1eb8fc6a44e33997774cdc",
         "dockerfile": "bazel/remote_execution_container/ubuntu22/dockerfile",
         "web-url": "https://quay.io/repository/mongodb/bazel-remote-execution/manifest/sha256:6c130acbd9016cf56a3c8bac8b6836663da93542dd1eb8fc6a44e33997774cdc",
+    },
+    "ubuntu24": {
+        "container-url": "docker://quay.io/mongodb/bazel-remote-execution@sha256:ed1400f93a93ad7ca5821aa3e1b0a0192532d420379c296ecb93ad504020037b",
+        "dockerfile": "bazel/remote_execution_container/ubuntu24/dockerfile",
+        "web-url": "https://quay.io/repository/mongodb/bazel-remote-execution/manifest/sha256:ed1400f93a93ad7ca5821aa3e1b0a0192532d420379c296ecb93ad504020037b",
     },
 }

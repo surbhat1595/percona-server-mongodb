@@ -965,6 +965,17 @@ void ReplicationCoordinatorImpl::_startDataReplication(OperationContext* opCtx) 
           "Initial sync required. Attempting to start initial sync...",
           "lastOpTime"_attr = lastOpTime,
           "isInitialSyncFlagSet"_attr = isInitialSyncFlagSet);
+
+    // We do not want to allow initial syncing if a node has previous data stored on it. This can
+    // cause us to hit a WT invariant where we attempt to set the oldest timestamp to a point past
+    // the stable timestamp. See SERVER-91841 for more details. Checking if the stable timestamp is
+    // null is an easy way to see if we have previous data stored on this node or not.
+    if (!opCtx->getServiceContext()->getStorageEngine()->getStableTimestamp().isNull()) {
+        LOGV2_FATAL_NOTRACE(9184100,
+                            "Previous data detected when attempting to start initial sync. Remove "
+                            "existing data in order to complete initial sync.");
+    }
+
     // Do initial sync.
     if (!_externalState->getTaskExecutor()) {
         LOGV2(21323, "Not running initial sync during test");
@@ -2369,8 +2380,10 @@ ReplicationCoordinator::StatusAndDuration ReplicationCoordinatorImpl::awaitRepli
         if (writeConcern.wTimeout == WriteConcernOptions::kNoTimeout) {
             return Date_t::max();
         }
-        return clockSource->now() + clockSource->getPrecision() +
-            Milliseconds{writeConcern.wTimeout};
+        if (writeConcern.wTimeout == WriteConcernOptions::kNoWaiting) {
+            return clockSource->now();
+        }
+        return clockSource->now() + clockSource->getPrecision() + writeConcern.wTimeout.duration();
     }();
 
     const auto opCtxDeadline = opCtx->getDeadline();
@@ -2805,11 +2818,11 @@ StatusWith<OpTime> ReplicationCoordinatorImpl::getLatestWriteOpTime(
     if (!canAcceptNonLocalWrites()) {
         return {ErrorCodes::NotWritablePrimary, "Not primary so can't get latest write optime"};
     }
-    const auto& oplog = LocalOplogInfo::get(opCtx)->getCollection();
+    const auto& oplog = LocalOplogInfo::get(opCtx)->getRecordStore();
     if (!oplog) {
         return {ErrorCodes::NamespaceNotFound, "oplog collection does not exist"};
     }
-    auto latestOplogTimestampSW = oplog->getRecordStore()->getLatestOplogTimestamp(opCtx);
+    auto latestOplogTimestampSW = oplog->getLatestOplogTimestamp(opCtx);
     if (!latestOplogTimestampSW.isOK()) {
         return latestOplogTimestampSW.getStatus();
     }
@@ -4283,8 +4296,10 @@ Status ReplicationCoordinatorImpl::_doReplSetReconfig(OperationContext* opCtx,
 
     if (!force && !skipSafetyChecks && !MONGO_unlikely(omitConfigQuorumCheck.shouldFail())) {
         LOGV2(4509600, "Executing quorum check for reconfig");
-        status =
-            checkQuorumForReconfig(_replExecutor.get(), newConfig, myIndex, _topCoord->getTerm());
+        lk.lock();
+        auto term = _topCoord->getTerm();
+        lk.unlock();
+        status = checkQuorumForReconfig(_replExecutor.get(), newConfig, myIndex, term);
         if (!status.isOK()) {
             LOGV2_ERROR(21421, "replSetReconfig failed", "error"_attr = status);
             return status;

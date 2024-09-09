@@ -620,7 +620,7 @@ void TransactionParticipant::performNoopWrite(OperationContext* opCtx, StringDat
     }
 
     {
-        AutoGetOplog oplogWrite(opCtx, OplogAccessMode::kWrite);
+        AutoGetOplogFastPath oplogWrite(opCtx, OplogAccessMode::kWrite);
         uassert(ErrorCodes::NotWritablePrimary,
                 "Not primary when performing noop write for {}"_format(msg),
                 replCoord->canAcceptWritesForDatabase(opCtx, DatabaseName::kAdmin));
@@ -1395,7 +1395,6 @@ TransactionParticipant::TxnResources::TxnResources(WithLock wl,
 
     _apiParameters = APIParameters::get(opCtx);
     _readConcernArgs = repl::ReadConcernArgs::get(opCtx);
-    _execCtrlCtx = ExecutionAdmissionContext::get(opCtx);
 }
 
 TransactionParticipant::TxnResources::~TxnResources() {
@@ -1557,7 +1556,6 @@ void TransactionParticipant::Participant::stashTransactionResources(OperationCon
 void TransactionParticipant::Participant::_releaseTransactionResourcesToOpCtx(
     OperationContext* opCtx,
     MaxLockTimeout maxLockTimeout,
-    AcquireTicket acquireTicket,
     bool forRecoveryPreparedTxnApplication) {
     // Transaction resources already exist for this transaction.  Transfer them from the
     // stash to the operation context.
@@ -1613,19 +1611,15 @@ void TransactionParticipant::Participant::_releaseTransactionResourcesToOpCtx(
         }
     }
 
-    if (acquireTicket == AcquireTicket::kSkip) {
-        tempTxnResourceStash->executionControlContext().copyTo(opCtx,
-                                                               AdmissionContext::Priority::kExempt);
-    } else {
-        tempTxnResourceStash->executionControlContext().copyTo(opCtx);
-    }
-
     tempTxnResourceStash->release(opCtx);
     releaseOnError.dismiss();
 }
 
 void TransactionParticipant::Participant::unstashTransactionResources(
-    OperationContext* opCtx, const std::string& cmdName, bool forRecoveryPreparedTxnApplication) {
+    OperationContext* opCtx,
+    const std::string& cmdName,
+    bool forRecoveryPreparedTxnApplication,
+    bool forUnyield) {
     invariant(!opCtx->getClient()->isInDirectClient());
     invariant(opCtx->getTxnNumber());
 
@@ -1670,36 +1664,44 @@ void TransactionParticipant::Participant::unstashTransactionResources(
     _checkIsCommandValidWithTxnState({*opCtx->getTxnNumber()}, cmdName);
     if (o().txnResourceStash) {
         MaxLockTimeout maxLockTimeout;
-        // Default is we should acquire ticket.
-        AcquireTicket acquireTicket{AcquireTicket::kNoSkip};
 
         if (opCtx->writesAreReplicated()) {
             // Primaries should respect the transaction lock timeout, since it can prevent
             // the transaction from making progress.
             maxLockTimeout = MaxLockTimeout::kAllowed;
-            // commitTransaction and abortTransaction commands can skip ticketing mechanism as they
-            // don't acquire any new storage resources (except writing to oplog) but they release
-            // any claimed storage resources.
-            // Prepared transactions should not acquire ticket. Else, it can deadlock with other
-            // non-transactional operations that have exhausted the write tickets and are blocked on
-            // them due to prepare or lock conflict.
-            if (o().txnState.isPrepared() || cmdName == "commitTransaction" ||
-                cmdName == "abortTransaction") {
-                acquireTicket = AcquireTicket::kSkip;
-            }
         } else {
             // Max lock timeout must not be set on secondaries, since secondary oplog application
             // cannot fail.
             maxLockTimeout = MaxLockTimeout::kNotAllowed;
         }
 
+        // When we release transaction resources to the opCtx, the default behavior is to reacquire
+        // admission tickets. This scoped priority allows us to conditionally skip acquisition for
+        // specific commands.
+        boost::optional<ScopedAdmissionPriority<ExecutionAdmissionContext>> admissionPriority;
+        if (o().txnState.isPrepared() || cmdName == "commitTransaction" ||
+            cmdName == "abortTransaction") {
+            // commitTransaction and abortTransaction commands can skip ticketing mechanism as they
+            // don't acquire any new storage resources (except writing to oplog) but they release
+            // any claimed storage resources.
+            // Prepared transactions should not acquire ticket. Else, it can deadlock with other
+            // non-transactional operations that have exhausted the write tickets and are blocked on
+            // them due to prepare or lock conflict.
+            admissionPriority.emplace(opCtx, AdmissionContext::Priority::kExempt);
+        }
+
         _releaseTransactionResourcesToOpCtx(
-            opCtx, maxLockTimeout, acquireTicket, forRecoveryPreparedTxnApplication);
+            opCtx, maxLockTimeout, forRecoveryPreparedTxnApplication);
         stdx::lock_guard<Client> lg(*opCtx->getClient());
         o(lg).transactionMetricsObserver.onUnstash(ServerTransactionsMetrics::get(opCtx),
                                                    opCtx->getServiceContext()->getTickSource());
         return;
     }
+
+    uassert(9183900,
+            str::stream()
+                << "Expected to have a transaction resource stash when unyielding, but did not.",
+            !forUnyield);
 
     // If we have no transaction resources then we cannot be prepared. If we're not in progress,
     // we don't do anything else.
@@ -1774,8 +1776,9 @@ void TransactionParticipant::Participant::refreshLocksForPreparedTransaction(
     invariant(o().txnResourceStash);
     invariant(o().txnState.isPrepared());
 
-    _releaseTransactionResourcesToOpCtx(
-        opCtx, MaxLockTimeout::kNotAllowed, AcquireTicket::kSkip, false);
+    ScopedAdmissionPriority<ExecutionAdmissionContext> skipTicketAcquisition(
+        opCtx, AdmissionContext::Priority::kExempt);
+    _releaseTransactionResourcesToOpCtx(opCtx, MaxLockTimeout::kNotAllowed, false);
 
     // Transfer the txn resource back from the operation context to the stash.
     auto stashStyle =

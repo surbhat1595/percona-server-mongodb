@@ -132,9 +132,6 @@ selector:
   - jstests/concurrency/fsm_workloads/snapshot_read_kill_op_only.js
   - jstests/concurrency/fsm_workloads/snapshot_read_kill_operations.js
 
-  # Time-series collections are not supported on mongos.
-  - jstests/concurrency/fsm_workloads/create_timeseries_collection.js
-
   exclude_with_any_tags:
   - assumes_balancer_off
   - assumes_against_mongod_not_mongos
@@ -210,6 +207,7 @@ executor:
         enableElectionHandoff: 0
         roleGraphInvalidationIsFatal: 1
         queryAnalysisWriterIntervalSecs: 1
+        queryAnalysisSamplerConfigurationRefreshSecs: 1
         defaultConfigCommandTimeoutMS: 90000
         skipDroppingHashedShardKeyIndex: true
     num_rs_nodes_per_shard: 3

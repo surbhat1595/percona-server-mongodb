@@ -48,7 +48,6 @@
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/timestamp.h"
 #include "mongo/bson/util/builder_fwd.h"
-#include "mongo/db/admission/execution_admission_context.h"
 #include "mongo/db/api_parameters.h"
 #include "mongo/db/catalog/uncommitted_multikey.h"
 #include "mongo/db/client.h"
@@ -240,10 +239,6 @@ public:
             return _recoveryUnit.get();
         }
 
-        const ExecutionAdmissionContext& executionControlContext() const {
-            return _execCtrlCtx;
-        }
-
         /**
          * Releases stashed transaction state onto 'opCtx'. Must only be called once.
          * Ephemerally holds the Client lock associated with opCtx.
@@ -274,7 +269,6 @@ public:
         APIParameters _apiParameters;
         repl::ReadConcernArgs _readConcernArgs;
         WriteUnitOfWork::RecoveryUnitState _ruState;
-        ExecutionAdmissionContext _execCtrlCtx;
     };  // class TxnResources
 
     /**
@@ -460,8 +454,6 @@ public:
     public:
         // Indicates whether the future lock requests should have timeouts.
         enum class MaxLockTimeout { kNotAllowed, kAllowed };
-        // Indicates whether we should opt out of the ticket mechanism.
-        enum class AcquireTicket { kNoSkip, kSkip };
 
         /**
          * Returns a Participant constructed with the TransactionParticipant for the session
@@ -624,7 +616,8 @@ public:
          */
         void unstashTransactionResources(OperationContext* opCtx,
                                          const std::string& cmdName,
-                                         bool forRecoveryPreparedTxnApplication = false);
+                                         bool forRecoveryPreparedTxnApplication = false,
+                                         bool forUnyield = false);
 
         /**
          * Puts a transaction into a prepared state and returns the prepareTimestamp and the list of
@@ -829,6 +822,10 @@ public:
 
         std::vector<repl::ReplOperation> getTransactionOperationsForTest() const {
             return p().transactionOperations.getOperationsForTest();
+        }
+
+        size_t getTransactionOperationsCount() const {
+            return p().transactionOperations.getOperationsCount();
         }
 
         size_t getNumberOfPrePostImagesToWriteForTest() const {
@@ -1093,11 +1090,6 @@ public:
          *  - MaxLockTimeout::kAllowed will set the timeout as
          *    MaxTransactionLockRequestTimeoutMillis.
          *
-         * acquireTicket will determine we should acquire ticket on unstashing the transaction
-         * resources.
-         *  - AcquireTicket::kSkip will not acquire ticket.
-         *  - AcquireTicket::kNoSkip will retain the default behavior which is to acquire ticket.
-         *
          * Below is the expected behavior.
          * -----------------------------------------------------------------------------
          * |                |                       |               |                  |
@@ -1106,15 +1098,12 @@ public:
          * |----------------|-----------------------|---------------|------------------|
          * |                | Commit/   | Other Txn |               |                  |
          * |                | Abort Cmd | Cmds      |               |                  |
-         * |                |-----------------------|               |                  |
-         * |acquireTicket   | kSkip     |  kNoSkip  |  kNoSkip      |     kSkip        |
          * |----------------|-----------------------|---------------|------------------|
          * |maxLockTimeout  |     kAllowed          | kNotAllowed   |  kNotAllowed     |
          * -----------------------------------------------------------------------------
          */
         void _releaseTransactionResourcesToOpCtx(OperationContext* opCtx,
                                                  MaxLockTimeout maxLockTimeout,
-                                                 AcquireTicket acquireTicket,
                                                  bool forRecoveryPreparedTxnApplication);
 
         TransactionParticipant::PrivateState& p() {

@@ -9,9 +9,8 @@ selector:
   roots:
   - jstests/core/**/*.js
   - jstests/core_sharding/**/*.js
-  # TODO: SERVER-86059 Support tracking unsharded collections with FLE in the sharding catalog
-  # - jstests/fle2/**/*.js
-  # - src/mongo/db/modules/*/jstests/fle2/**/*.js
+  - jstests/fle2/**/*.js
+  - src/mongo/db/modules/*/jstests/fle2/**/*.js
   exclude_files:
   # These tests are run in sharded_jscore_txns.
   - jstests/core/txns/**/*.js
@@ -102,25 +101,25 @@ executor:
     shell_options:
       eval: >-
         await import("jstests/libs/override_methods/implicitly_retry_on_migration_in_progress.js");
-        await import("jstests/libs/override_methods/implicitly_retry_on_config_transition_errors.js");
+        await import("jstests/libs/override_methods/implicitly_retry_on_shard_transition_errors.js");
       global_vars:
         TestData:
-          transitioningConfigShard: true
+          shardsAddedRemoved: true
   hooks:
-  - class: ContinuousAddRemoveShard
-    random_balancer_on: false
-    transition_configsvr: true
-    move_primary_comment: *movePrimaryComment
-  - class: CheckReplDBHash
-  - class: CheckMetadataConsistencyInBackground
-    shell_options:
-      global_vars:
-        TestData:
-          transitioningConfigShard: true
-  - class: ValidateCollections
-  - class: CheckOrphansDeleted
-  - class: CleanEveryN
-    n: 20
+    - class: ContinuousAddRemoveShard
+      random_balancer_on: false
+      transition_configsvr: true
+      move_primary_comment: *movePrimaryComment
+    - class: CheckReplDBHash
+    - class: CheckMetadataConsistencyInBackground
+      shell_options:
+        global_vars:
+          TestData:
+            shardsAddedRemoved: true
+    - class: ValidateCollections
+    - class: CheckOrphansDeleted
+    - class: CleanEveryN
+      n: 20
   fixture:
     class: ShardedClusterFixture
     config_shard: "any"
@@ -132,6 +131,7 @@ executor:
       set_parameters:
         enableTestCommands: 1
         featureFlagReshardingForTimeseries: true
+        reshardingMinimumOperationDurationMillis: 0
         failpoint.movePrimaryFailIfNeedToCloneMovableCollections:
           data:
             comment: *movePrimaryComment

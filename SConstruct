@@ -2511,12 +2511,12 @@ if not env.TargetOSIs('windows'):
     env["LINKCOM"] = env["LINKCOM"].replace("$LINKFLAGS", "$PROGLINKFLAGS")
     env["PROGLINKFLAGS"] = ['$LINKFLAGS']
 
-    # CPPFLAGS is used for assembler commands, this condition below assumes assembler files
+    # ASPPFLAGS is used for assembler commands, this condition below assumes assembler files
     # will be only directly assembled in librarys and not programs
     if link_model.startswith("dynamic"):
-        env.Append(CPPFLAGS=["-fPIC"])
+        env.Append(ASPPFLAGS=["-fPIC"])
     else:
-        env.Append(CPPFLAGS=["-fPIE"])
+        env.Append(ASPPFLAGS=["-fPIE"])
 
 # When it is necessary to supply additional SHLINKFLAGS without modifying the toolset default,
 # following appends contents of SHLINKFLAGS_EXTRA variable to the linker command
@@ -4551,7 +4551,7 @@ def doConfigure(myenv):
             # reporting thread leaks, which we have because we don't
             # do a clean shutdown of the ServiceContext.
             #
-            tsan_options = f"abort_on_error=1:disable_coredump=0:handle_abort=1:halt_on_error=1:report_thread_leaks=0:die_after_fork=0:history_size=5:suppressions={myenv.File('#etc/tsan.suppressions').abspath}"
+            tsan_options = f"abort_on_error=1:disable_coredump=0:handle_abort=1:halt_on_error=1:report_thread_leaks=0:die_after_fork=0:history_size=4:suppressions={myenv.File('#etc/tsan.suppressions').abspath}"
             myenv['ENV']['TSAN_OPTIONS'] = tsan_options + symbolizer_option
             myenv.AppendUnique(CPPDEFINES=['THREAD_SANITIZER'])
 

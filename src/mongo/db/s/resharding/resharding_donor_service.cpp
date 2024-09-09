@@ -144,7 +144,7 @@ Timestamp generateMinFetchTimestamp(OperationContext* opCtx, const NamespaceStri
             AutoGetDb db(opCtx, sourceNss.dbName(), MODE_IX);
             Lock::CollectionLock collLock(opCtx, sourceNss, MODE_S);
 
-            AutoGetOplog oplogWrite(opCtx, OplogAccessMode::kWrite);
+            AutoGetOplogFastPath oplogWrite(opCtx, OplogAccessMode::kWrite);
 
             const std::string msg = str::stream()
                 << "All future oplog entries on the namespace " << sourceNss.toStringForErrorMsg()
@@ -236,6 +236,11 @@ public:
     void refreshCollectionPlacementInfo(OperationContext* opCtx,
                                         const NamespaceString& sourceNss) override {
         onCollectionPlacementVersionMismatch(opCtx, sourceNss, boost::none);
+    }
+
+    std::unique_ptr<ShardingRecoveryService::BeforeReleasingCustomAction>
+    getOnReleaseCriticalSectionCustomAction() override {
+        return std::make_unique<ShardingRecoveryService::FilteringMetadataClearer>();
     }
 };
 
@@ -431,29 +436,35 @@ ExecutorFuture<void> ReshardingDonorService::DonorStateMachine::_finishReshardin
 
                {
                    auto opCtx = _cancelableOpCtxFactory->makeOperationContext(&cc());
-                   std::initializer_list<NamespaceString> namespacesToRefresh{
-                       _metadata.getSourceNss(), _metadata.getTempReshardingNss()};
 
-                   // Clear filtering metadata for the source and temp resharding nss.
-                   for (const auto& nss : namespacesToRefresh) {
-                       AutoGetCollection autoColl(opCtx.get(), nss, MODE_IX);
+                   // Clear filtering metadata for the temp resharding namespace;
+                   // We force a refresh to make sure that the placement information is updated in
+                   // cache after abort decision before the donor state document is deleted.
+                   {
+                       AutoGetCollection autoColl(
+                           opCtx.get(), _metadata.getTempReshardingNss(), MODE_IX);
                        CollectionShardingRuntime::assertCollectionLockedAndAcquireExclusive(
-                           opCtx.get(), nss)
+                           opCtx.get(), _metadata.getTempReshardingNss())
                            ->clearFilteringMetadata(opCtx.get());
                    }
 
+                   const auto onReleaseCriticalSectionAction =
+                       _externalState->getOnReleaseCriticalSectionCustomAction();
                    ShardingRecoveryService::get(opCtx.get())
                        ->releaseRecoverableCriticalSection(
                            opCtx.get(),
                            _metadata.getSourceNss(),
                            _critSecReason,
-                           ShardingCatalogClient::kLocalWriteConcern);
+                           ShardingCatalogClient::kLocalWriteConcern,
+                           *onReleaseCriticalSectionAction);
 
                    _metrics->setEndFor(ReshardingMetrics::TimedPhase::kCriticalSection,
                                        getCurrentTime());
 
                    // We force a refresh to make sure that the placement information is updated in
                    // cache after abort decision before the donor state document is deleted.
+                   std::initializer_list<NamespaceString> namespacesToRefresh{
+                       _metadata.getSourceNss(), _metadata.getTempReshardingNss()};
                    for (const auto& nss : namespacesToRefresh) {
                        _externalState->refreshCollectionPlacementInfo(opCtx.get(), nss);
                        _externalState->waitForCollectionFlush(opCtx.get(), nss);
@@ -696,7 +707,7 @@ void ReshardingDonorService::DonorStateMachine::
         auto oplog = generateOplogEntry();
         writeConflictRetry(
             rawOpCtx, "ReshardingBeginOplog", NamespaceString::kRsOplogNamespace, [&] {
-                AutoGetOplog oplogWrite(rawOpCtx, OplogAccessMode::kWrite);
+                AutoGetOplogFastPath oplogWrite(rawOpCtx, OplogAccessMode::kWrite);
                 WriteUnitOfWork wunit(rawOpCtx);
                 const auto& oplogOpTime = repl::logOp(rawOpCtx, &oplog);
                 uassert(5052101,
@@ -825,7 +836,7 @@ void ReshardingDonorService::DonorStateMachine::
                     "ReshardingBlockWritesOplog",
                     NamespaceString::kRsOplogNamespace,
                     [&] {
-                        AutoGetOplog oplogWrite(rawOpCtx, OplogAccessMode::kWrite);
+                        AutoGetOplogFastPath oplogWrite(rawOpCtx, OplogAccessMode::kWrite);
                         WriteUnitOfWork wunit(rawOpCtx);
                         const auto& oplogOpTime = repl::logOp(rawOpCtx, &oplog);
                         uassert(5279507,

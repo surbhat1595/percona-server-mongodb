@@ -130,9 +130,7 @@ variables:
 # If a variant is listed here and has a push task, mongocryptd is pushed
 - mongocryptd_variants: &mongocryptd_variants
   - enterprise-amazon2
-  - enterprise-amazon2-openssl111
   - enterprise-amazon2-arm64
-  - enterprise-amazon2-arm64-openssl111
   - enterprise-amazon2023
   # TODO(SERVER-85904) - enterprise-amazon2023-lto
   - enterprise-amazon2023-arm64
@@ -141,20 +139,23 @@ variables:
   - enterprise-linux-64-amazon-ami
   - enterprise-macos
   - enterprise-macos-arm64
-  - enterprise-rhel-79-64-bit
   - enterprise-rhel-81-ppc64le
-  - enterprise-rhel-80-64-bit
-  - enterprise-rhel-80-64-bit-coverage
-  - enterprise-rhel-80-64-bit-suggested
-  - enterprise-rhel-82-arm64
+  - enterprise-rhel-8-64-bit
+  - enterprise-rhel-8-64-bit-coverage
+  - enterprise-rhel-8-64-bit-suggested
+  - enterprise-rhel-8-arm64
   - enterprise-rhel-83-s390x
   - enterprise-rhel-90-64-bit
   - enterprise-rhel-90-arm64
+  - enterprise-rhel-93-64-bit
+  - enterprise-rhel-93-arm64
   - enterprise-suse15-64
   - enterprise-ubuntu2004-arm64
   - enterprise-ubuntu2204-arm64
+  - enterprise-ubuntu2404-arm64
   - enterprise-ubuntu2004-64
   - enterprise-ubuntu2204-64
+  - enterprise-ubuntu2404
   - enterprise-windows
   - enterprise-windows-debug-unoptimized
   - enterprise-windows-inmem

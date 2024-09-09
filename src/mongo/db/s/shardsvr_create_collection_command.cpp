@@ -58,6 +58,7 @@
 #include "mongo/db/timeseries/timeseries_gen.h"
 #include "mongo/db/timeseries/timeseries_options.h"
 #include "mongo/s/request_types/sharded_ddl_commands_gen.h"
+#include "mongo/s/shard_version_factory.h"
 #include "mongo/s/sharding_feature_flags_gen.h"
 #include "mongo/s/sharding_state.h"
 #include "mongo/util/assert_util.h"
@@ -101,9 +102,39 @@ bool requestsShouldBeSerialized(OperationContext* opCtx,
     return true;
 }
 
+boost::optional<ScopedSetShardRole> setShardRoleToShardVersionIgnoredIfNeeded(
+    OperationContext* opCtx, const NamespaceString& nss) {
+    auto& oss = OperationShardingState::get(opCtx);
+    if (!oss.getShardVersion(nss) && OperationShardingState::isComingFromRouter(opCtx)) {
+        return ScopedSetShardRole{opCtx,
+                                  nss,
+                                  ShardVersionFactory::make(ChunkVersion::IGNORED(), boost::none),
+                                  oss.getDbVersion(nss.dbName())};
+    }
+    return boost::none;
+}
+
 void runCreateCommandDirectClient(OperationContext* opCtx,
                                   NamespaceString ns,
                                   const CreateCommand& cmd) {
+
+    // Set the ShardVersion to IGNORED on the OperationShardingState for the given namespace to
+    // make sure we check the critical section once the ShardVersion is checked. Note that the
+    // critical section will only be checked if there is a ShardVersion attached to the
+    // OperationShardingState.
+    // It's important to check the critical section because it's the mechanism used to serialize the
+    // current create operation with other DDL operations.
+    auto shardRole = setShardRoleToShardVersionIgnoredIfNeeded(opCtx, ns);
+
+    // Preventively set the ShardVersion to IGNORED for the timeseries buckets namespace as well.
+    auto bucketsShardRole = [&]() -> boost::optional<ScopedSetShardRole> {
+        if (cmd.getTimeseries() && !ns.isTimeseriesBucketsCollection()) {
+            return setShardRoleToShardVersionIgnoredIfNeeded(opCtx,
+                                                             ns.makeTimeseriesBucketsNamespace());
+        }
+        return boost::none;
+    }();
+
     BSONObj createRes;
     DBDirectClient localClient(opCtx);
     // Forward the api check rules enforced by the client
@@ -116,13 +147,10 @@ bool isAlwaysUntracked(OperationContext* opCtx,
                        NamespaceString&& nss,
                        const ShardsvrCreateCollection& request) {
     bool isView = request.getViewOn().has_value();
-    bool hasApiParams = APIParameters::get(opCtx).getParamsPassed();
 
     // TODO SERVER-83713 Reconsider isFLE2StateCollection check
     // TODO SERVER-83714 Reconsider isFLE2StateCollection check
-    // TODO SERVER-86018 Remove hasApiParams
-    return isView || nss.isFLE2StateCollection() || nss.isNamespaceAlwaysUntracked() ||
-        hasApiParams;
+    return isView || nss.isFLE2StateCollection() || nss.isNamespaceAlwaysUntracked();
 }
 
 class ShardsvrCreateCollectionCommand final : public TypedCommand<ShardsvrCreateCollectionCommand> {

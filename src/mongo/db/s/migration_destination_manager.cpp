@@ -1386,10 +1386,12 @@ void MigrationDestinationManager::_migrateDriver(OperationContext* outerOpCtx,
         // deleted.
         const auto rangeDeletionWaitDeadline =
             outerOpCtx->getServiceContext()->getFastClockSource()->now() +
-            Milliseconds(receiveChunkWaitForRangeDeleterTimeoutMS.load());
+            Milliseconds(drainOverlappingRangeDeletionsOnStartTimeoutMS.load());
 
-        while (rangedeletionutil::checkForConflictingDeletions(
-            outerOpCtx, range, donorCollectionOptionsAndIndexes.uuid)) {
+        while (runWithoutSession(outerOpCtx, [&] {
+            return rangedeletionutil::checkForConflictingDeletions(
+                outerOpCtx, range, donorCollectionOptionsAndIndexes.uuid);
+        })) {
             uassert(ErrorCodes::ResumableRangeDeleterDisabled,
                     "Failing migration because the disableResumableRangeDeleter server "
                     "parameter is set to true on the recipient shard, which contains range "
@@ -2019,7 +2021,11 @@ void MigrationDestinationManager::awaitCriticalSectionReleaseSignalAndCompleteMi
     const auto critSecReason = criticalSectionReason(*_sessionId);
 
     ShardingRecoveryService::get(opCtx)->releaseRecoverableCriticalSection(
-        opCtx, _nss, critSecReason, ShardingCatalogClient::kMajorityWriteConcern);
+        opCtx,
+        _nss,
+        critSecReason,
+        ShardingCatalogClient::kMajorityWriteConcern,
+        ShardingRecoveryService::NoCustomAction());
 
     const auto timeInCriticalSectionMs = timeInCriticalSection.millis();
     ShardingStatistics::get(opCtx).totalRecipientCriticalSectionTimeMillis.addAndFetch(

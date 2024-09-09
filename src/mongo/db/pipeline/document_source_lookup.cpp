@@ -160,13 +160,16 @@ NamespaceString parseLookupFromAndResolveNamespace(const BSONElement& elem,
                                      elem.embeddedObject());
     auto nss = NamespaceStringUtil::deserialize(spec.getDb().value_or(DatabaseName()),
                                                 spec.getColl().value_or(""));
+    // In the cases nss == config.collections and nss == config.chunks we can proceed with the
+    // lookup as the merge will be done on the config server
+    bool isConfigSvrSupportedCollection = nss == NamespaceString::kConfigsvrCollectionsNamespace ||
+        nss == NamespaceString::kConfigsvrChunksNamespace;
     uassert(
         ErrorCodes::FailedToParse,
         str::stream() << "$lookup with syntax {from: {db:<>, coll:<>},..} is not supported for db: "
                       << nss.dbName().toStringForErrorMsg() << " and coll: " << nss.coll(),
         nss.isConfigDotCacheDotChunks() || nss == NamespaceString::kRsOplogNamespace ||
-            nss == NamespaceString::kTenantMigrationOplogView ||
-            nss == NamespaceString::kConfigsvrCollectionsNamespace);
+            nss == NamespaceString::kTenantMigrationOplogView || isConfigSvrSupportedCollection);
     return nss;
 }
 
@@ -955,12 +958,14 @@ Pipeline::SourceContainer::iterator DocumentSourceLookUp::doOptimizeAt(
     bool isMatchOnlyOnAs = true;
     auto computeWhetherMatchOnAs = [&isMatchOnlyOnAs, &outputPath](MatchExpression* expression,
                                                                    std::string path) -> void {
-        // If 'expression' is the child of a $elemMatch, we cannot internalize the $match. For
-        // example, {b: {$elemMatch: {$gt: 1, $lt: 4}}}, where "b" is our "_as" field. This is
-        // because there's no way to modify the expression to be a match just on 'b'--we cannot
-        // change the path to an empty string, or remove the node entirely.
-        if (expression->matchType() == MatchExpression::ELEM_MATCH_VALUE ||
-            expression->matchType() == MatchExpression::ELEM_MATCH_OBJECT) {
+        // There are certain situations where this rewrite would not be correct. For example,
+        // if 'expression' is the child of a value $elemMatch, we cannot internalize the $match.
+        // Consider {b: {$elemMatch: {$gt: 1, $lt: 4}}}, where "b" is our "_as" field. This rewrite
+        // is not supported because there's no way to modify the expression to be a match just on
+        // 'b'--we cannot change the path to an empty string, or remove the node entirely.
+        // For other internal nodes with paths, we don't support the rewrite to keep the
+        // descendMatchOnPath implementation simple.
+        if (MatchExpression::isInternalNodeWithPath(expression->matchType())) {
             isMatchOnlyOnAs = false;
         }
         if (expression->numChildren() == 0) {

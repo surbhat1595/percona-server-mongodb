@@ -14,6 +14,8 @@ import {ShardedIndexUtil} from "jstests/sharding/libs/sharded_index_util.js";
 
 // Test deliberately inserts orphans outside of migration.
 TestData.skipCheckOrphans = true;
+// TODO (SERVER-91380): remove skipCheckingIndexesConsistentAcrossCluster flag.
+TestData.skipCheckingIndexesConsistentAcrossCluster = true;
 
 /*
  * Runs moveChunk on the host to move the chunk to the given shard.

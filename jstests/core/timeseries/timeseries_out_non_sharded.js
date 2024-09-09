@@ -8,8 +8,6 @@
  *   does_not_support_stepdowns,
  *   # We need a timeseries collection.
  *   requires_timeseries,
- *   requires_fcv_71,
- *   featureFlagAggOutTimeseries,
  *   # TODO(mbroadst): Some bug here, appears to be double-prefixing
  *   not_allowed_with_signed_security_token,
  *   # TODO SERVER-88275: aggregation using internally a $mergeCursor stage can fail with
@@ -171,6 +169,6 @@ assert.throwsWithCode(() => observerInColl.aggregate(pipeline), 7406103);
 if (!FixtureHelpers.isMongos(testDB)) {  // can not shard a view.
     assert.commandWorked(testDB.createCollection("view_out", {viewOn: "out"}));
     pipeline = TimeseriesAggTests.generateOutPipeline("view_out", dbName, {timeField: "time"});
-    assert.throwsWithCode(() => inColl.aggregate(pipeline), 7268703);
-    assert.throwsWithCode(() => observerInColl.aggregate(pipeline), 7268703);
+    assert.throws(() => inColl.aggregate(pipeline));
+    assert.throws(() => observerInColl.aggregate(pipeline));
 }

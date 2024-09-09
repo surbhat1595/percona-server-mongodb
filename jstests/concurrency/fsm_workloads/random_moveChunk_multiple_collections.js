@@ -2,6 +2,7 @@
  * Perform continuous moveChunk on multiple collections/databases.
  *
  * @tags: [
+ *  resource_intensive,
  *  requires_sharding,
  *  assumes_balancer_off,
  *  does_not_support_add_remove_shards,
@@ -10,7 +11,7 @@
 import {extendWorkload} from "jstests/concurrency/fsm_libs/extend_workload.js";
 import {fsm} from "jstests/concurrency/fsm_libs/fsm.js";
 import {
-    runWithManualRetriesIfInStepdownSuite
+    runWithManualRetries
 } from "jstests/concurrency/fsm_workload_helpers/stepdown_suite_helpers.js";
 import {$config as $baseConfig} from "jstests/concurrency/fsm_workloads/random_moveChunk_base.js";
 
@@ -39,7 +40,7 @@ export const $config = extendWorkload($baseConfig, function($config, $super) {
                 collName = collNames[j];
                 if (TestData.runningWithShardStepdowns) {
                     fsm.forceRunningOutsideTransaction(this);
-                    runWithManualRetriesIfInStepdownSuite(() => {
+                    runWithManualRetries(() => {
                         $super.states.init.apply(this, [db, collName, connCache]);
                     });
                 } else {

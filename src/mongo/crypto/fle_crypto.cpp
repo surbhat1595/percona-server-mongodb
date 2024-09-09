@@ -89,6 +89,7 @@ extern "C" {
 #include "mongo/crypto/aead_encryption.h"
 #include "mongo/crypto/encryption_fields_gen.h"
 #include "mongo/crypto/encryption_fields_util.h"
+#include "mongo/crypto/encryption_fields_validation.h"
 #include "mongo/crypto/fle_crypto_predicate.h"
 #include "mongo/crypto/fle_data_frames.h"
 #include "mongo/crypto/fle_field_schema_gen.h"
@@ -931,7 +932,7 @@ std::unique_ptr<Edges> getEdges(FLE2RangeInsertSpec spec, int sparsity) {
     auto element = spec.getValue().getElement();
     auto minBound = spec.getMinBound().map([](IDLAnyType m) { return m.getElement(); });
     auto maxBound = spec.getMaxBound().map([](IDLAnyType m) { return m.getElement(); });
-    auto trimFactor = spec.getTrimFactor() ? spec.getTrimFactor().value() : 0;
+    auto trimFactor = spec.getTrimFactor();
 
     switch (element.type()) {
         case BSONType::NumberInt:
@@ -1115,6 +1116,12 @@ FLE2InsertUpdatePayloadV2 EDCClientPayload::serializeInsertUpdatePayloadV2ForRan
 
     auto edgeTokenSet = getEdgeTokenSet(
         spec, sparsity, contentionFactor, edcToken, escToken, ecocToken, serverDerivationToken);
+
+    iupayload.setSparsity(sparsity);
+    iupayload.setPrecision(spec.getPrecision());
+    iupayload.setTrimFactor(spec.getTrimFactor());
+    iupayload.setIndexMin(spec.getMinBound());
+    iupayload.setIndexMax(spec.getMaxBound());
 
     if (!edgeTokenSet.empty()) {
         iupayload.setEdgeTokenSet(edgeTokenSet);
@@ -1386,6 +1393,8 @@ void convertToFLE2Payload(FLEKeyVault* keyVault,
                             userKey,
                             std::move(edges),
                             ep.getMaxContentionCounter(),
+                            ep.getSparsity()
+                                .value(),  // Enforced as non-optional in this case in IDL
                             rangeFindSpec);
                     } else {
                         return FLEClientCrypto::serializeFindRangeStubV2(rangeFindSpec);
@@ -1659,19 +1668,6 @@ size_t getEstimatedTagCount(const std::vector<EDCServerPayloadInfo>& serverPaylo
                                                       : 0);
     }
     return total;
-}
-
-/**
- * Return the first bit set in a integer. 1 indexed.
- */
-template <typename T>
-int getFirstBitSet(T v) {
-    return 64 - countLeadingZeros64(v);
-}
-
-template <>
-int getFirstBitSet<boost::multiprecision::uint128_t>(const boost::multiprecision::uint128_t v) {
-    return boost::multiprecision::msb(v) + 1;
 }
 
 template <typename T>
@@ -1974,7 +1970,7 @@ std::vector<std::string> getMinCover(const FLE2RangeFindSpec& spec, uint8_t spar
     auto includeLowerBound = edgesInfo.getLbIncluded();
     auto includeUpperBound = edgesInfo.getUbIncluded();
 
-    auto trimFactor = edgesInfo.getTrimFactor().value_or(0);
+    auto trimFactor = edgesInfo.getTrimFactor();
 
     // Open-ended ranges are represented with infinity as the other endpoint. Resolve infinite
     // bounds at this point to end at the min or max for this index.
@@ -3036,6 +3032,7 @@ FLE2FindRangePayloadV2 FLEClientCrypto::serializeFindRangePayloadV2(
     FLEUserKeyAndId userKey,
     const std::vector<std::string>& edges,
     uint64_t maxContentionFactor,
+    uint32_t sparsity,
     const FLE2RangeFindSpec& spec) {
     auto collectionToken = FLELevel1TokenGenerator::generateCollectionsLevel1Token(indexKey.key);
     auto serverToken =
@@ -3073,6 +3070,15 @@ FLE2FindRangePayloadV2 FLEClientCrypto::serializeFindRangePayloadV2(
     payload.setFirstOperator(spec.getFirstOperator());
     payload.setSecondOperator(spec.getSecondOperator());
     payload.setPayloadId(spec.getPayloadId());
+
+    if (spec.getEdgesInfo().has_value()) {
+        auto specEdgeInfo = spec.getEdgesInfo().get();
+        payload.setPrecision(specEdgeInfo.getPrecision());
+        payload.setTrimFactor(specEdgeInfo.getTrimFactor());
+        payload.setIndexMin(specEdgeInfo.getIndexMin());
+        payload.setIndexMax(specEdgeInfo.getIndexMax());
+        payload.setSparsity(sparsity);
+    }
 
     return payload;
 }
@@ -4144,6 +4150,11 @@ ParsedFindRangePayload::ParsedFindRangePayload(ConstDataRange cdr) {
     payloadId = payload.getPayloadId();
     firstOp = payload.getFirstOperator();
     secondOp = payload.getSecondOperator();
+    precision = payload.getPrecision();
+    trimFactor = payload.getTrimFactor();
+    sparsity = payload.getSparsity();
+    indexMin = payload.getIndexMin();
+    indexMax = payload.getIndexMax();
 
     if (!payload.getPayload()) {
         return;
@@ -4322,8 +4333,20 @@ bool EncryptedPredicateEvaluatorV2::evaluate(
 
 // Edges
 
-Edges::Edges(std::string leaf, int sparsity, int trimFactor)
-    : _leaf(std::move(leaf)), _sparsity(sparsity), _trimFactor(trimFactor) {
+namespace {
+int resolveTrimFactorDefault(int maxlen, const boost::optional<int>& optTrimFactor) {
+    if (optTrimFactor) {
+        return *optTrimFactor;
+    }
+
+    return std::clamp(kFLERangeTrimFactorDefault, 0, maxlen - 1);
+}
+}  // namespace
+
+Edges::Edges(std::string leaf, int sparsity, const boost::optional<int>& optTrimFactor)
+    : _leaf(std::move(leaf)),
+      _sparsity(sparsity),
+      _trimFactor(resolveTrimFactorDefault(_leaf.length(), optTrimFactor)) {
     uassert(6775101, "sparsity must be 1 or larger", _sparsity > 0);
     dassert(std::all_of(_leaf.begin(), _leaf.end(), [](char c) { return c == '1' || c == '0'; }));
     uassert(8574105,
@@ -4370,7 +4393,8 @@ std::size_t Edges::size() const {
 }
 
 template <typename T>
-std::unique_ptr<Edges> getEdgesT(T value, T min, T max, int sparsity, int trimFactor) {
+std::unique_ptr<Edges> getEdgesT(
+    T value, T min, T max, int sparsity, const boost::optional<int>& trimFactor) {
     static_assert(!std::numeric_limits<T>::is_signed);
     static_assert(std::numeric_limits<T>::is_integer);
 
@@ -4388,7 +4412,7 @@ std::unique_ptr<Edges> getEdgesInt32(int32_t value,
                                      boost::optional<int32_t> min,
                                      boost::optional<int32_t> max,
                                      int sparsity,
-                                     int trimFactor) {
+                                     const boost::optional<int>& trimFactor) {
     auto aost = getTypeInfo32(value, min, max);
     return getEdgesT(aost.value, aost.min, aost.max, sparsity, trimFactor);
 }
@@ -4397,7 +4421,7 @@ std::unique_ptr<Edges> getEdgesInt64(int64_t value,
                                      boost::optional<int64_t> min,
                                      boost::optional<int64_t> max,
                                      int sparsity,
-                                     int trimFactor) {
+                                     const boost::optional<int>& trimFactor) {
     auto aost = getTypeInfo64(value, min, max);
     return getEdgesT(aost.value, aost.min, aost.max, sparsity, trimFactor);
 }
@@ -4407,7 +4431,7 @@ std::unique_ptr<Edges> getEdgesDouble(double value,
                                       boost::optional<double> max,
                                       boost::optional<uint32_t> precision,
                                       int sparsity,
-                                      int trimFactor) {
+                                      const boost::optional<int>& trimFactor) {
     auto aost = getTypeInfoDouble(value, min, max, precision);
     return getEdgesT(aost.value, aost.min, aost.max, sparsity, trimFactor);
 }
@@ -4417,7 +4441,7 @@ std::unique_ptr<Edges> getEdgesDecimal128(Decimal128 value,
                                           boost::optional<Decimal128> max,
                                           boost::optional<uint32_t> precision,
                                           int sparsity,
-                                          int trimFactor) {
+                                          const boost::optional<int>& trimFactor) {
     auto aost = getTypeInfoDecimal128(value, min, max, precision);
     return getEdgesT(aost.value, aost.min, aost.max, sparsity, trimFactor);
 }
@@ -4427,7 +4451,7 @@ std::uint64_t getEdgesLength(BSONType fieldType, StringData fieldPath, QueryType
     setRangeDefaults(fieldType, fieldPath, &config);
 
     const auto sparsity = *config.getSparsity();
-    const auto trimFactor = config.getTrimFactor().get_value_or(0);
+    const auto trimFactor = config.getTrimFactor();
     auto precision = config.getPrecision().map(
         [](auto signedInt) -> uint32_t { return static_cast<uint32_t>(signedInt); });
 
@@ -4473,7 +4497,7 @@ template <typename T>
 class MinCoverGenerator {
 public:
     static std::vector<std::string> minCover(
-        T lowerBound, T upperBound, T max, int sparsity, int trimFactor) {
+        T lowerBound, T upperBound, T max, int sparsity, const boost::optional<int>& trimFactor) {
         MinCoverGenerator<T> mcg(lowerBound, upperBound, max, sparsity, trimFactor);
         std::vector<std::string> c;
         mcg.minCoverRec(c, 0, mcg._maxlen);
@@ -4481,12 +4505,13 @@ public:
     }
 
 private:
-    MinCoverGenerator(T lowerBound, T upperBound, T max, int sparsity, int trimFactor)
+    MinCoverGenerator(
+        T lowerBound, T upperBound, T max, int sparsity, const boost::optional<int>& optTrimFactor)
         : _lowerBound(lowerBound),
           _upperBound(upperBound),
           _sparsity(sparsity),
-          _trimFactor(trimFactor),
-          _maxlen(getFirstBitSet(max)) {
+          _maxlen(getFirstBitSet(max)),
+          _trimFactor(resolveTrimFactorDefault(_maxlen, optTrimFactor)) {
         static_assert(!std::numeric_limits<T>::is_signed);
         static_assert(std::numeric_limits<T>::is_integer);
         tassert(6860001,
@@ -4496,7 +4521,7 @@ private:
         uassert(8574106,
                 "Trim factor must be >= 0 and less than the number of bits used to represent an "
                 "element of the domain",
-                trimFactor >= 0 && (trimFactor == 0 || trimFactor < _maxlen));
+                _trimFactor >= 0 && (_trimFactor == 0 || _trimFactor < _maxlen));
     }
 
     // Generate and apply a mask to an integer, filling masked bits with 1;
@@ -4560,13 +4585,17 @@ private:
     T _lowerBound;
     T _upperBound;
     int _sparsity;
-    int _trimFactor;
     int _maxlen;
+    int _trimFactor;
 };
 
 template <typename T>
-std::vector<std::string> minCover(
-    T lowerBound, T upperBound, T min, T max, int sparsity, int trimFactor) {
+std::vector<std::string> minCover(T lowerBound,
+                                  T upperBound,
+                                  T min,
+                                  T max,
+                                  int sparsity,
+                                  const boost::optional<int>& trimFactor) {
     dassert(0 == min);
     return MinCoverGenerator<T>::minCover(lowerBound, upperBound, max, sparsity, trimFactor);
 }
@@ -4604,7 +4633,7 @@ std::vector<std::string> minCoverInt32(int32_t lowerBound,
                                        boost::optional<int32_t> min,
                                        boost::optional<int32_t> max,
                                        int sparsity,
-                                       int trimFactor) {
+                                       const boost::optional<int>& trimFactor) {
     auto a = getTypeInfo32(lowerBound, min, max);
     auto b = getTypeInfo32(upperBound, min, max);
     dassert(a.min == b.min);
@@ -4623,7 +4652,7 @@ std::vector<std::string> minCoverInt64(int64_t lowerBound,
                                        boost::optional<int64_t> min,
                                        boost::optional<int64_t> max,
                                        int sparsity,
-                                       int trimFactor) {
+                                       const boost::optional<int>& trimFactor) {
     auto a = getTypeInfo64(lowerBound, min, max);
     auto b = getTypeInfo64(upperBound, min, max);
     dassert(a.min == b.min);
@@ -4643,7 +4672,7 @@ std::vector<std::string> minCoverDouble(double lowerBound,
                                         boost::optional<double> max,
                                         boost::optional<uint32_t> precision,
                                         int sparsity,
-                                        int trimFactor) {
+                                        const boost::optional<int>& trimFactor) {
     auto a = getTypeInfoDouble(lowerBound, min, max, precision);
     auto b = getTypeInfoDouble(upperBound, min, max, precision);
     dassert(a.min == b.min);
@@ -4662,7 +4691,7 @@ std::vector<std::string> minCoverDecimal128(Decimal128 lowerBound,
                                             boost::optional<Decimal128> max,
                                             boost::optional<uint32_t> precision,
                                             int sparsity,
-                                            int trimFactor) {
+                                            const boost::optional<int>& trimFactor) {
     auto a = getTypeInfoDecimal128(lowerBound, min, max, precision);
     auto b = getTypeInfoDecimal128(upperBound, min, max, precision);
     dassert(a.min == b.min);

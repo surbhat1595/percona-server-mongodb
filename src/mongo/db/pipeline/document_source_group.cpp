@@ -332,7 +332,7 @@ TopBottomAccKey getTopBottomAccKey(AccumulatorN* accN) {
 }
 
 template <TopBottomSense sense, bool single>
-constexpr StringData getMergeFieldName() {
+constexpr StringData getMergeFieldNameForAcc() {
     if constexpr (sense == TopBottomSense::kTop && single) {
         return "ts"_sd;
     } else if constexpr (sense == TopBottomSense::kTop && !single) {
@@ -365,7 +365,13 @@ AccumulationStatement mergeAccStmtFor(boost::intrusive_ptr<ExpressionContext> pE
                                       const SortPattern& sortPattern,
                                       const AccIndices& accIndices,
                                       BSONObjBuilder& prjArgsBuilder) {
-    constexpr auto mergeFieldName = getMergeFieldName<sense, single>();
+    constexpr auto prefix = getMergeFieldNameForAcc<sense, single>();
+
+    // In order to account for multiple instances of the same accumulator (e.g. $topN), we
+    // incorporate the first index of an accumulator that will be merged into the field name.
+    std::stringstream ss;
+    ss << prefix << "_" << accIndices[0];
+    const auto mergeFieldName = ss.str();
 
     // To comply with any internal parsing logic for $top and $bottom accumulators, we need to
     // compose a BSON object that represents the accumulator statement and then parse it.
@@ -391,25 +397,27 @@ AccumulationStatement mergeAccStmtFor(boost::intrusive_ptr<ExpressionContext> pE
                 BSONObjBuilder outputBuilder(
                     accArgsBuilder.subobjStart(AccumulatorN::kFieldNameOutput));
                 for (auto accIdx : accIndices) {
-                    getOutputArgExpr(accStmts[accIdx].expr.argument)
-                        ->serialize()
-                        .addToBsonObj(&outputBuilder, accStmts[accIdx].fieldName);
-                    // Recomputes the rewritten nested accumulator fields to the user-requeted
-                    // fields.
                     {
-                        BSONObjBuilder prjExprBuilder(prjArgsBuilder.subobjStart(
-                            accStmts[accIdx].fieldName));  // user-requested field
+                        // This block opens "fieldName": {...} within "output": {...}
+                        BSONObjBuilder ifNullOutputBuilder(
+                            outputBuilder.subobjStart(accStmts[accIdx].fieldName));
                         {
-                            using namespace fmt::literals;
-                            // Composes {$ifNull: ["$rewrittenField", null]}.
-                            BSONArrayBuilder ifNullExprBuilder(
-                                prjExprBuilder.subarrayStart("$ifNull"_sd));
-                            ifNullExprBuilder
-                                .append("${}.{}"_format(mergeFieldName.toString(),
-                                                        accStmts[accIdx].fieldName))
-                                .appendNull();
+                            // Composes {$ifNull: ["outputExpression", null]}.
+                            BSONArrayBuilder ifNullArrayBuilder(
+                                ifNullOutputBuilder.subarrayStart("$ifNull"_sd));
+                            getOutputArgExpr(accStmts[accIdx].expr.argument)
+                                ->serialize()
+                                .addToBsonArray(&ifNullArrayBuilder);
+                            ifNullArrayBuilder.appendNull();
                         }
                     }
+
+                    // Recomputes the rewritten nested accumulator fields to the user-requested
+                    // fields.
+                    using namespace fmt::literals;
+                    prjArgsBuilder.append(
+                        accStmts[accIdx].fieldName,
+                        "${}.{}"_format(mergeFieldName, accStmts[accIdx].fieldName));
                 }
                 outputBuilder.doneFast();
             }

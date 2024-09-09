@@ -153,6 +153,17 @@ public:
     void addVariableRefs(std::set<Variables::Id>* refs) const final {}
 
 private:
+    /**
+     * Used to track the $out state for the destructor. $out should clean up different namespaces
+     * depending on when the stage was interrupted or failed.
+     */
+    enum class OutCleanUpProgress {
+        kTmpCollExists,
+        kRenameComplete,
+        kViewCreatedIfNeeded,
+        kComplete
+    };
+
     DocumentSourceOut(NamespaceString outputNs,
                       boost::optional<TimeseriesOptions> timeseries,
                       const boost::intrusive_ptr<ExpressionContext>& expCtx)
@@ -193,8 +204,9 @@ private:
     void waitWhileFailPointEnabled() override;
 
     /**
-     * Determines if an error exists with the user input and existing collections.
-     * The function will error if:
+     * Determines if an error exists with the user input and existing collections. This function
+     * sets the '_timeseries' member variable and must be run before referencing '_timeseries'
+     * variable. The function will error if:
      * 1. The user provides the 'timeseries' field, but a non time-series collection or view exists
      * in that namespace.
      * 2. The user provides the 'timeseries' field with a specification that does not match an
@@ -205,6 +217,26 @@ private:
 
     NamespaceString makeBucketNsIfTimeseries(const NamespaceString& ns);
 
+    /**
+     * Runs a createCollection command on the temporary namespace. Returns
+     * nothing, but if the function returns, we assume the temporary collection is created.
+     */
+    void createTemporaryCollection();
+
+    /**
+     * Runs a renameCollection from the temporary namespace to the user requested namespace. Returns
+     * nothing, but if the function returns, we assume the rename has succeeded and the temporary
+     * namespace no longer exists.
+     */
+    void renameTemporaryCollection();
+
+    /**
+     * Runs a createCollection command to create the view backing the time-series buckets
+     * collection. This should only be called if $out is writing to a time-series collection. If the
+     * function returns, we assume the view is created.
+     */
+    void createTimeseriesView();
+
     // Stash the writeConcern of the original command as the operation context may change by the
     // time we start to flush writes. This is because certain aggregations (e.g. $exchange)
     // establish cursors with batchSize 0 then run subsequent getMore's which use a new operation
@@ -213,7 +245,8 @@ private:
     WriteConcernOptions _writeConcern;
 
     // Holds on to the original collection options and index specs so we can check they didn't
-    // change during computation.
+    // change during computation. For time-series collection these values will be on the buckets
+    // namespace.
     BSONObj _originalOutOptions;
     std::list<BSONObj> _originalIndexes;
 
@@ -221,12 +254,12 @@ private:
     NamespaceString _tempNs;
 
     // Set if $out is writing to a time-series collection. This is how $out determines if it is
-    // writing to a time-series collection or not.
+    // writing to a time-series collection or not. Any reference to this variable **must** be after
+    // 'validateTimeseries', since 'validateTimeseries' sets this value.
     boost::optional<TimeseriesOptions> _timeseries;
 
-    // Set to true if the stage has not initialized or the view was successfully created.
-    // Used by the destructor to determine if the "real" buckets collection should be destroyed.
-    bool _timeseriesStateConsistent = true;
+    // Tracks the current state of the temporary collection, and is used for cleanup.
+    OutCleanUpProgress _tmpCleanUpState = OutCleanUpProgress::kComplete;
 };
 
 }  // namespace mongo

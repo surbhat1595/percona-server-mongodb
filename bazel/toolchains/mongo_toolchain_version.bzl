@@ -34,11 +34,6 @@ TOOLCHAIN_MAP = {
         "sha": "382aeec8de641d466e2ca2562539b497534c620e0e403304d6794434e73bbdce",
         "url": "https://mciuploads.s3.amazonaws.com/toolchain-builder/debian12/11bae3c145a48dd7be9ee8aa44e5591783f787aa/bazel_v4_toolchain_builder_debian12_11bae3c145a48dd7be9ee8aa44e5591783f787aa_24_01_09_16_10_07.tar.gz",
     },
-    "rhel7_x86_64": {
-        "platform_name": "rhel70",
-        "sha": "ad7632e3fe32b336ebd0529ba3f865d4432028c6e3633325c910f1f98c8be542",
-        "url": "https://mciuploads.s3.amazonaws.com/toolchain-builder/rhel70/11bae3c145a48dd7be9ee8aa44e5591783f787aa/bazel_v4_toolchain_builder_rhel70_11bae3c145a48dd7be9ee8aa44e5591783f787aa_24_01_09_16_10_07.tar.gz",
-    },
     "rhel8_aarch64": {
         "platform_name": "rhel82-arm64",
         "sha": "5e7d9d0b9f978332c409359453acacec4ce1106030674e549203a0c61a049bc4",
@@ -98,5 +93,15 @@ TOOLCHAIN_MAP = {
         "platform_name": "ubuntu2204",
         "sha": "04ca222c288d6601a8cbc22e1d75f2170cbc24e77dfb59e27249a78872952f16",
         "url": "https://mciuploads.s3.amazonaws.com/toolchain-builder/ubuntu2204/11bae3c145a48dd7be9ee8aa44e5591783f787aa/bazel_v4_toolchain_builder_ubuntu2204_11bae3c145a48dd7be9ee8aa44e5591783f787aa_24_01_09_16_10_07.tar.gz",
+    },
+    "ubuntu24_aarch64": {
+        "platform_name": "ubuntu2404-arm64",
+        "sha": "02ec959be765bf9f89bd39df78366af05d60d00bec44963feeda1274bc7a4a91",
+        "url": "https://mciuploads.s3.amazonaws.com/toolchain-builder/ubuntu2404-arm64/e0a4b30be5b1d4667d4adeed82f0f806626038f7/bazel_v4_toolchain_builder_ubuntu2404_arm64_e0a4b30be5b1d4667d4adeed82f0f806626038f7_24_07_02_18_20_40.tar.gz",
+    },
+    "ubuntu24_x86_64": {
+        "platform_name": "ubuntu2404",
+        "sha": "c9193240f96a1112edb24b816a87cb6bd9e1393c2757b0b76a3182460ed9498b",
+        "url": "https://mciuploads.s3.amazonaws.com/toolchain-builder/ubuntu2404/e0a4b30be5b1d4667d4adeed82f0f806626038f7/bazel_v4_toolchain_builder_ubuntu2404_e0a4b30be5b1d4667d4adeed82f0f806626038f7_24_07_02_18_20_40.tar.gz",
     },
 }

@@ -102,6 +102,8 @@ OS_DOCKER_LOOKUP = {
     'rhel79': ('centos:7', "yum",
                frozenset(["rh-python38.x86_64", "wget", "pkgconfig", "systemd", "procps", "file"]),
                "/opt/rh/rh-python38/root/usr/bin/python3"),
+    'rhel8': ('almalinux:8', "yum",
+              frozenset(["python3", "wget", "pkgconfig", "systemd", "procps", "file"]), "python3"),
     'rhel80': ('almalinux:8', "yum",
                frozenset(["python3", "wget", "pkgconfig", "systemd", "procps", "file"]), "python3"),
     'rhel81': ('almalinux:8', "yum",
@@ -110,12 +112,16 @@ OS_DOCKER_LOOKUP = {
                frozenset(["python3", "wget", "pkgconfig", "systemd", "procps", "file"]), "python3"),
     'rhel83': ('almalinux:8', "yum",
                frozenset(["python3", "wget", "pkgconfig", "systemd", "procps", "file"]), "python3"),
+    'rhel88': ('almalinux:8', "yum",
+               frozenset(["python3", "wget", "pkgconfig", "systemd", "procps", "file"]), "python3"),
     'rhel90': ('almalinux:9', "yum",
+               frozenset(["python3", "wget", "pkgconfig", "systemd", "procps", "file"]), "python3"),
+    'rhel93': ('almalinux:9', "yum",
                frozenset(["python3", "wget", "pkgconfig", "systemd", "procps", "file"]), "python3"),
     'sunos5': None,
     'suse11': None,
     'suse12': None,
-    'suse15': ('registry.suse.com/suse/sle15:latest', "zypper",
+    'suse15': ('registry.suse.com/suse/sle15:15.5', "zypper",
                frozenset(["python3", "wget", "pkg-config", "systemd", "procps", "file"]),
                "python3"),
     # Has the same error as above
@@ -136,6 +142,11 @@ OS_DOCKER_LOOKUP = {
                        "file"
                    ]), "python3"),
     'ubuntu2204': ('ubuntu:22.04', "apt",
+                   frozenset([
+                       "python3", "python-is-python3", "wget", "pkg-config", "systemd", "procps",
+                       "file"
+                   ]), "python3"),
+    'ubuntu2404': ('ubuntu:24.04', "apt",
                    frozenset([
                        "python3", "python-is-python3", "wget", "pkg-config", "systemd", "procps",
                        "file"
@@ -345,8 +356,18 @@ def get_tools_package(arch_name: str, os_name: str) -> Optional[str]:
     if arch_name == "aarch64" and not os_name.startswith("amazon") and not os_name.startswith(
             "rhel"):
         arch_name = "arm64"
+
+    # Tools packages are only published to the latest RHEL version supported on master, but
+    # the tools binaries are cross compatible with other RHEL versions
+    # (see https://jira.mongodb.org/browse/SERVER-92939)
+    def major_version_matches(download_name: str) -> bool:
+        if (os_name.startswith("rhel") and download_name.startswith("rhel")
+                and os_name[4] == download_name[4]):
+            return True
+        return download_name == os_name
+
     for download in current_tools_releases["versions"][0]["downloads"]:
-        if download["name"] == os_name and download["arch"] == arch_name:
+        if major_version_matches(download["name"]) and download["arch"] == arch_name:
             return download["package"]["url"]
     return None
 

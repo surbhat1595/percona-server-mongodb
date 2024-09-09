@@ -850,6 +850,32 @@ tasks:
       - "--binary-dir=./"
       - "lint-all"
 
+- name: lint_sbom
+  tags:
+    [
+      "assigned_to_jira_team_devprod_correctness",
+      "development_critical_single_variant",
+      "lint",
+    ]
+  commands:
+    - command: timeout.update
+      params:
+        # 40 minutes
+        exec_timeout_secs: 2400
+    - func: "f_expansions_write"
+    - command: manifest.load
+    - func: "git get project and add git tag"
+    - func: "f_expansions_write"
+    - func: "kill processes"
+    - func: "cleanup environment"
+    - func: "set up venv"
+    - command: subprocess.exec
+      params:
+        binary: bash
+        args:
+          - "src/evergreen/run_python_script.sh"
+          - "buildscripts/sbom_linter.py"
+
 - name: lint_pylinters
   tags: ["assigned_to_jira_team_devprod_build", "development_critical_single_variant", "lint"]
   commands:
@@ -1114,44 +1140,6 @@ tasks:
       <<: *powercycle_remote_credentials
     timeout_secs: 1800 # 30 minute timeout for no output
 
-- name: selinux_rhel7_enterprise
-  tags: ["assigned_to_jira_team_server_security", "experimental"]
-  depends_on:
-  - name: archive_dist_test
-  - name: package
-  commands:
-  - command: manifest.load
-  - func: "git get project and add git tag"
-  - func: "f_expansions_write"
-  - func: "set up venv"
-  - func: "fetch packages"
-  - func: "fetch binaries"
-  - func: "extract binaries"
-  - func: "run selinux tests"
-    vars:
-      user: root
-      distro: rhel76-selinux
-      test_list: jstests/selinux/*.js src/mongo/db/modules/enterprise/jstests/selinux/*.js
-
-- name: selinux_rhel7_org
-  tags: ["assigned_to_jira_team_server_security", "experimental"]
-  depends_on:
-  - name: archive_dist_test
-  - name: package
-  commands:
-  - command: manifest.load
-  - func: "git get project and add git tag"
-  - func: "f_expansions_write"
-  - func: "set up venv"
-  - func: "fetch packages"
-  - func: "fetch binaries"
-  - func: "extract binaries"
-  - func: "run selinux tests"
-    vars:
-      user: root
-      distro: rhel76-selinux
-      test_list: jstests/selinux/*.js
-
 - name: selinux_rhel8_enterprise
   tags: ["assigned_to_jira_team_server_security", "experimental"]
   depends_on:
@@ -1167,7 +1155,7 @@ tasks:
   - func: "extract binaries"
   - func: "run selinux tests"
     vars:
-      distro: rhel80-selinux
+      distro: rhel8.8-selinux
       test_list: jstests/selinux/*.js src/mongo/db/modules/enterprise/jstests/selinux/*.js
 
 - name: selinux_rhel8_org
@@ -1185,7 +1173,7 @@ tasks:
   - func: "extract binaries"
   - func: "run selinux tests"
     vars:
-      distro: rhel80-selinux
+      distro: rhel8.8-selinux
       test_list: jstests/selinux/*.js
 
 - name: selinux_rhel9_enterprise

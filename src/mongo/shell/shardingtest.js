@@ -583,11 +583,18 @@ var ShardingTest = function ShardingTest(params) {
 
     ShardingTest.prototype.restartAllConfigServers = function(opts) {
         this.configRS.startSet(opts, true);
+        // We wait until a primary has been chosen since startSet can return without having elected
+        // one. This can cause issues that expect a functioning replicaset once this method returns.
+        this.configRS.waitForPrimary();
     };
 
     ShardingTest.prototype.restartAllShards = function(opts) {
         this._rs.forEach((rs) => {
             rs.test.startSet(opts, true);
+            // We wait until a primary has been chosen since startSet can return without having
+            // elected one. This can cause issues that expect a functioning replicaset once this
+            // method returns.
+            rs.test.waitForPrimary();
         });
     };
 
@@ -1092,6 +1099,52 @@ var ShardingTest = function ShardingTest(params) {
     };
 
     /**
+     * Shuts down and restarts replica set for a given shard and
+     * updates shard connection information.
+     *
+     * @param {string} prevShardName
+     * @param {object} replSet The replica set object. Defined in replsettest.js
+     */
+    ShardingTest.prototype.shutdownAndRestartPrimaryOnShard = function(shardName, replSet) {
+        const n = this._shardReplSetToIndex[replSet.name];
+        const originalPrimaryConn = replSet.getPrimary();
+
+        const SIGTERM = 15;
+        replSet.restart(originalPrimaryConn, {}, SIGTERM);
+        replSet.awaitNodesAgreeOnPrimary();
+        replSet.awaitSecondaryNodes();
+
+        this._connections[n] = new Mongo(replSet.getURL());
+        this._connections[n].shardName = shardName;
+        this._connections[n].rs = replSet;
+
+        this["shard" + n] = this._connections[n];
+    };
+
+    /**
+     * Kills and restarts replica set for a given shard and
+     * updates shard connection information.
+     *
+     * @param {string} prevShardName
+     * @param {object} replSet The replica set object. Defined in replsettest.js
+     */
+    ShardingTest.prototype.killAndRestartPrimaryOnShard = function(shardName, replSet) {
+        const n = this._shardReplSetToIndex[replSet.name];
+        const originalPrimaryConn = replSet.getPrimary();
+
+        const SIGKILL = 9;
+        const opts = {allowedExitCode: MongoRunner.EXIT_SIGKILL};
+        replSet.restart(originalPrimaryConn, opts, SIGKILL);
+        replSet.awaitNodesAgreeOnPrimary();
+
+        this._connections[n] = new Mongo(replSet.getURL());
+        this._connections[n].shardName = shardName;
+        this._connections[n].rs = replSet;
+
+        this["shard" + n] = this._connections[n];
+    };
+
+    /**
      * Restarts each node in a particular shard replica set using the shard's original startup
      * options by default.
      *
@@ -1111,6 +1164,7 @@ var ShardingTest = function ShardingTest(params) {
         this["rs" + n].awaitSecondaryNodes();
         this._connections[n] = new Mongo(this["rs" + n].getURL());
         this._connections[n].shardName = prevShardName;
+        this._connections[n].rs = this["rs" + n];
         this["shard" + n] = this._connections[n];
     };
 
@@ -1283,8 +1337,7 @@ var ShardingTest = function ShardingTest(params) {
     assert(isObject(params), 'ShardingTest configuration must be a JSON object');
 
     var testName = params.name || jsTest.name();
-    var otherParams = Object.merge(params, params.other || {});
-
+    var otherParams = Object.deepMerge(params, params.other || {});
     var numShards = otherParams.hasOwnProperty('shards') ? otherParams.shards : 2;
     var mongosVerboseLevel = otherParams.hasOwnProperty('verbose') ? otherParams.verbose : 1;
     var numMongos = otherParams.hasOwnProperty('mongos') ? otherParams.mongos : 1;
@@ -1401,6 +1454,7 @@ var ShardingTest = function ShardingTest(params) {
     this._connections = [];
     this._rs = [];
     this._rsObjects = [];
+    this._shardReplSetToIndex = {};
 
     this._useBridge = otherParams.useBridge;
     if (this._useBridge) {
@@ -1813,6 +1867,7 @@ var ShardingTest = function ShardingTest(params) {
         for (let i = 0; i < numShards; i++) {
             let rs = this._rs[i].test;
 
+            this._shardReplSetToIndex[rs.name] = i;
             this["rs" + i] = rs;
             this._rsObjects[i] = rs;
 

@@ -12,8 +12,6 @@
  *   requires_timeseries,
  *   does_not_support_transactions,
  *   does_not_support_stepdowns,
- *   requires_fcv_71,
- *   featureFlagAggOutTimeseries,
  *   # `convertToCapped` is not supported in serverless.
  *   command_not_supported_in_serverless,
  * ]
@@ -72,9 +70,13 @@ export const $config = extendWorkload($baseConfig, function($config, $super) {
         // TODO (SERVER-88275) a moveCollection can cause the original collection to be dropped and
         // re-created with a different uuid, causing the aggregation to fail with QueryPlannedKilled
         // when the mongos is fetching data from the shard using getMore(). Remove
-        // theinterruptedQueryErrors from allowedErrorCodes once this bug is being addressed
+        // the interruptedQueryErrors from allowedErrorCodes once this bug is being addressed
         if (TestData.runningWithBalancer) {
             allowedErrorCodes = allowedErrorCodes.concat(interruptedQueryErrors);
+            // On slow builds with the balancer enabled, it is possible for the router to exhaust
+            // all refresh attempts without converging, causing the StaleConfig error to be returned
+            // to the client.
+            allowedErrorCodes.push(ErrorCodes.StaleConfig);
         }
 
         assert.commandWorkedOrFailedWithCode(res, allowedErrorCodes);
@@ -131,14 +133,36 @@ export const $config = extendWorkload($baseConfig, function($config, $super) {
         if (isMongos(db) && this.tid === 0) {
             jsTestLog(`Running shardCollection: coll=${this.outputCollName} key=${this.shardKey}`);
 
-            assert.commandWorkedOrFailedWithCode(
-                db.adminCommand(
-                    {shardCollection: db[this.outputCollName].getFullName(), key: this.shardKey}),
-                [
-                    ErrorCodes.ConflictingOperationInProgress,
-                    // Can't shard a capped collection.
-                    ErrorCodes.InvalidOptions
-                ]);
+            assert.commandWorkedOrFailedWithCode(db.adminCommand({
+                shardCollection: db[this.outputCollName].getFullName(),
+                key: this.shardKey,
+                timeseries: {timeField: timeFieldName, metaField: metaFieldName}
+            }),
+                                                 [
+                                                     ErrorCodes.ConflictingOperationInProgress,
+                                                     // Can't shard a capped collection.
+                                                     ErrorCodes.InvalidOptions
+                                                 ]);
+        }
+    };
+
+    /**
+     * Ensures all the indexes exist. This will have no affect unless some thread has already
+     * dropped an index.
+     */
+    $config.states.createIndexes = function createIndexes(db, unusedCollName) {
+        // Create timeseries_agg_out as timeseries before running createIndex to prevent the case
+        // the collection is created for the first time by the createIndex itself.
+        assert.commandWorkedOrFailedWithCode(
+            db.createCollection(this.outputCollName,
+                                {timeseries: {timeField: timeFieldName, metaField: metaFieldName}}),
+            [ErrorCodes.NamespaceExists]);
+
+        for (var i = 0; i < this.indexSpecs; ++i) {
+            const indexSpecs = this.indexSpecs[i];
+            jsTestLog(`Running createIndex: coll=${this.outputCollName} indexSpec=${indexSpecs}`);
+            assert.commandWorkedOrFailedWithCode(db[this.outputCollName].createIndex(indexSpecs),
+                                                 ErrorCodes.MovePrimaryInProgress);
         }
     };
 

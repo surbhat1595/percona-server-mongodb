@@ -851,6 +851,7 @@ public:
                                                               FLEUserKeyAndId userKey,
                                                               const std::vector<std::string>& edges,
                                                               uint64_t maxContentionFactor,
+                                                              uint32_t sparsity,
                                                               const FLE2RangeFindSpec& spec);
 
     static FLE2FindRangePayloadV2 serializeFindRangeStubV2(const FLE2RangeFindSpec& spec);
@@ -1486,6 +1487,11 @@ struct ParsedFindRangePayload {
     std::int32_t payloadId{};
 
     std::int64_t maxCounter{};
+    boost::optional<std::int32_t> sparsity{};
+    boost::optional<std::int32_t> trimFactor{};
+    boost::optional<std::int32_t> precision{};
+    boost::optional<IDLAnyType> indexMin{};
+    boost::optional<IDLAnyType> indexMax{};
 
     explicit ParsedFindRangePayload(BSONElement fleFindRangePayload);
     explicit ParsedFindRangePayload(const Value& fleFindRangePayload);
@@ -1503,7 +1509,7 @@ struct ParsedFindRangePayload {
 
 class Edges {
 public:
-    Edges(std::string leaf, int sparsity, int trimFactor);
+    Edges(std::string leaf, int sparsity, const boost::optional<int>& trimFactor);
     std::vector<StringData> get();
     std::size_t size() const;
     const std::string& getLeaf() const {
@@ -1520,27 +1526,27 @@ std::unique_ptr<Edges> getEdgesInt32(int32_t value,
                                      boost::optional<int32_t> min,
                                      boost::optional<int32_t> max,
                                      int sparsity,
-                                     int trimFactor);
+                                     const boost::optional<int>& trimFactor);
 
 std::unique_ptr<Edges> getEdgesInt64(int64_t value,
                                      boost::optional<int64_t> min,
                                      boost::optional<int64_t> max,
                                      int sparsity,
-                                     int trimFactor);
+                                     const boost::optional<int>& trimFactor);
 
 std::unique_ptr<Edges> getEdgesDouble(double value,
                                       boost::optional<double> min,
                                       boost::optional<double> max,
                                       boost::optional<uint32_t> precision,
                                       int sparsity,
-                                      int trimFactor);
+                                      const boost::optional<int>& trimFactor);
 
 std::unique_ptr<Edges> getEdgesDecimal128(Decimal128 value,
                                           boost::optional<Decimal128> min,
                                           boost::optional<Decimal128> max,
                                           boost::optional<uint32_t> precision,
                                           int sparsity,
-                                          int trimFactor);
+                                          const boost::optional<int>& trimFactor);
 
 // Equivalent to a full edges calculation without creating an intemediate vector.
 // getEdgesT(min, min, max, precision, sparsity, trimFactor).size()
@@ -1557,7 +1563,7 @@ std::vector<std::string> minCoverInt32(int32_t lowerBound,
                                        boost::optional<int32_t> min,
                                        boost::optional<int32_t> max,
                                        int sparsity,
-                                       int trimFactor);
+                                       const boost::optional<int>& trimFactor);
 
 std::vector<std::string> minCoverInt64(int64_t lowerBound,
                                        bool includeLowerBound,
@@ -1566,7 +1572,7 @@ std::vector<std::string> minCoverInt64(int64_t lowerBound,
                                        boost::optional<int64_t> min,
                                        boost::optional<int64_t> max,
                                        int sparsity,
-                                       int trimFactor);
+                                       const boost::optional<int>& trimFactor);
 
 std::vector<std::string> minCoverDouble(double lowerBound,
                                         bool includeLowerBound,
@@ -1576,7 +1582,7 @@ std::vector<std::string> minCoverDouble(double lowerBound,
                                         boost::optional<double> max,
                                         boost::optional<uint32_t> precision,
                                         int sparsity,
-                                        int trimFactor);
+                                        const boost::optional<int>& trimFactor);
 
 std::vector<std::string> minCoverDecimal128(Decimal128 lowerBound,
                                             bool includeLowerBound,
@@ -1586,7 +1592,7 @@ std::vector<std::string> minCoverDecimal128(Decimal128 lowerBound,
                                             boost::optional<Decimal128> max,
                                             boost::optional<uint32_t> precision,
                                             int sparsity,
-                                            int trimFactor);
+                                            const boost::optional<int>& trimFactor);
 
 class FLEUtil {
 public:

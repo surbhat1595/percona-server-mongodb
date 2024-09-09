@@ -302,6 +302,7 @@ ReshardingRecipientService::RecipientStateMachine::RecipientStateMachine(
       _metrics{ReshardingMetrics::initializeFrom(recipientDoc, _serviceContext)},
       _metadata{recipientDoc.getCommonReshardingMetadata()},
       _minimumOperationDuration{Milliseconds{recipientDoc.getMinimumOperationDurationMillis()}},
+      _oplogBatchTaskCount{recipientDoc.getOplogBatchTaskCount()},
       _recipientCtx{recipientDoc.getMutableState()},
       _donorShards{recipientDoc.getDonorShards()},
       _cloneTimestamp{recipientDoc.getCloneTimestamp()},
@@ -500,16 +501,16 @@ ExecutorFuture<void> ReshardingRecipientService::RecipientStateMachine::_finishR
                     if (!_isAlsoDonor) {
                         auto opCtx = factory.makeOperationContext(&cc());
 
-                        _externalState->clearFilteringMetadata(opCtx.get(),
-                                                               _metadata.getSourceNss(),
-                                                               _metadata.getTempReshardingNss());
+                        _externalState->clearFilteringMetadataOnTempReshardingCollection(
+                            opCtx.get(), _metadata.getTempReshardingNss());
 
                         ShardingRecoveryService::get(opCtx.get())
                             ->releaseRecoverableCriticalSection(
                                 opCtx.get(),
                                 _metadata.getSourceNss(),
                                 _critSecReason,
-                                ShardingCatalogClient::kLocalWriteConcern);
+                                ShardingCatalogClient::kLocalWriteConcern,
+                                ShardingRecoveryService::FilteringMetadataClearer());
                     }
                 })
                 .then([this, executor, &factory] {
@@ -835,9 +836,13 @@ ReshardingRecipientService::RecipientStateMachine::_makeDataReplication(Operatio
                                 << " != donor shards count: " << _donorShards.size());
     }
 
+    auto oplogBatchTaskCount = _oplogBatchTaskCount.value_or(
+        static_cast<std::size_t>(resharding::gReshardingOplogBatchTaskCount.load()));
+
     return _dataReplicationFactory(opCtx,
                                    _metrics.get(),
                                    &_applierMetricsMap,
+                                   oplogBatchTaskCount,
                                    _metadata,
                                    _donorShards,
                                    *_cloneTimestamp,
@@ -1088,7 +1093,7 @@ void ReshardingRecipientService::RecipientStateMachine::_writeStrictConsistencyO
     auto oplog = generateOplogEntry();
     writeConflictRetry(
         rawOpCtx, "ReshardDoneCatchUpOplog", NamespaceString::kRsOplogNamespace, [&] {
-            AutoGetOplog oplogWrite(rawOpCtx, OplogAccessMode::kWrite);
+            AutoGetOplogFastPath oplogWrite(rawOpCtx, OplogAccessMode::kWrite);
             WriteUnitOfWork wunit(rawOpCtx);
             const auto& oplogOpTime = repl::logOp(rawOpCtx, &oplog);
             uassert(5063601,

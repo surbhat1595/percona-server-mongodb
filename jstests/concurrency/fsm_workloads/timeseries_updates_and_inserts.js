@@ -8,6 +8,8 @@
  * ]
  */
 
+import {TimeseriesTest} from "jstests/core/timeseries/libs/timeseries.js";
+
 export const $config = (function() {
     const data = {
         nReadingsPerSensor: 100,
@@ -25,8 +27,15 @@ export const $config = (function() {
         },
         updateMany: function updateMany(db, collName) {
             const readingNo = Random.randInt(this.nTotalReadings);
-            assert.commandWorked(
-                db[collName].updateMany({readingNo: readingNo}, {$inc: {updated: 1}}));
+            let additionalCodesToRetry = [ErrorCodes.NoProgressMade];
+            if (TestData.runningWithBalancer) {
+                additionalCodesToRetry.push(ErrorCodes.QueryPlanKilled);
+            }
+
+            retryOnRetryableError(() => {
+                assert.commandWorked(
+                    db[collName].updateMany({readingNo: readingNo}, {$inc: {updated: 1}}));
+            }, 100, undefined, additionalCodesToRetry);
         },
         updateOne: function updateOne(db, collName) {
             const sensorId = Random.randInt(this.nSensors);
@@ -45,7 +54,16 @@ export const $config = (function() {
                     ts: new ISODate()
                 });
             }
-            bulk.execute();
+
+            try {
+                bulk.execute();
+            } catch (e) {
+                // TODO SERVER-85548 Remove this whole catch block.
+                if (e.isNotSupported) {
+                    throw e;
+                }
+                TimeseriesTest.assertInsertWorked(e);
+            }
         }
     };
 

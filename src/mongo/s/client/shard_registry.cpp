@@ -444,14 +444,13 @@ void ShardRegistry::updateReplSetHosts(const ConnectionString& givenConnString,
             auto newData = ShardRegistryData::createFromExisting(
                 _configShardData, newConnString, _shardFactory.get());
             _configShardData = newData;
-        } else {
-            auto value = _rsmIncrement.addAndFetch(1);
-            LOGV2_DEBUG(4620252,
-                        2,
-                        "Incrementing the RSM timestamp after receiving updated connection string",
-                        "newConnString"_attr = newConnString,
-                        "newRSMIncrement"_attr = value);
         }
+        auto value = _rsmIncrement.addAndFetch(1);
+        LOGV2_DEBUG(4620252,
+                    2,
+                    "Incrementing the RSM timestamp after receiving updated connection string",
+                    "newConnString"_attr = newConnString,
+                    "newRSMIncrement"_attr = value);
     }
 
     // Schedule a lookup, to incorporate the new connection string.
@@ -612,10 +611,10 @@ ShardRegistry::Cache::ValueHandle ShardRegistry::_getCachedData() const {
     return _cache->peekLatestCached(_kSingleton);
 }
 
-bool ShardRegistry::cachedClusterHasConfigShard() const {
+boost::optional<bool> ShardRegistry::cachedClusterHasConfigShard() const {
     auto data = _getCachedData();
     if (!data) {
-        return false;
+        return boost::none;
     }
 
     return data->findShard(ShardId::kConfigServerId) != nullptr;

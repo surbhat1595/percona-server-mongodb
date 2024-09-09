@@ -261,11 +261,14 @@ export function assertExpectedResults(results,
     for (const field of distributionFields) {
         assert.neq(totalExecMicros[field], NumberLong(0));
         assert.neq(firstResponseExecMicros[field], NumberLong(0));
-        assert.gte(workingTimeMillis[field], NumberLong(0));
+
+        // TODO SERVER-93216: Add an assertion for 'workingTimeMillis' after
+        // 'featureFlagQueryStatsDataBearingNodes' is enabled on 8.0.
+
         if (metrics.execCount > 1) {
             // If there are prior executions of the same query shape, we can't be certain if those
             // runs had getMores or not, so we can only check totalExec >= firstResponse.
-            assert.gte(totalExecMicros[field], firstResponseExecMicros[field]);
+            assert(bsonWoCompare(totalExecMicros[field], firstResponseExecMicros[field]) >= 0);
         } else if (getMores) {
             // If there are getMore calls, totalExecMicros fields should be greater than or equal to
             // firstResponseExecMicros.
@@ -274,7 +277,7 @@ export function assertExpectedResults(results,
                 // possible for the min or max to be equal.
                 assert.gte(totalExecMicros[field], firstResponseExecMicros[field]);
             } else {
-                assert.gt(totalExecMicros[field], firstResponseExecMicros[field]);
+                assert(bsonWoCompare(totalExecMicros[field], firstResponseExecMicros[field]) > 0);
             }
         } else {
             // If there are no getMore calls, totalExecMicros fields should be equal to
@@ -743,8 +746,8 @@ export function checkChangeStreamEntry(
     assert.eq(collectionName, queryStatsEntry.key.queryShape.cmdNs.coll);
 
     // Confirm entry is a change stream request.
-    let stringifiedPipeline = JSON.stringify(queryStatsEntry.key.queryShape.pipeline, null, 0);
-    assert(stringifiedPipeline.includes("_internalChangeStream"));
+    const pipelineShape = queryStatsEntry.key.queryShape.pipeline;
+    assert(pipelineShape[0].hasOwnProperty("$changeStream"), pipelineShape);
 
     // TODO SERVER-76263 Support reporting 'collectionType' on a sharded cluster.
     if (!FixtureHelpers.isMongos(db)) {

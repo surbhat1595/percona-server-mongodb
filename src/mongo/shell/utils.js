@@ -41,6 +41,17 @@ function _getErrorWithCode(codeOrObj, message) {
         if (codeOrObj.hasOwnProperty("errorLabels")) {
             e.errorLabels = codeOrObj.errorLabels;
         }
+
+        if (codeOrObj.hasOwnProperty("writeConcernError")) {
+            e.writeConcernError = codeOrObj.writeConcernError;
+        } else if (codeOrObj.hasOwnProperty("writeConcernErrors") &&
+                   codeOrObj.writeConcernErrors.length > 0) {
+            e.writeConcernError =
+                codeOrObj.writeConcernErrors[codeOrObj.writeConcernErrors.length - 1];
+        } else if (codeOrObj.hasOwnProperty("hasWriteConcernError") &&
+                   codeOrObj.hasWriteConcernError()) {
+            e.writeConcernError = codeOrObj.getWriteConcernError();
+        }
     } else if (typeof codeOrObj === "number") {
         e.code = codeOrObj;
     }
@@ -552,6 +563,7 @@ jsTestOptions = function() {
             embeddedRouter: TestData.embeddedRouter || false,
 
             performTimeseriesCompressionIntermediateDataIntegrityCheckOnInsert: true,
+            fuzzMongodConfigs: TestData.fuzzMongodConfigs || false,
         });
     }
     return _jsTestOptions;

@@ -82,12 +82,27 @@ __rts_btree_abort_update(WT_SESSION_IMPL *session, WT_ITEM *key, WT_UPDATE *firs
         }
     }
 
-    /*
-     * Clear the history store flags for the stable update to indicate that this update should be
-     * written to the history store later. The next time when this update is moved into the history
-     * store, it will have a different stop time point.
-     */
     if (stable_upd != NULL) {
+        /*
+         * During recovery, there shouldn't be any updates in the update chain except when the
+         * updates are from a prepared transaction. Reset the transaction ID of the stable update
+         * that was restored as part of the unstable prepared tombstone. Ignore the history store as
+         * we cannot have a prepared transaction operating on it.
+         */
+        if (F_ISSET(S2C(session), WT_CONN_RECOVERING) && !WT_IS_HS(session->dhandle)) {
+            WT_ASSERT(session, first_upd->type == WT_UPDATE_TOMBSTONE);
+            WT_ASSERT(session, first_upd->prepare_state == WT_PREPARE_INPROGRESS);
+            WT_ASSERT(session, F_ISSET(first_upd, WT_UPDATE_PREPARE_RESTORED_FROM_DS));
+            WT_ASSERT(session, stable_upd->next == NULL);
+            WT_ASSERT(session, F_ISSET(upd, WT_UPDATE_RESTORED_FROM_DS));
+            stable_upd->txnid = WT_TXN_NONE;
+        }
+
+        /*
+         * Clear the history store flags for the stable update to indicate that this update should
+         * be written to the history store later. The next time when this update is moved into the
+         * history store, it will have a different stop time point.
+         */
         if (F_ISSET(stable_upd, WT_UPDATE_HS | WT_UPDATE_TO_DELETE_FROM_HS)) {
             /* Find the update following a stable tombstone. */
             if (stable_upd->type == WT_UPDATE_TOMBSTONE) {
@@ -199,7 +214,7 @@ err:
  *     Add the provided update to the head of the update list.
  */
 static WT_INLINE int
-__rts_btree_col_modify(WT_SESSION_IMPL *session, WT_REF *ref, WT_UPDATE *upd, uint64_t recno)
+__rts_btree_col_modify(WT_SESSION_IMPL *session, WT_REF *ref, WT_UPDATE **updp, uint64_t recno)
 {
     WT_CURSOR_BTREE cbt;
     WT_DECL_RET;
@@ -215,7 +230,7 @@ __rts_btree_col_modify(WT_SESSION_IMPL *session, WT_REF *ref, WT_UPDATE *upd, ui
 
     /* Apply the modification. */
     if (!dryrun)
-        WT_ERR(__wt_col_modify(&cbt, recno, NULL, upd, WT_UPDATE_INVALID, true, false));
+        WT_ERR(__wt_col_modify(&cbt, recno, NULL, updp, WT_UPDATE_INVALID, true, false));
 
 err:
     /* Free any resources that may have been cached in the cursor. */
@@ -229,7 +244,7 @@ err:
  *     Add the provided update to the head of the update list.
  */
 static WT_INLINE int
-__rts_btree_row_modify(WT_SESSION_IMPL *session, WT_REF *ref, WT_UPDATE *upd, WT_ITEM *key)
+__rts_btree_row_modify(WT_SESSION_IMPL *session, WT_REF *ref, WT_UPDATE **updp, WT_ITEM *key)
 {
     WT_CURSOR_BTREE cbt;
     WT_DECL_RET;
@@ -245,7 +260,7 @@ __rts_btree_row_modify(WT_SESSION_IMPL *session, WT_REF *ref, WT_UPDATE *upd, WT
 
     /* Apply the modification. */
     if (!dryrun)
-        WT_ERR(__wt_row_modify(&cbt, key, NULL, upd, WT_UPDATE_INVALID, true, false));
+        WT_ERR(__wt_row_modify(&cbt, key, NULL, updp, WT_UPDATE_INVALID, true, false));
 
 err:
     /* Free any resources that may have been cached in the cursor. */
@@ -572,9 +587,9 @@ __rts_btree_ondisk_fixup_key(WT_SESSION_IMPL *session, WT_REF *ref, WT_ROW *rip,
     }
 
     if (rip != NULL)
-        WT_ERR(__rts_btree_row_modify(session, ref, upd, key));
+        WT_ERR(__rts_btree_row_modify(session, ref, &upd, key));
     else
-        WT_ERR(__rts_btree_col_modify(session, ref, upd, recno));
+        WT_ERR(__rts_btree_col_modify(session, ref, &upd, recno));
 
     /* Finally remove that update from history store. */
     if (valid_update_found) {
@@ -589,7 +604,7 @@ __rts_btree_ondisk_fixup_key(WT_SESSION_IMPL *session, WT_REF *ref, WT_ROW *rip,
 
     if (0) {
 err:
-        WT_ASSERT(session, tombstone == NULL || upd == tombstone);
+        WT_ASSERT(session, tombstone == NULL || upd == tombstone || upd == NULL);
         __wt_free_update_list(session, &upd);
     }
     __wt_scr_free(session, &full_value);
@@ -775,10 +790,24 @@ __rts_btree_abort_ondisk_kv(WT_SESSION_IMPL *session, WT_REF *ref, WT_ROW *rip, 
       upd->type == WT_UPDATE_TOMBSTONE ? "true" : "false",
       __wt_key_string(session, key->data, key->size, S2BT(session)->key_format, key_string));
 
+    /*
+     * It is possible for both RTS and the eviction thread to remove entries from the history store
+     * at the same time: When we evict a key with a tombstone with durable timestamp "none,"
+     * __wti_rec_hs_clear_on_tombstone also removes the corresponding entries from the history
+     * store, which is necessary for correctness. If the two threads try to remove the same history
+     * store key at around the same time, we could get a WT_NOTFOUND here.
+     *
+     * FIXME-WT-13198: Check if this race can be avoided, in which case we can remove the check for
+     * WT_NOTFOUND and treat it like other errors.
+     */
     if (rip != NULL)
-        WT_ERR(__rts_btree_row_modify(session, ref, upd, key));
+        WT_ERR_NOTFOUND_OK(__rts_btree_row_modify(session, ref, &upd, key), true);
     else
-        WT_ERR(__rts_btree_col_modify(session, ref, upd, recno));
+        WT_ERR_NOTFOUND_OK(__rts_btree_col_modify(session, ref, &upd, recno), true);
+    if (ret == WT_NOTFOUND && WT_IS_HS(session->dhandle))
+        ret = 0;
+    else
+        WT_ERR(ret);
 
     if (S2C(session)->rts->dryrun) {
 err:

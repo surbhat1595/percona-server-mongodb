@@ -111,7 +111,6 @@
 #include "mongo/db/repl/tenant_migration_access_blocker_util.h"
 #include "mongo/db/request_execution_context.h"
 #include "mongo/db/s/operation_sharding_state.h"
-#include "mongo/db/s/sharding_cluster_parameters_gen.h"
 #include "mongo/db/s/sharding_statistics.h"
 #include "mongo/db/s/transaction_coordinator_factory.h"
 #include "mongo/db/server_feature_flags_gen.h"
@@ -160,6 +159,7 @@
 #include "mongo/s/query_analysis_sampler.h"
 #include "mongo/s/shard_cannot_refresh_due_to_locks_held_exception.h"
 #include "mongo/s/shard_version.h"
+#include "mongo/s/sharding_cluster_parameters_gen.h"
 #include "mongo/s/sharding_feature_flags_gen.h"
 #include "mongo/s/sharding_state.h"
 #include "mongo/s/stale_exception.h"
@@ -1046,11 +1046,6 @@ void CheckoutSessionAndInvokeCommand::_checkOutSession() {
             }
         }
 
-        if (opCtx->isStartingMultiDocumentTransaction()) {
-            execContext.behaviors.waitForReadConcern(
-                opCtx, _ecd->getInvocation(), execContext.getRequest());
-        }
-
         // Release the transaction lock resources and abort storage transaction for unprepared
         // transactions on failure to unstash the transaction resources to opCtx. We don't want
         // to have this error guard for beginOrContinue as it can abort the transaction for any
@@ -1063,6 +1058,11 @@ void CheckoutSessionAndInvokeCommand::_checkOutSession() {
                 txnParticipant.abortTransaction(opCtx);
             }
         });
+
+        if (opCtx->isStartingMultiDocumentTransaction()) {
+            execContext.behaviors.waitForReadConcern(
+                opCtx, _ecd->getInvocation(), execContext.getRequest());
+        }
 
         txnParticipant.unstashTransactionResources(opCtx, invocation->definition()->getName());
 

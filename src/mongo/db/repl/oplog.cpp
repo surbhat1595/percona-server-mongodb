@@ -52,6 +52,7 @@
 #include "mongo/bson/util/bson_extract.h"
 #include "mongo/client/read_preference.h"
 #include "mongo/db/auth/authorization_manager.h"
+#include "mongo/db/catalog/backwards_compatible_collection_options_util.h"
 #include "mongo/db/catalog/capped_collection_maintenance.h"
 #include "mongo/db/catalog/capped_utils.h"
 #include "mongo/db/catalog/coll_mod.h"
@@ -549,7 +550,7 @@ OpTime logOp(OperationContext* opCtx, MutableOplogEntry* oplogEntry) {
     }
 
     // Use OplogAccessMode::kLogOp to avoid recursive locking.
-    AutoGetOplog oplogWrite(opCtx, OplogAccessMode::kLogOp);
+    AutoGetOplogFastPath oplogWrite(opCtx, OplogAccessMode::kLogOp);
     auto oplogInfo = oplogWrite.getOplogInfo();
 
     // If an OpTime is not specified (i.e. isNull), a new OpTime will be assigned to the oplog entry
@@ -572,7 +573,7 @@ OpTime logOp(OperationContext* opCtx, MutableOplogEntry* oplogEntry) {
         oplogEntry->setOpTime(slot);
     }
 
-    const auto& oplog = oplogInfo->getCollection();
+    const auto& oplog = oplogWrite.getCollection();
     auto wallClockTime = oplogEntry->getWallClockTime();
 
     auto bsonOplogEntry = oplogEntry->toBSON();
@@ -587,7 +588,7 @@ OpTime logOp(OperationContext* opCtx, MutableOplogEntry* oplogEntry) {
                     oplogEntry->getNss(),
                     &records,
                     timestamps,
-                    CollectionPtr(oplog),
+                    oplog,
                     slot,
                     wallClockTime,
                     isAbortIndexBuild);
@@ -1028,7 +1029,8 @@ const StringMap<ApplyOpMetadata> kOpsMap = {
      {[](OperationContext* opCtx, const ApplierOperation& op, OplogApplication::Mode mode)
           -> Status {
           const auto& entry = *op;
-          const auto& cmd = entry.getObject();
+          const auto cmd =
+              backwards_compatible_collection_options::parseCollModCmdFromOplogEntry(entry);
 
           const auto tenantId = entry.getNss().tenantId();
           const auto vts = tenantId
@@ -2582,24 +2584,26 @@ void initTimestampFromOplog(OperationContext* opCtx, const NamespaceString& oplo
 }
 
 void clearLocalOplogPtr(ServiceContext* service) {
-    LocalOplogInfo::get(service)->resetCollection();
+    LocalOplogInfo::get(service)->resetRecordStore();
 }
 
 void acquireOplogCollectionForLogging(OperationContext* opCtx) {
-    AutoGetCollection autoColl(opCtx, NamespaceString::kRsOplogNamespace, MODE_IX);
-    LocalOplogInfo::get(opCtx)->setCollection(autoColl.getCollection().get());
+    AutoGetCollection oplog(opCtx, NamespaceString::kRsOplogNamespace, MODE_IX);
+    if (oplog) {
+        LocalOplogInfo::get(opCtx)->setRecordStore(oplog->getRecordStore());
+    }
 }
 
-void establishOplogCollectionForLogging(OperationContext* opCtx, const Collection* oplog) {
+void establishOplogRecordStoreForLogging(OperationContext* opCtx, RecordStore* rs) {
     invariant(shard_role_details::getLocker(opCtx)->isW());
-    invariant(oplog);
-    LocalOplogInfo::get(opCtx)->setCollection(oplog);
+    invariant(rs);
+    LocalOplogInfo::get(opCtx)->setRecordStore(rs);
 }
 
 void signalOplogWaiters() {
-    const auto& oplog = LocalOplogInfo::get(getGlobalServiceContext())->getCollection();
+    const auto& oplog = LocalOplogInfo::get(getGlobalServiceContext())->getRecordStore();
     if (oplog) {
-        oplog->getRecordStore()->getCappedInsertNotifier()->notifyAll();
+        oplog->getCappedInsertNotifier()->notifyAll();
     }
 }
 

@@ -9,6 +9,7 @@
  *  uses_transactions,
  *  resource_intensive,
  *  incompatible_with_concurrency_simultaneous,
+ *  assumes_stable_shard_list,
  * ]
  */
 import {interruptedQueryErrors} from "jstests/concurrency/fsm_libs/assert.js";
@@ -484,14 +485,29 @@ export const $config = extendWorkload(kBaseConfig, function($config, $super) {
         }
 
         // Validate the frequency metrics. Likewise, due to the concurrent writes by other threads,
-        // it is not feasible to assert on the exact "mostCommonValues".
-        assert.eq(metrics.mostCommonValues.length, this.analyzeShardKeyNumMostCommonValues);
+        // it is not feasible to assert on the exact "mostCommonValues". Also, if the shard key is
+        // unique and the suite performs unclean shutdown, then the length of "mostCommonValues" may
+        // be less than analyzeShardKeyNumMostCommonValues since unclean shutdown can cause
+        // $collStats to return wrong number of documents and the calculation of the cardinality and
+        // frequency metrics for a unique shard key depends on the metrics returned by $collStats.
+        const shouldCheckMostCommonValues = !(this.shardKeyOptions.isUnique && TestData.killShards);
+        if (shouldCheckMostCommonValues) {
+            assert.eq(metrics.mostCommonValues.length, this.analyzeShardKeyNumMostCommonValues);
+        }
 
-        // Validate the monotonicity metrics. This check is skipped if the balancer is enabled
-        // since chunk migration deletes documents from the donor shard and re-inserts them on the
-        // recipient shard so there is no guarantee that the insertion order from the client is
-        // preserved.
-        if (!isSampling && !TestData.runningWithBalancer) {
+        // Validate the monotonicity metrics. This check is skipped if:
+        // - The analyzeShardKey command is run with a custom 'sampleRate' or 'sampleSize' since
+        //   the number of sampled documents may be so low that the resulting correlation
+        //   coefficient is very different from the actual correlation coefficient.
+        // - The balancer is enabled since chunk migration deletes documents from the donor shard
+        //   and re-inserts them on the recipient shard so there is no guarantee that the original
+        //   insertion order is preserved.
+        // - There is a lot of shard key updates since they overwrite the recordId order in the
+        //   the shard key index.
+        const shouldCheckMonotonicity = !isSampling && !TestData.runningWithBalancer &&
+            (this.writeDistribution.percentageOfShardKeyUpdates <=
+             this.percentageOfShardKeyUpdatesThresholdForMonotonicityCheck);
+        if (shouldCheckMonotonicity) {
             assert.eq(metrics.monotonicity.type,
                       this.shardKeyOptions.isMonotonic && !this.shardKeyOptions.isHashed
                           ? "monotonic"
@@ -516,6 +532,11 @@ export const $config = extendWorkload(kBaseConfig, function($config, $super) {
 
     // The number of sampled queries returned by the latest analyzeShardKey command.
     $config.data.previousNumSampledQueries = 0;
+
+    // The maximum percentage of shard key updates to still do the monotonicity check. Shard key
+    // updates overwrite recordId order in the shard key index so if the accuracy of the
+    // monotonicity check decreases as the number of shard key updates increases.
+    $config.data.percentageOfShardKeyUpdatesThresholdForMonotonicityCheck = 20;
 
     $config.data.isAcceptableSampleSize = function isAcceptableSampleSize(
         part, whole, expectedPercentage) {
@@ -585,7 +606,7 @@ export const $config = extendWorkload(kBaseConfig, function($config, $super) {
      * Verifies that the metrics about the read and write distribution are within acceptable ranges.
      */
     $config.data.assertReadWriteDistributionMetrics = function assertReadWriteDistributionMetrics(
-        res, isFinal) {
+        res, isFinal, duration) {
         AnalyzeShardKeyUtil.assertContainReadWriteDistributionMetrics(res);
 
         let assertReadMetricsDiff = (actual, expected) => {
@@ -629,7 +650,17 @@ export const $config = extendWorkload(kBaseConfig, function($config, $super) {
                                   this.readDistribution.percentageOfMultiShardReads);
             assertReadMetricsDiff(res.readDistribution.percentageOfScatterGatherReads,
                                   this.readDistribution.percentageOfScatterGatherReads);
-            assert.eq(res.readDistribution.numReadsByRange.length, this.analyzeShardKeyNumRanges);
+            try {
+                assert.eq(res.readDistribution.numReadsByRange.length,
+                          this.analyzeShardKeyNumRanges);
+            } catch (e) {
+                if (duration <= this.splitPointExpirationSecs) {
+                    // Ignore errors if the duration of analyzeShardKey is greater than
+                    // splitPointExpirationSecs because the TTL monitor may have deleted split point
+                    // documents before numReadsByRange metrics were calculated.
+                    throw (e);
+                }
+            }
         }
 
         if (this.shouldValidateWriteDistribution(res.writeDistribution.sampleSize)) {
@@ -645,7 +676,17 @@ export const $config = extendWorkload(kBaseConfig, function($config, $super) {
                                    this.writeDistribution.percentageOfSingleWritesWithoutShardKey);
             assertWriteMetricsDiff(res.writeDistribution.percentageOfMultiWritesWithoutShardKey,
                                    this.writeDistribution.percentageOfMultiWritesWithoutShardKey);
-            assert.eq(res.writeDistribution.numWritesByRange.length, this.analyzeShardKeyNumRanges);
+            try {
+                assert.eq(res.writeDistribution.numWritesByRange.length,
+                          this.analyzeShardKeyNumRanges);
+            } catch (e) {
+                if (duration <= this.splitPointExpirationSecs) {
+                    // Ignore errors if the duration of analyzeShardKey is greater than
+                    // splitPointExpirationSecs because the TTL monitor may have deleted split point
+                    // documents before numReadsByRange metrics were calculated.
+                    throw (e);
+                }
+            }
         }
     };
 
@@ -972,9 +1013,10 @@ export const $config = extendWorkload(kBaseConfig, function($config, $super) {
         assert.eq(res.cursor.id, 0, res);
         assert.eq(res.cursor.firstBatch.length, 1, res);
         const metrics = res.cursor.firstBatch[0].metrics;
+        const duration = res.cursor.firstBatch[0].duration;
         print("Doing final validation of read and write distribution metrics " +
               tojson(this.truncateAnalyzeShardKeyResponseForLogging(metrics)));
-        this.assertReadWriteDistributionMetrics(metrics, true /* isFinal */);
+        this.assertReadWriteDistributionMetrics(metrics, true /* isFinal */, duration);
 
         print("Listing sampled queries " +
               tojsononeline({lastNumSampledQueries: this.previousNumSampledQueries}));
@@ -1018,18 +1060,20 @@ export const $config = extendWorkload(kBaseConfig, function($config, $super) {
             cmdObj.hasOwnProperty("sampleRate") || cmdObj.hasOwnProperty("sampleSize");
 
         print("Starting analyzeShardKey state " + tojsononeline(cmdObj));
+        const startTime = Date.now();
         const res = db.adminCommand(cmdObj);
+        const elapsedTime = Date.now() - startTime;
         try {
             assert.commandWorked(res);
             print("Metrics: " +
                   tojsononeline({res: this.truncateAnalyzeShardKeyResponseForLogging(res)}));
             this.assertKeyCharacteristicsMetrics(res, isSampling);
-            this.assertReadWriteDistributionMetrics(res, false /* isFinal */);
+            this.assertReadWriteDistributionMetrics(res, false /* isFinal */, elapsedTime);
             // Persist the metrics so we can do the final validation during teardown.
-            assert.commandWorked(
-                db[this.metricsCollName].update({_id: this.metricsDocId},
-                                                {_id: this.metricsDocId, collName, metrics: res},
-                                                true /* upsert */));
+            assert.commandWorked(db[this.metricsCollName].update(
+                {_id: this.metricsDocId},
+                {_id: this.metricsDocId, collName, metrics: res, duration: elapsedTime},
+                true /* upsert */));
         } catch (e) {
             if (!this.isAcceptableAnalyzeShardKeyError(res)) {
                 throw e;

@@ -70,8 +70,7 @@ feature_flags:
     featureFlagQueryStatsDataBearingNodes:
       description: "Feature flag for enabling aggregation of queryStats from data bearing nodes."
       cpp_varname: gFeatureFlagQueryStatsDataBearingNodes
-      default: true
-      version: 8.0
+      default: false
       shouldBeFCVGated: true
 
     featureFlagSearchBatchSizeLimit:
@@ -84,8 +83,7 @@ feature_flags:
       description: "Feature flag for enabling support for $out to write to time-series collections"
       cpp_varname: gFeatureFlagAggOutTimeseries
       default: true
-      version: 7.1
-      shouldBeFCVGated: true
+      shouldBeFCVGated: false
 
     featureFlagQuerySettings:
       description: "Feature flag for enabling persistent query settings"

@@ -69,44 +69,85 @@ list<intrusive_ptr<DocumentSource>> DocumentSourceShardedDataDistribution::creat
 
     static const BSONObj kAllCollStatsObj =
         fromjson("{$_internalAllCollectionStats: {stats: {storageStats: {}}}}}");
+
+    // TODO (SERVER-92596): Remove `"storageStats.numOrphanDocs": 1` once the bug is fixed.
     static const BSONObj kProjectObj = fromjson(R"({
          $project: {
              "ns": 1,
              "shard": 1,
-             "storageStats.count": 1, 
-             "storageStats.numOrphanDocs": 1, 
-             "storageStats.avgObjSize": 1 
+             "storageStats.numOrphanDocs": 1,
+             "count": {$ifNull: ["$storageStats.count", 0]}, 
+             "avgObjSize": {$ifNull: ["$storageStats.avgObjSize", 0]}, 
+             "numOrphanDocs": {$ifNull: ["$storageStats.numOrphanDocs", 0]}, 
+             "timeseries": {$ifNull: ["$storageStats.timeseries", null]}
          }
      })");
+    // We check if the collection is a timeseries in order to use the correct fields.
     static const BSONObj kGroupObj = fromjson(R"({
         $group: {
             _id: "$ns",
             shards: {
                 $push: {
-                    $let: {
-                        vars: {
-                            nOwnedDocs: {
-                                $subtract: [
-                                    "$storageStats.count",
-                                    "$storageStats.numOrphanDocs"
-                                ]
-                            }
+                    $cond: {
+                        if: {
+                            $eq: ["$timeseries", null]
                         },
-                        in: {
-                            shardName: "$shard",
-                            numOrphanedDocs: "$storageStats.numOrphanDocs",
-                            numOwnedDocuments: "$$nOwnedDocs",
-                            ownedSizeBytes: {
-                                $multiply: [
-                                    "$storageStats.avgObjSize",
-                                    "$$nOwnedDocs"
-                                ]
-                            },
-                            orphanedSizeBytes: {
-                                $multiply: [
-                                    "$storageStats.avgObjSize",
-                                    "$storageStats.numOrphanDocs"
-                                ]
+                        then: {
+                            $let: {
+                                vars: {
+                                    nOwnedDocs: {
+                                        $subtract: [
+                                            "$count",
+                                            "$numOrphanDocs"
+                                        ]
+                                    }
+                                },
+                                in: {
+                                    shardName: "$shard",
+                                    numOrphanedDocs: "$numOrphanDocs",
+                                    numOwnedDocuments: "$$nOwnedDocs",
+                                    ownedSizeBytes: {
+                                        $multiply: [
+                                            "$avgObjSize",
+                                            "$$nOwnedDocs"
+                                        ]
+                                    },
+                                    orphanedSizeBytes: {
+                                        $multiply: [
+                                            "$avgObjSize",
+                                            "$numOrphanDocs"
+                                        ]
+                                    }
+                                }
+                            }
+                        }, 
+                        else: {
+                            $let: {
+                                vars: {
+                                    nOwnedDocs: {
+                                        $subtract: [
+                                            "$timeseries.bucketCount",
+                                            "$numOrphanDocs"
+                                        ]
+                                    }
+                                },
+                                in: {
+                                    shardName: "$shard",
+                                    numOrphanedDocs: "$numOrphanDocs",
+                                    numOwnedDocuments: "$$nOwnedDocs",
+                                    ownedSizeBytes: {
+                                        $multiply: [
+                                            "$timeseries.avgBucketSize",
+                                            "$$nOwnedDocs"
+                                        ]
+                                    },
+                                    orphanedSizeBytes: {
+                                        $multiply: [
+                                            "$timeseries.avgBucketSize",
+                                            "$numOrphanDocs"
+                                        ]
+                                    }
+                                }
                             }
                         }
                     }
@@ -114,7 +155,7 @@ list<intrusive_ptr<DocumentSource>> DocumentSourceShardedDataDistribution::creat
             }
         }
     })");
-    static const BSONObj kLookupObj = fromjson(R"({
+    static const BSONObj kConfigCollectionsLookupObj = fromjson(R"({
          $lookup: {
             from: {
                 db: "config",
@@ -125,21 +166,73 @@ list<intrusive_ptr<DocumentSource>> DocumentSourceShardedDataDistribution::creat
             as: "matchingShardedCollection"
         }
     })");
-    static const BSONObj kMatchObj = fromjson("{$match: {matchingShardedCollection: {$ne: []}}}");
+    static const BSONObj kMatchObj = fromjson(R"({
+        $match: {
+            $and: [{
+                matchingShardedCollection: {$ne: []}
+            },
+            {
+                'matchingShardedCollection.unsplittable': {$ne: true}
+            }]
+            }
+    })");
+    // Adding a new field matchingShards that contains the shards that have a chunk
+    static const BSONObj kConfigChunksLookupObj = fromjson(R"({
+        "$lookup": {
+            "from": {
+                "db": "config",
+                "coll": "chunks"
+            },
+            "localField": "matchingShardedCollection.uuid",
+            "foreignField": "uuid",
+            "pipeline" : [
+                { "$project": { "shard": 1 } },
+                {
+                    "$group": {
+                        "_id": null,
+                        "shards": {
+                            "$addToSet": "$shard"
+                        }
+                    }
+                }
+            ],
+            "as": "matchingShards"
+        }    
+    })");
+
+    // We get rid of the db primary shards that do not contain a chunk and don't have any orphaned
+    // docs
     static const BSONObj kFinalProjectObj = fromjson(R"({
         $project: {
             _id: 0,
             ns: "$_id",
-            shards: "$shards"
+            shards: {
+                $filter: {
+                    input: "$shards",
+                    as: "shard",
+                    cond: {
+                        $or: [
+                            {
+                                $in: ["$$shard.shardName", {$first: "$matchingShards.shards"}]
+                            },
+                            {
+                                $ne: ["$$shard.numOrphanedDocs", 0]
+                            }
+                        ]
+
+                    }
+                }
+            }
         }
     })");
-
-    return {DocumentSourceInternalAllCollectionStats::createFromBsonInternal(
-                kAllCollStatsObj.firstElement(), expCtx),
-            DocumentSourceProject::createFromBson(kProjectObj.firstElement(), expCtx),
-            DocumentSourceGroup::createFromBson(kGroupObj.firstElement(), expCtx),
-            DocumentSourceLookUp::createFromBson(kLookupObj.firstElement(), expCtx),
-            DocumentSourceMatch::createFromBson(kMatchObj.firstElement(), expCtx),
-            DocumentSourceProject::createFromBson(kFinalProjectObj.firstElement(), expCtx)};
+    return {
+        DocumentSourceInternalAllCollectionStats::createFromBsonInternal(
+            kAllCollStatsObj.firstElement(), expCtx),
+        DocumentSourceProject::createFromBson(kProjectObj.firstElement(), expCtx),
+        DocumentSourceGroup::createFromBson(kGroupObj.firstElement(), expCtx),
+        DocumentSourceLookUp::createFromBson(kConfigCollectionsLookupObj.firstElement(), expCtx),
+        DocumentSourceMatch::createFromBson(kMatchObj.firstElement(), expCtx),
+        DocumentSourceLookUp::createFromBson(kConfigChunksLookupObj.firstElement(), expCtx),
+        DocumentSourceProject::createFromBson(kFinalProjectObj.firstElement(), expCtx)};
 }
 }  // namespace mongo

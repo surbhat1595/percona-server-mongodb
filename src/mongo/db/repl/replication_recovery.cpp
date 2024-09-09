@@ -236,16 +236,10 @@ public:
     void push(OperationContext*,
               Batch::const_iterator,
               Batch::const_iterator,
-              boost::optional<std::size_t> bytes) final {
+              boost::optional<const Cost&> cost) final {
         MONGO_UNREACHABLE;
     }
-    void waitForSpace(OperationContext*, std::size_t, std::size_t) final {
-        MONGO_UNREACHABLE;
-    }
-    std::size_t getMaxSize() const final {
-        MONGO_UNREACHABLE;
-    }
-    std::size_t getMaxCount() const final {
+    void waitForSpace(OperationContext*, const Cost&) final {
         MONGO_UNREACHABLE;
     }
     std::size_t getSize() const final {
@@ -970,7 +964,7 @@ void ReplicationRecoveryImpl::_truncateOplogIfNeededAndThenClearOplogTruncateAft
 Timestamp ReplicationRecoveryImpl::_adjustStartPointIfNecessary(OperationContext* opCtx,
                                                                 Timestamp startPoint) {
     // Set up read on oplog collection.
-    AutoGetOplog oplogRead(opCtx, OplogAccessMode::kRead);
+    AutoGetOplogFastPath oplogRead(opCtx, OplogAccessMode::kRead);
     const auto& oplogCollection = oplogRead.getCollection();
     if (!oplogCollection) {
         LOGV2_FATAL_NOTRACE(

@@ -3372,6 +3372,74 @@ TEST_F(BSONColumnTest, RepeatInvalidString) {
     verifyDecompression(binData, {elem, elemInvalid, elemInvalid});
 }
 
+
+TEST_F(BSONColumnTest, BinDataLargerThan16WithNonZeroDelta) {
+    // This interleaved binary is invalid. It has a reference object of type BinData that is larger
+    // than 16 bytes, followed 7 simple8b blocks with 7502 elements inside. The delta block contains
+    // all zeroes or missing elements except for a non-zero element in the last place. This should
+    // produce an error when being decompressed because we cannot apply a delta to a bindata larger
+    // than 16 bytes. This specific binary produces incorrect results when decompressed with a
+    // in64_t simple8b decoder, and must use a int128_t simple8b decoder. We will verify that both
+    // the block-based and iterative implementation throw an error.
+    StringData b64Encoded =
+        "8SwAAAAFACAAAAAAf/4BCLHOzwAG/////////2l/AAsACgBbAAEAegATaX8Ahn8A//gj/wD///8h/wH+AADf+CP/AP///yH/Af4A/6mX/2Z/AH/4AH9/Mn9gZXQAgGj/////AH8AAAA="_sd;
+    std::string interleavedBinary = base64::decode(b64Encoded);
+
+    // Verify block-based interleaved decompression throws an error.
+    {
+        boost::intrusive_ptr<ElementStorage> allocator = new ElementStorage();
+        BSONColumnBlockBased colBlockBased{interleavedBinary.data(),
+                                           static_cast<size_t>(interleavedBinary.size())};
+        std::vector<BSONElement> collection;
+        ASSERT_THROWS_CODE(colBlockBased.decompress<BSONElementMaterializer>(collection, allocator),
+                           DBException,
+                           8690000);
+    }
+
+    // Verify block-based path decompression throws an error.
+    {
+        boost::intrusive_ptr<ElementStorage> allocator = new ElementStorage();
+        BSONColumnBlockBased colBlockBased{interleavedBinary.data(),
+                                           static_cast<size_t>(interleavedBinary.size())};
+        std::vector<BSONElement> collection;
+        // Get the field in the object (the field name is the empty string)
+        std::vector<std::pair<TestPath, std::vector<BSONElement>&>> testPaths{
+            {TestPath{{""}}, collection}};
+        ASSERT_THROWS_CODE(
+            colBlockBased.decompress<BSONElementMaterializer>(allocator, std::span(testPaths)),
+            DBException,
+            8609800);
+    }
+
+    // Build a similar BSONColumn that has the delta block not in interleaved mode.
+    BufBuilder scalarBinary;
+    {
+        BSONObj obj{interleavedBinary.data() + 1};
+        BSONElement elem = obj.firstElement();
+
+        // Append the BinData literal.
+        appendLiteral(scalarBinary, elem);
+        // This is the control byte and delta block with 7502 elements.
+        scalarBinary.appendBuf(interleavedBinary.data() + 45, (102 - 45));
+        appendEOO(scalarBinary);
+    }
+
+    // Verify the iterative implementation throws an error.
+    BSONColumn col{scalarBinary.buf(), static_cast<size_t>(scalarBinary.len())};
+    ASSERT_THROWS_CODE(std::distance(col.begin(), col.end()), DBException, 8412601);
+
+    // Verify non-interleaved block-based decompression throws an error.
+    {
+        boost::intrusive_ptr<ElementStorage> allocator = new ElementStorage();
+        BSONColumnBlockBased colBlockBased{scalarBinary.buf(),
+                                           static_cast<size_t>(scalarBinary.len())};
+        std::vector<BSONElement> collection;
+        ASSERT_THROWS_CODE(colBlockBased.decompress<BSONElementMaterializer>(collection, allocator),
+                           DBException,
+                           8609800);
+    }
+}
+
 TEST_F(BSONColumnTest, EmptyStringAfterUnencodable) {
     std::vector<BSONElement> elems = {createElementString("\0"_sd), createElementString(""_sd)};
 
@@ -7498,6 +7566,33 @@ TEST_F(BSONColumnTest, InterleavedFullSkipAfterObjectSkip) {
     verifyDecompressPathFast(binData, elems, testPaths);
 }
 
+TEST_F(BSONColumnTest, InterleavedEmptySequence) {
+    auto elem = createElementObj(BSON("x" << 1 << "y" << 2));
+
+    BufBuilder interleavedBinary;
+    appendInterleavedStart(interleavedBinary, elem.Obj());
+    appendEOO(interleavedBinary);
+    appendEOO(interleavedBinary);
+
+    BSONColumnBlockBased colBlockBased{interleavedBinary.buf(),
+                                       static_cast<size_t>(interleavedBinary.len())};
+    boost::intrusive_ptr<ElementStorage> allocator = new ElementStorage();
+    std::vector<BSONElement> collection;
+    std::vector<std::pair<TestPath, std::vector<BSONElement>&>> testPaths{
+        {TestPath{{"x"}}, collection}};
+    ASSERT_THROWS_CODE(colBlockBased.decompress<BSONElementMaterializer>(collection, allocator),
+                       DBException,
+                       8625732);
+    ASSERT_THROWS_CODE(
+        colBlockBased.decompress<BSONElementMaterializer>(allocator, std::span(testPaths)),
+        DBException,
+        8625730);
+
+    BSONColumn col(createBSONColumn(interleavedBinary.buf(), interleavedBinary.len()));
+    ASSERT_THROWS_CODE(std::distance(col.begin(), col.end()), DBException, 9232700);
+}
+
+
 TEST_F(BSONColumnTest, NonZeroRLEInFirstBlockAfterSimple8bBlocks) {
     int64_t value = 1;
 
@@ -8761,7 +8856,9 @@ TEST_F(BSONColumnTest, FuzzerDiscoveredEdgeCases) {
         "AQAAAAAjAAAAHAkALV3DRTINAACAd/ce/////xwJAC33Hv////+/AA=="_sd,
         // Unencodable literal for 128bit types, prevEncoded128 needs to be set to none by
         // compressor.
-        "DQAUAAAAAAgAAIDx///++AAAAAMAAAAIAACA8f///vj/AAAA"_sd};
+        "DQAUAAAAAAgAAIDx///++AAAAAMAAAAIAACA8f///vj/AAAA"_sd,
+        // Merge of interleaved objects that results in repeated fieldname
+        "fwB/APEPAAAA/wD/////KwAGAAALAJ0qnZ0AAICx87tAc/+/fgQABwAAAP8AAICx88BEjAi/AICxAAIAACQAFgAA"_sd};
 
     for (auto&& binaryBase64 : binariesBase64) {
         auto binary = base64::decode(binaryBase64);
@@ -8770,8 +8867,13 @@ TEST_F(BSONColumnTest, FuzzerDiscoveredEdgeCases) {
         // This is required to be able to verify these binary blobs.
         BSONColumnBuilder builder;
         BSONColumn column(binary.data(), binary.size());
-        for (auto&& elem : column) {
-            builder.append(elem);
+        try {
+            for (auto&& elem : column) {
+                builder.append(elem);
+            }
+        } catch (const DBException& ex) {
+            ASSERT_NOT_OK(ex.toStatus());
+            continue;
         }
         BSONBinData finalized = builder.finalize();
         ASSERT_EQ(binary.size(), finalized.length);
@@ -8818,6 +8920,12 @@ TEST_F(BSONColumnTest, BlockFuzzerDiscoveredEdgeCases) {
         // Blockbased API didn't update last to EOO when Iterative API did for interleaved data
         // (SERVER-89612).
         "8hQAAAAF+P//////FCgAAAAAAAAABgAIAACBKg7/+///////MP8V/3EAAACBeHFYDAAA/3RhZ3P//wEAAAA="_sd,
+        // Blockbased API doesn't fail an interleaved mode that has leftover data in some decoders
+        // while the iterative version does (SERVER-92150)
+        "8jIAAAAHVvkCAAEAAAAAAgABAAAAAAxTdGNydHVfaWQAAQAAAAABMg5faWQAAQAAAAAA/wD/AP8Aj4+Pj4+Pj4+Pj4+Pj4+Pj4//AP8A/wD/AP8A/wD/AP8A/wCPj4+Pj4+Pj4+PAAD/AP8A/wD/AP8A/wCPj4+Pj4+Pj49vj4+Pj4+Pj/8A/041j4+Pj4+Pj4+Pj48BAFXeV6t2AI+Pj4+Pj4+Pj4+Pj8SPj4+Pj4+Pj4//AP8A/wD/AP8A/wAA"_sd,
+        // Empty interleaved mode produces an assert in block-based API but not iterative
+        // (SERVER-92327)
+        "EAAAYTsB8gcAAAD/AAAAgsj//////////wEH//hB/7KyAP+AAP//AAA="_sd,
     };
 
     for (auto&& binaryBase64 : binariesBase64) {

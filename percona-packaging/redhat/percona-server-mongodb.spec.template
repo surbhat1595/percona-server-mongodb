@@ -422,6 +422,16 @@ chgrp percona-telemetry /usr/local/percona/telemetry_uuid &>/dev/null || :
 chmod 664 /usr/local/percona/telemetry_uuid &>/dev/null || :
 rm -f /tmp/call-home.sh
 
+cat << EOF
+** Join Percona Squad! **
+
+Participate in monthly SWAG raffles, get early access to new product features,
+invite-only ”ask me anything” sessions with database performance experts.
+
+Interested? Fill in the form at https://squad.percona.com/mongodb
+
+EOF
+
 %post mongos
 %if 0%{?rhel} > 7
 install -d -m 2775 -o mongod -g percona-telemetry /usr/local/percona/telemetry/psmdbs

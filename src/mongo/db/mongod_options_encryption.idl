@@ -110,6 +110,16 @@ configs:
         arg_vartype: String
         requires: 'security.vault.serverName'
 
+    'security.vault.checkMaxVersions':
+        description: >-
+            Before writing a new secret on a Vault server, verify that the
+            present number of secret versions has not reached the value of the
+            `max_vesions` parameter on the secret or the secrets engine.
+            Default: `true`
+        short_name: vaultCheckMaxVersions
+        arg_vartype: Bool
+        requires: 'security.vault.serverName'
+
     'security.vault.disableTLSForTesting':
         description: >-
             Disable using TLS for Vault server connections
@@ -213,7 +223,7 @@ configs:
             See `security.kmip.keyStatePollingSeconds` for key state polling.
             Default: `true`
         short_name: kmipActivateKeys
-        arg_vartype: Switch
+        arg_vartype: Bool
         requires: 'security.kmip.serverName'
 
     'security.kmip.keyStatePollingSeconds':

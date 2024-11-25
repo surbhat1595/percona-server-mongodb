@@ -2,9 +2,7 @@
 #
 PATH="${PATH}:/usr/local/bin:/usr/bin:/usr/local/sbin:/usr/sbin"
 #
-touch /var/run/mongod.pid
 touch /var/log/@@LOGDIR@@/mongod.{stdout,stderr}
-chown mongod:mongod /var/run/mongod.pid
 chown -R mongod:mongod /var/log/@@LOGDIR@@
 #
 KTHP=/sys/kernel/mm/transparent_hugepage
@@ -15,6 +13,10 @@ print_error(){
   echo " * Error disabling Transparent Huge pages, exiting"
   exit 1
 }
+if grep -q "pidFilePath" /etc/mongod.conf; then
+  touch /var/run/mongod.pid
+  chown mongod:mongod /var/run/mongod.pid
+fi
 #
 . /etc/@@LOCATION@@/mongod
 DAEMON_OPTS="${OPTIONS}"

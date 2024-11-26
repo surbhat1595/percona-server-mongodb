@@ -216,6 +216,12 @@ get_system(){
         ARCH=$(echo $(uname -m) | sed -e 's:i686:i386:g')
         OS_NAME="el$RHEL"
         OS="rpm"
+    elif [ -f /etc/amazon-linux-release ]; then
+        GLIBC_VER_TMP="$(rpm glibc -qa --qf %{VERSION})"
+        RHEL=$(rpm --eval %amzn)
+        ARCH=$(echo $(uname -m) | sed -e 's:i686:i386:g')
+        OS_NAME="amzn$RHEL"
+        OS="rpm"
     else
         GLIBC_VER_TMP="$(dpkg-query -W -f='${Version}' libc6 | awk -F'-' '{print $1}')"
         ARCH=$(uname -m)
@@ -392,15 +398,16 @@ install_deps() {
         yum -y install gcc-toolset-9 gcc-c++
         yum -y install gcc-toolset-11-dwz gcc-toolset-11-elfutils
         yum -y install python38 python38-devel python38-pip
- ln -sf /usr/bin/scons-3 /usr/bin/scons
+        ln -sf /usr/bin/scons-3 /usr/bin/scons
         /usr/bin/pip3.8 install --user typing pyyaml regex Cheetah3
-      elif [ x"$RHEL" = x9 ]; then
+      elif [ x"$RHEL" = x9  -o x"$RHEL" = x2023 ]; then
         dnf config-manager --enable ol9_codeready_builder
 
         yum -y install oracle-epel-release-el9
         yum -y install bzip2-devel libpcap-devel snappy-devel gcc gcc-c++ rpm-build rpmlint
         yum -y install cmake cyrus-sasl-devel make openssl-devel zlib-devel libcurl-devel git
         yum -y install python3 python3-scons python3-pip python3-devel
+        yum -y install python3 python3-pip python3-devel
         yum -y install redhat-rpm-config which e2fsprogs-devel expat-devel lz4-devel
         yum -y install openldap-devel krb5-devel xz-devel
         /usr/bin/pip install --user typing pyyaml regex Cheetah3
@@ -668,13 +675,7 @@ build_rpm(){
         source /opt/rh/gcc-toolset-11/enable
       fi
     fi
-    RHEL=$(rpm --eval %rhel)
-    ARCH=$(echo $(uname -m) | sed -e 's:i686:i386:g')
-    if [ "x${RHEL}" == "x9" ]; then
-        pip install --upgrade pip
-        pip install --user -r etc/pip/dev-requirements.txt
-        pip install --user -r etc/pip/evgtest-requirements.txt
-    elif [ "x${RHEL}" == "x9" ]; then
+    if [ "x${RHEL}" == "x9" -o "x${RHEL}" == "x2023" ]; then
         pip install --upgrade pip
         pip install --user -r etc/pip/dev-requirements.txt
         pip install --user -r etc/pip/evgtest-requirements.txt
@@ -1145,14 +1146,7 @@ build_tarball(){
 
     # Patch needed libraries
     cd "${PSMDIR_ABS}/${PSMDIR}"
-#    if [ ! -d lib/private ]; then
-#        mkdir -p lib/private
-#    fi
-#    if [[ "x${FIPSMODE}" == "x1" ]]; then
-        LIBLIST=""
-#    else
-#        LIBLIST="libsasl2.so.3 libcrypto.so libssl.so librtmp.so libssl3.so libsmime3.so libnss3.so libnssutil3.so libplds4.so libplc4.so libnspr4.so liblzma.so libidn.so"
-#    fi
+    LIBLIST=""
     DIRLIST="bin"
 
     LIBPATH=""

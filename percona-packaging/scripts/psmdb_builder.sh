@@ -407,7 +407,10 @@ install_deps() {
         yum -y install python3 python3-pip python3-devel
         yum -y install redhat-rpm-config which e2fsprogs-devel expat-devel lz4-devel
         yum -y install openldap-devel krb5-devel xz-devel
+        yum -y install python3-setuptools
+        /usr/bin/pip install --upgrade pip setuptools
         /usr/bin/pip install --user typing pyyaml regex Cheetah3
+        
       fi
       wget https://curl.se/download/curl-7.77.0.tar.gz -O curl-7.77.0.tar.gz
       tar -xvzf curl-7.77.0.tar.gz

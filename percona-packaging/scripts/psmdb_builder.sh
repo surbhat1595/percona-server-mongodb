@@ -676,6 +676,7 @@ build_rpm(){
     fi
     if [ "x${RHEL}" == "x9" -o "x${RHEL}" == "x2023" ]; then
         pip install --upgrade pip
+        pip install --user  requirements_parser
         pip install --user -r etc/pip/dev-requirements.txt
         pip install --user -r etc/pip/evgtest-requirements.txt
     else

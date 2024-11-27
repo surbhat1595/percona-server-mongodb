@@ -316,7 +316,6 @@ aws_sdk_build(){
             cd build
             CMAKE_CMD="cmake"
             if [ -f /etc/redhat-release ]; then
-                RHEL=$(rpm --eval %rhel)
                 if [ x"$RHEL" = x7 ]; then
                     CMAKE_CMD="cmake3"
                 fi
@@ -350,7 +349,6 @@ install_deps() {
     fi
     CURPLACE=$(pwd)
     if [ "x$OS" = "xrpm" ]; then
-      RHEL=$(rpm --eval %rhel)
       if [ "$RHEL" -eq 7 ]; then
        sed -i 's/mirrorlist/#mirrorlist/g' /etc/yum.repos.d/CentOS-*
        sed -i 's|#\s*baseurl=http://mirror.centos.org|baseurl=http://vault.centos.org|g' /etc/yum.repos.d/CentOS-*
@@ -366,7 +364,6 @@ install_deps() {
         yum clean all
         yum install -y patchelf
       fi
-      RHEL=$(rpm --eval %rhel)
       if [ x"$RHEL" = x7 ]; then
         yum -y install epel-release
         yum -y install rpmbuild rpm-build libpcap-devel gcc make cmake gcc-c++ openssl-devel
@@ -985,8 +982,6 @@ build_tarball(){
     fi
     #
     if [ -f /etc/redhat-release ]; then
-    #export OS_RELEASE="centos$(lsb_release -sr | awk -F'.' '{print $1}')"
-        RHEL=$(rpm --eval %rhel)
         if [ x"$RHEL" = x7 ]; then
             if [ -f /opt/rh/devtoolset-9/enable ]; then
               source /opt/rh/devtoolset-9/enable
@@ -1054,7 +1049,6 @@ build_tarball(){
         pip install --user -r etc/pip/evgtest-requirements.txt
     fi
     if [ -f /etc/redhat-release ]; then
-        RHEL=$(rpm --eval %rhel)
         if [ $RHEL = 7 -o $RHEL = 8 ]; then
             if [ -d aws-sdk-cpp ]; then
                 rm -rf aws-sdk-cpp

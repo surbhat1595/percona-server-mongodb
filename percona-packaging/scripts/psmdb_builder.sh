@@ -679,6 +679,7 @@ build_rpm(){
         pip install --user  requirements_parser
         pip install --user -r etc/pip/dev-requirements.txt
         pip install --user -r etc/pip/evgtest-requirements.txt
+        pip install --user -r etc/pip/compile-requirements.txt
     else
         pip3.8 install --upgrade pip
         pip3.8 install --user -r etc/pip/dev-requirements.txt

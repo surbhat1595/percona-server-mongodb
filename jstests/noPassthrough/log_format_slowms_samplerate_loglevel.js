@@ -399,8 +399,9 @@ function runLoggingTests({db, slowMs, logLevel, sampleRate, enableQueryStats = f
         const cmdObj = originatingCommands[cmdName];
         const cmdRes = assert.commandWorked(db.runCommand(cmdObj));
         const expectedCountOfDocuments = 14;
-        // Make sure queryHash field is present of getMore logs following a find command.
-        const extra = cmdName === "find" ? {queryHash: ""} : {};
+        // Make sure 'planCacheShapeHash' field is present of "getMore" logs following a find
+        // command.
+        const extra = cmdName === "find" ? {planCacheShapeHash: ""} : {};
 
         testList.push({
             test: function(db) {
@@ -480,6 +481,11 @@ for (let testDB of [shardDB, mongosDB]) {
     unlogged = getUnloggedTests(testsRun, logLines);
     assert.eq(unlogged.length, 0, unlogged);
 
-    // TODO SERVER-93216: Add an assertion for enableQueryStats: true
+    // Test with query stats enabled. This should only affect the log format in the mongos case,
+    // but we'll run against both the mongos and the shard to make sure.
+    [testsRun, logLines] = runLoggingTests(
+        {db: testDB, slowMs: -1, logLevel: 0, sampleRate: 1.0, enableQueryStats: true});
+    unlogged = getUnloggedTests(testsRun, logLines);
+    assert.eq(unlogged.length, 0, unlogged);
 }
 st.stop();

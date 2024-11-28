@@ -163,12 +163,28 @@ server_parameters:
         description: >-
             Controls the minimum duration of resharding operations, and allows transactions and 
             retryable writes started after the current resharding operation to complete within the 
-            period defined by the parameter.
+            period defined by the parameter. If this value is lowered then you will likely want to lower 
+            reshardingDelayBeforeRemainingOperationTimeQueryMillis as well.
         set_at: [startup, runtime]
         cpp_vartype: AtomicWord<int>
         cpp_varname: gReshardingMinimumOperationDurationMillis
         default:
             expr: 5 * 60 * 1000
+        validator:
+            gte: 0
+        redact: false
+    
+    reshardingDelayBeforeRemainingOperationTimeQueryMillis:
+        description: >-
+            Initial delay before querying for remaining operation time from recipient shards.
+            The delay allows for applying more oplog entries before calculating time remaining, giving
+            a more accurate value.
+            Note we will have this delay every time we happen to have a failover occur.
+        set_at: [startup, runtime]
+        cpp_vartype: AtomicWord<int>
+        cpp_varname: gReshardingDelayBeforeRemainingOperationTimeQueryMillis
+        default:
+            expr: 30 * 1000
         validator:
             gte: 0
         redact: false

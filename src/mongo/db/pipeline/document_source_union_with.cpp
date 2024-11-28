@@ -91,11 +91,10 @@ std::unique_ptr<Pipeline, PipelineDeleter> buildPipelineFromViewDefinition(
     opts.optimize = !resolvedNs.pipeline.empty();
     opts.validator = validatorCallback;
 
+    auto newExpCtx = expCtx->copyForSubPipeline(expCtx->ns, resolvedNs.uuid);
+    newExpCtx->inUnionWith = true;
     return Pipeline::makePipelineFromViewDefinition(
-        expCtx->copyForSubPipeline(expCtx->ns, resolvedNs.uuid),
-        resolvedNs,
-        std::move(currentPipeline),
-        opts);
+        newExpCtx, resolvedNs, std::move(currentPipeline), opts);
 }
 
 }  // namespace
@@ -107,7 +106,6 @@ DocumentSourceUnionWith::DocumentSourceUnionWith(
     if (!_pipeline->getContext()->ns.isOnInternalDb()) {
         globalOpCounters.gotNestedAggregate();
     }
-    _pipeline->getContext()->inUnionWith = true;
 }
 
 DocumentSourceUnionWith::DocumentSourceUnionWith(
@@ -268,8 +266,18 @@ DocumentSource::GetNextResult DocumentSourceUnionWith::doGetNext() {
             // Attach query settings to the '_pipeline->getContext()' by copying them from the
             // parent query ExpressionContext.
             _pipeline->getContext()->setQuerySettingsIfNotPresent(pExpCtx->getQuerySettings());
+
+            LOGV2_DEBUG(9497002,
+                        5,
+                        "$unionWith before pipeline prep: ",
+                        "pipeline"_attr = _pipeline->serializeToBson());
             _pipeline =
                 pExpCtx->mongoProcessInterface->preparePipelineForExecution(_pipeline.release());
+            LOGV2_DEBUG(9497003,
+                        5,
+                        "$unionWith POST pipeline prep: ",
+                        "pipeline"_attr = _pipeline->serializeToBson());
+
             _executionState = ExecutionProgress::kIteratingSubPipeline;
         } catch (const ExceptionFor<ErrorCodes::CommandOnShardedViewNotSupportedOnMongod>& e) {
             _pipeline = buildPipelineFromViewDefinition(

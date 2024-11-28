@@ -152,6 +152,7 @@ MONGO_FAIL_POINT_DEFINE(pauseAfterInsertCoordinatorDoc);
 MONGO_FAIL_POINT_DEFINE(pauseBeforeCTHolderInitialization);
 
 const std::string kReshardingCoordinatorActiveIndexName = "ReshardingCoordinatorActiveIndex";
+const int kReshardingNumInitialChunksDefault = 90;
 const Backoff kExponentialBackoff(Seconds(1), Milliseconds::max());
 const WriteConcernOptions kMajorityWriteConcern{
     WriteConcernOptions::kMajority, WriteConcernOptions::SyncMode::UNSET, Seconds(0)};
@@ -1225,7 +1226,7 @@ ReshardingCoordinatorExternalStateImpl::calculateParticipantShardsAndChunks(
     } else {
         int numInitialChunks = coordinatorDoc.getNumInitialChunks()
             ? *coordinatorDoc.getNumInitialChunks()
-            : cm.numChunks();
+            : kReshardingNumInitialChunksDefault;
 
         ShardKeyPattern shardKey(coordinatorDoc.getReshardingKey());
         const auto tempNs = coordinatorDoc.getTempReshardingNss();
@@ -1842,6 +1843,7 @@ ExecutorFuture<void> ReshardingCoordinator::_commitAndFinishReshardOperation(
 
 SemiFuture<void> ReshardingCoordinator::run(std::shared_ptr<executor::ScopedTaskExecutor> executor,
                                             const CancellationToken& stepdownToken) noexcept {
+    getObserver()->reshardingCoordinatorRunCalled();
     pauseBeforeCTHolderInitialization.pauseWhileSet();
 
     auto abortCalled = [&] {
@@ -2405,7 +2407,8 @@ void ReshardingCoordinator::_startCommitMonitor(
         _coordinatorDoc.getSourceNss(),
         resharding::extractShardIdsFromParticipantEntries(_coordinatorDoc.getRecipientShards()),
         **executor,
-        _ctHolder->getCommitMonitorToken());
+        _ctHolder->getCommitMonitorToken(),
+        resharding::gReshardingDelayBeforeRemainingOperationTimeQueryMillis.load());
 
     _commitMonitorQuiesced = _commitMonitor->waitUntilRecipientsAreWithinCommitThreshold()
                                  .thenRunOn(**executor)

@@ -52,6 +52,8 @@
 #include "mongo/s/query/document_source_merge_cursors.h"
 #include "mongo/util/assert_util.h"
 
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kQuery
+
 namespace mongo {
 MONGO_FAIL_POINT_DEFINE(searchReturnEofImmediately);
 
@@ -64,6 +66,18 @@ void prepareSearchPipelineLegacyExecutor(Pipeline* pipeline, bool applyShardFilt
         auto desugaredPipeline = dynamic_cast<DocumentSourceSearch*>(searchStage.get())->desugar();
         sources.insert(sources.begin(), desugaredPipeline.begin(), desugaredPipeline.end());
         Pipeline::stitch(&sources);
+    }
+
+    // TODO: SERVER-85426 Take the below code out of the if statement--i.e., it should always
+    // happen.
+    if (enableUnionWithVectorSearch.load()) {
+        auto vectorSearchStage = pipeline->popFrontWithName(DocumentSourceVectorSearch::kStageName);
+        if (vectorSearchStage) {
+            auto desugaredPipeline =
+                dynamic_cast<DocumentSourceVectorSearch*>(vectorSearchStage.get())->desugar();
+            sources.insert(sources.begin(), desugaredPipeline.begin(), desugaredPipeline.end());
+            Pipeline::stitch(&sources);
+        }
     }
 
     auto internalSearchLookupIt = sources.begin();
@@ -215,6 +229,11 @@ parseMongotResponseCursors(std::vector<executor::TaskExecutorCursor> cursors) {
 
 InternalSearchMongotRemoteSpec planShardedSearch(
     const boost::intrusive_ptr<ExpressionContext>& expCtx, const BSONObj& searchRequest) {
+    LOGV2_DEBUG(9497008,
+                5,
+                "planShardedSearch",
+                "ns"_attr = expCtx->ns.coll(),
+                "searchRequest"_attr = searchRequest);
     // Mongos issues the 'planShardedSearch' command rather than 'search' in order to:
     // * Create the merging pipeline.
     // * Get a sortSpec.
@@ -237,7 +256,9 @@ InternalSearchMongotRemoteSpec planShardedSearch(
 
     InternalSearchMongotRemoteSpec remoteSpec(searchRequest.getOwned(),
                                               response.data["protocolVersion"_sd].Int());
-    auto parsedPipeline = mongo::Pipeline::parseFromArray(response.data["metaPipeline"], expCtx);
+    auto rawPipeline = response.data["metaPipeline"];
+    LOGV2_DEBUG(9497009, 5, "planShardedSearch response", "mergePipeline"_attr = rawPipeline);
+    auto parsedPipeline = mongo::Pipeline::parseFromArray(rawPipeline, expCtx);
     remoteSpec.setMergingPipeline(parsedPipeline->serializeToBson());
     if (response.data.hasElement("sortSpec")) {
         remoteSpec.setSortSpec(response.data["sortSpec"].Obj().getOwned());

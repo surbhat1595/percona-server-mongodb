@@ -1,6 +1,4 @@
-%if 0%{?amazon} == 1 && 0%{?amzn2023} == 1
 %global debug_package %{nil}
-%endif
 #
 %define         mongo_home /var/lib/mongo
 %define         psmdb_telemetry /usr/local/percona/telemetry/psmdb

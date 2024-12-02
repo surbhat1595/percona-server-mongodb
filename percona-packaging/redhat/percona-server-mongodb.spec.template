@@ -1,3 +1,4 @@
+%global debug_package %{nil}
 #
 %define         mongo_home /var/lib/mongo
 %define         psmdb_telemetry /usr/local/percona/telemetry/psmdb

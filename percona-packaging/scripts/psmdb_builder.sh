@@ -224,6 +224,12 @@ get_system(){
         ARCH=$(echo $(uname -m) | sed -e 's:i686:i386:g')
         OS_NAME="el$RHEL"
         OS="rpm"
+    elif [ -f /etc/amazon-linux-release ]; then
+        GLIBC_VER_TMP="$(rpm glibc -qa --qf %{VERSION})"
+        RHEL=$(rpm --eval %amzn)
+        ARCH=$(echo $(uname -m) | sed -e 's:i686:i386:g')
+        OS_NAME="amzn$RHEL"
+        OS="rpm"
     else
         GLIBC_VER_TMP="$(dpkg-query -W -f='${Version}' libc6 | awk -F'-' '{print $1}')"
         ARCH=$(uname -m)
@@ -326,7 +332,6 @@ install_deps() {
     fi
     CURPLACE=$(pwd)
     if [ "x$OS" = "xrpm" ]; then
-      RHEL=$(rpm --eval %rhel)
       if [ "$RHEL" -eq 7 ]; then
        sed -i 's/mirrorlist/#mirrorlist/g' /etc/yum.repos.d/CentOS-*
        sed -i 's|#\s*baseurl=http://mirror.centos.org|baseurl=http://vault.centos.org|g' /etc/yum.repos.d/CentOS-*
@@ -336,15 +341,11 @@ install_deps() {
       yum -y install perl
       install_mongodbtoolchain
       if [ x"$ARCH" = "xx86_64" ]; then
-        #if [ "$RHEL" -lt 9 ]; then
-        #  add_percona_yum_repo
-       # fi
         yum install -y https://repo.percona.com/yum/percona-release-latest.noarch.rpm
         percona-release enable tools testing
         yum clean all
         yum install -y patchelf
       fi
-      RHEL=$(rpm --eval %rhel)
       if [ x"$RHEL" = x7 ]; then
         yum -y install epel-release
         yum -y install rpmbuild rpm-build libpcap-devel gcc make cmake gcc-c++ openssl-devel
@@ -377,17 +378,20 @@ install_deps() {
 
         PATH=/opt/mongodbtoolchain/v4/bin/:$PATH
         /usr/bin/pip install --user typing pyyaml regex Cheetah3
-      elif [ x"$RHEL" = x9 ]; then
+      elif [ x"$RHEL" = x9 -o x"$RHEL" = x2023 ]; then
         dnf config-manager --enable ol9_codeready_builder
 
         yum -y install oracle-epel-release-el9
         yum -y install bzip2-devel libpcap-devel snappy-devel gcc gcc-c++ rpm-build rpmlint
         yum -y install cmake cyrus-sasl-devel make openssl-devel zlib-devel libcurl-devel git
         yum -y install python3 python3-scons python3-pip python3-devel
+        yum -y install python3 python3-pip python3-devel
         yum -y install redhat-rpm-config which e2fsprogs-devel expat-devel lz4-devel
         yum -y install openldap-devel krb5-devel xz-devel
-        yum -y install perl
-        /usr/bin/pip install --user typing pyyaml regex Cheetah3
+	yum -y install perl
+        /usr/bin/pip install --upgrade pip setuptools --ignore-installed
+        /usr/bin/pip install --user typing pyyaml==5.3.1 regex Cheetah3
+        
       fi
       wget https://curl.se/download/curl-7.77.0.tar.gz -O curl-7.77.0.tar.gz
       tar -xvzf curl-7.77.0.tar.gz
@@ -938,8 +942,6 @@ build_tarball(){
     fi
     #
     if [ -f /etc/redhat-release ]; then
-    #export OS_RELEASE="centos$(lsb_release -sr | awk -F'.' '{print $1}')"
-        RHEL=$(rpm --eval %rhel)
         if [ x"$RHEL" = x7 ]; then
             if [ -f /opt/rh/devtoolset-9/enable ]; then
               source /opt/rh/devtoolset-9/enable
@@ -994,7 +996,6 @@ build_tarball(){
     pip install --user -r etc/pip/dev-requirements.txt
     pip install --user -r etc/pip/evgtest-requirements.txt
     if [ -f /etc/redhat-release ]; then
-        RHEL=$(rpm --eval %rhel)
         if [ $RHEL = 7 -o $RHEL = 8 ]; then
             if [ -d aws-sdk-cpp ]; then
                 rm -rf aws-sdk-cpp
@@ -1091,14 +1092,7 @@ build_tarball(){
 
     # Patch needed libraries
     cd "${PSMDIR_ABS}/${PSMDIR}"
-#    if [ ! -d lib/private ]; then
-#        mkdir -p lib/private
-#    fi
-#    if [[ "x${FIPSMODE}" == "x1" ]]; then
-        LIBLIST=""
-#    else
-#        LIBLIST="libsasl2.so.3 libcrypto.so libssl.so librtmp.so libssl3.so libsmime3.so libnss3.so libnssutil3.so libplds4.so libplc4.so libnspr4.so liblzma.so libidn.so"
-#    fi
+    LIBLIST=""
     DIRLIST="bin"
 
     LIBPATH=""

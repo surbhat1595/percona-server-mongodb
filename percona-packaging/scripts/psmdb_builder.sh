@@ -167,6 +167,8 @@ get_sources(){
     go mod edit \
 	    -replace golang.org/x/text@v0.3.0=golang.org/x/text@v0.3.8 \
 	    -replace golang.org/x/text@v0.3.7=golang.org/x/text@v0.3.8
+    go mod edit \
+	    -replace golang.org/x/crypto@v0.25.0=golang.org/x/crypto@v0.31.0
     go mod tidy
     go mod vendor
 
